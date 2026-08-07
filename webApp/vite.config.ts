@@ -11,8 +11,9 @@ const webDownloads = path.resolve(__dirname, 'public/downloads')
 const desktopDistApp = path.resolve(__dirname, '../desktopApp/dist-app')
 
 export default defineConfig({
-  // Relative asset URLs so bundled fonts resolve via ./fonts/... (same as Electron).
-  base: './',
+  // Absolute paths work reliably behind Coolify/Traefik at domain root.
+  // Local Electron still uses its own electron-vite build (unaffected).
+  base: '/',
   plugins: [
     react(),
     serveDesktopDownload({
