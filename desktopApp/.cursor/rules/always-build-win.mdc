@@ -1,0 +1,14 @@
+---
+description: Always rebuild the Windows portable app after code changes
+alwaysApply: true
+---
+
+# Always rebuild after changes
+
+When you finish code changes in `desktopApp` that affect the Electron app:
+
+1. Run `npm run build:win` from `desktopApp` (stop any running `Image Generator` process first if packaging fails due to file locks).
+2. Confirm the portable exe at `desktopApp/dist-app/Image Generator 1.0.0.exe`.
+3. Do this even when the user did not explicitly ask for a build.
+
+Use Node from Herd when needed: `C:\Users\CDD_Tech\.config\herd\bin\nvm\v22.23.1`.

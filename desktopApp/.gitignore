@@ -1,0 +1,9 @@
+node_modules/
+out/
+dist-app/
+
+# User data — versions, templates, font cache.
+# These are generated at runtime and must NOT be deleted by git operations.
+data/versions.json
+data/.template-registry.json
+data/templates/

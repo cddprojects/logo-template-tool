@@ -1,0 +1,9 @@
+node_modules/
+desktopApp/node_modules/
+webApp/node_modules/
+desktopApp/dist-app/
+desktopApp/out/
+webApp/dist/
+webApp/public/downloads/*.exe
+.DS_Store
+*.log

@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Image Generator</title>
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com"
+    />
+
+    <!-- Inline minimal styles so the loading skeleton renders before any JS -->
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body, #root { height: 100%; background: #0d0d10; color: #e2e2e8; font-family: system-ui, -apple-system, sans-serif; }
+      #splash {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 16px;
+        background: #0d0d10; z-index: 9999;
+        transition: opacity 0.3s ease;
+      }
+      #splash.fade-out { opacity: 0; pointer-events: none; }
+      .splash-logo {
+        width: 56px; height: 56px; border-radius: 16px;
+        background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+        display: flex; align-items: center; justify-content: center;
+        font-size: 24px; font-weight: 800; color: white; letter-spacing: -1px;
+      }
+      .splash-title { font-size: 15px; font-weight: 600; color: #e2e2e8; }
+      .splash-sub { font-size: 12px; color: #6b6b80; }
+      .splash-bar {
+        width: 140px; height: 3px; background: #1e1e2d; border-radius: 99px; overflow: hidden;
+      }
+      .splash-fill {
+        height: 100%; width: 0%; background: linear-gradient(90deg, #6366f1, #8b5cf6);
+        border-radius: 99px; animation: fill 2.5s ease-out forwards;
+      }
+      @keyframes fill { 0%{width:0%} 60%{width:70%} 100%{width:92%} }
+    </style>
+  </head>
+  <body>
+    <!-- Inline splash screen — visible before any JS loads -->
+    <div id="splash">
+      <div class="splash-logo">IG</div>
+      <div class="splash-title">Image Generator</div>
+      <div class="splash-bar"><div class="splash-fill"></div></div>
+      <div class="splash-sub">Starting up…</div>
+    </div>
+
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+
+    <!-- Dismiss splash once React has mounted -->
+    <script>
+      window.__hideSplash = function() {
+        var el = document.getElementById('splash');
+        if (!el) return;
+        el.classList.add('fade-out');
+        setTimeout(function(){ el.remove(); }, 350);
+      };
+    </script>
+  </body>
+</html>

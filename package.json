@@ -1,0 +1,11 @@
+{
+  "name": "image-generator-monorepo",
+  "private": true,
+  "description": "Logo and favicon generator — desktop (Electron) and web (Vite)",
+  "scripts": {
+    "dev:desktop": "npm run dev --prefix desktopApp",
+    "dev:web": "npm run dev --prefix webApp",
+    "build:desktop": "npm run build:win --prefix desktopApp",
+    "build:web": "npm run build --prefix webApp"
+  }
+}

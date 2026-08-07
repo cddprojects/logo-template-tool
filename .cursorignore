@@ -1,0 +1,9 @@
+﻿**/node_modules/**
+**/dist-app/**
+**/out/**
+**/*.exe
+**/*.tsbuildinfo
+desktopApp/node_modules/**
+desktopApp/dist-app/**
+desktopApp/out/**
+webApp/node_modules/**
