@@ -88,17 +88,45 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
   const canCopy = (t: ServerTemplate) => !t.isOwn
   const canDelete = (t: ServerTemplate) => t.isOwn || isAdmin
 
+  const importTemplate = async (t: ServerTemplate): Promise<boolean> => {
+    const result = await getTemplate(t.id)
+    if (!result.ok) {
+      setError(result.error)
+      return false
+    }
+    importTemplateIntoEditor(result.data, t.name)
+    return true
+  }
+
   const handleOpen = async (t: ServerTemplate) => {
     setBusyId(t.id)
     setError(null)
-    const result = await getTemplate(t.id)
+    const ok = await importTemplate(t)
     setBusyId(null)
-    if (!result.ok) {
-      setError(result.error)
-      return
+    if (ok) onClose()
+  }
+
+  const handleOpenMany = async (items: ServerTemplate[]) => {
+    setBulkBusy(true)
+    setError(null)
+    let opened = 0
+    try {
+      for (const t of items) {
+        setBusyId(t.id)
+        const ok = await importTemplate(t)
+        setBusyId(null)
+        if (!ok) break
+        opened++
+      }
+      if (opened > 0) {
+        setCheckedIds(new Set())
+        setBulkAction('')
+        onClose()
+      }
+    } finally {
+      setBulkBusy(false)
+      setBusyId(null)
     }
-    importTemplateIntoEditor(result.data, t.name)
-    onClose()
   }
 
   const handleExport = async (t: ServerTemplate) => {
@@ -172,7 +200,7 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
     setError(null)
     try {
       if (bulkAction === 'open') {
-        await handleOpen(items[0])
+        await handleOpenMany(items)
         return
       }
       if (bulkAction === 'export') {
@@ -246,7 +274,7 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
 
   const bulkActionOptions = useMemo(() => {
     const options: { value: BulkAction; label: string }[] = [
-      { value: 'open', label: 'Open in editor' },
+      { value: 'open', label: 'Open all in editor' },
       { value: 'export', label: 'Export .igtemplate' }
     ]
     if (tab === 'others') {
