@@ -247,7 +247,12 @@ export function installWebApi(): void {
       version: unknown
     ): Promise<{ success: boolean; filePath?: string; error?: string }> => {
       try {
-        const v = version as { name?: string; description?: string; logos?: unknown; favicons?: unknown }
+        const v = version as {
+          name?: string
+          description?: string
+          logos?: unknown
+          favicons?: unknown
+        }
         const result = await createTemplate({
           name: v.name ?? 'Untitled',
           description: v.description ?? '',

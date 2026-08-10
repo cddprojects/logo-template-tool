@@ -5,11 +5,14 @@
 #   Name:     kitteasy-data   (any name)
 #   Mount:    /data
 #
+# IMPORTANT: Do not rely on Dockerfile VOLUME for /data — anonymous volumes are
+# recreated on redeploy and wipe accounts. Use a named Coolify volume instead.
+#
 # Required env:
 #   DATA_DIR=/data
 #   JWT_SECRET=<long random string — keep stable across deploys or sessions reset>
-#   ADMIN_EMAIL / ADMIN_PASSWORD — only used when the database is empty (first boot)
-#   ADMIN_PASSWORD_RESET=true — one-time: set admin password from ADMIN_PASSWORD, then remove
+#   ADMIN_EMAIL / ADMIN_PASSWORD — required in production for first admin seed
+#   ADMIN_PASSWORD_RESET=true — one-time only; remove after deploy or password keeps resetting
 #   COOKIE_SECURE=true when the site is served over HTTPS (Coolify + TLS)
 services:
   web:

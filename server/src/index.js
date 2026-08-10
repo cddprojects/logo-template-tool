@@ -35,8 +35,11 @@ app.get('/api/health', (_req, res) => {
       database: store.dbExists,
       users: store.userCount,
       templates: store.templateCount,
-      templateFiles: store.templateFiles
-    }
+      templateFiles: store.templateFiles,
+      bootMarker: store.bootMarker,
+      adminPasswordResetApplied: store.adminPasswordResetApplied
+    },
+    warnings: store.warnings
   })
 })
 

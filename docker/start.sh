@@ -13,7 +13,10 @@ else
   echo "[start] mount persistent storage at /data BEFORE creating users, or accounts are lost each redeploy"
 fi
 if [ "${ADMIN_PASSWORD_RESET:-}" = "true" ]; then
-  echo "[start] ADMIN_PASSWORD_RESET=true — admin password will be updated from ADMIN_PASSWORD on startup"
+  echo "[start] ADMIN_PASSWORD_RESET=true — admin password will update once, then remove this env var"
+fi
+if [ -z "${ADMIN_PASSWORD:-}" ]; then
+  echo "[start] WARNING: ADMIN_PASSWORD is not set — admin seed/reset is skipped in production"
 fi
 
 cd /app/server
