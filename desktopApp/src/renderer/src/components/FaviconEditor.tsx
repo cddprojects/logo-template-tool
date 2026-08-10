@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useCallback, useState, useMemo, lazy, Suspens
 import { Download, FileImage, FileCode2, RefreshCw, CheckCircle2, Plus, X, Pencil, Upload, ClipboardCopy, ClipboardPaste, GripVertical, Paintbrush, ArrowDownToLine } from 'lucide-react'
 import type { FaviconConfig, AssetVariant, PaintSaveResult, PaintVector, PaintLayerId, PaintSession, FaviconOuterShape, OuterShapeCategory, PaintSaveTargets, LogoConfig, IconConfig, OutsideContentSettings } from '../types'
 import { FAVICON_SHAPE_OPTIONS, faviconOuterCategory } from '../types'
-import { renderFavicon } from '../utils/renderer'
+import { bakeFaviconPaintContentLayer, renderFavicon, faviconInnerDrawSize } from '../utils/renderer'
 import { exportFaviconPng, exportFaviconSvg, exportFaviconIco, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
 import { Section, ColorRow, SliderRow, ToggleRow, SelectRow, FontSelect, WeightSelect, TextRow, TextareaRow, ShapeGrid, NumberInputRow, AiImageGenPanel, RemoveBgButton, OuterCategoryTabs, ExportNameStyleToggle, ImageRecolorControls } from './Controls'
@@ -26,6 +26,7 @@ import {
 } from '../utils/paintSettingsSync'
 import { faviconContentToIconConfig } from './LogoEditor'
 import { sanitizePaintSessionProxies, syncOutsideLettersIntoPaintSession } from '../utils/paintDecorations'
+import { CanvaPromptPanel } from './CanvaPromptPanel'
 
 const MAX_VARIANTS = Infinity
 
@@ -90,6 +91,11 @@ const DEFAULT_FAVICON_CONTENT = {
   imageColor3: '',
   imageColor4: '',
   imageColor5: '',
+  canvaBusinessType: 'recruitment-services' as const,
+  canvaDesignType: 'icon' as const,
+  canvaPrimaryColor: '#6366f1',
+  canvaSecondaryColor: '',
+  canvaImageReference: 'none' as const,
   offsetX: 0,
   offsetY: 0,
   contentShadowEnabled: false,
@@ -280,21 +286,11 @@ export function FaviconEditor({
         offsetY: 0
       }
     }).catch(() => {})
-    // Inner bake: letters blank (linked text vector). Other types bake centered
-    // with live size/color but no offset/shadow — contentBound stamp owns those.
-    // outerShape 'none' so the proxy isn't clipped to the Outer silhouette.
-    await renderFavicon(contentCanvas, {
-      ...bakeConfig,
-      size: 512,
-      transparentBg: true,
-      borderWidth: 0,
-      borderColor: 'transparent',
-      outerShape: 'none',
-      outerShapeImageDataUrl: '',
-      outerShapeSvgMarkup: '',
-      shadowEnabled: false,
-      shadowReserveOnly: true,
-      content: isLetters
+    // Inner bake at shadow-inset scale (matches live favicon + Paint sizeRatio).
+    await bakeFaviconPaintContentLayer(
+      contentCanvas,
+      bakeConfig,
+      isLetters
         ? {
             ...config.content,
             type: 'letters',
@@ -311,8 +307,9 @@ export function FaviconEditor({
             contentBorderWidth: 0,
             offsetX: 0,
             offsetY: 0
-          }
-    }).catch(() => {})
+          },
+      512
+    ).catch(() => {})
     setPaintContainer(containerCanvas.toDataURL('image/png'))
     setPaintContent(contentCanvas.toDataURL('image/png'))
     const hasSession = !!(session && session.version === 1)
@@ -726,6 +723,8 @@ export function FaviconEditor({
   // content may fill the whole canvas — allow up to 100%. Otherwise cap at 90%
   // so content stays inside the container.
   const contentSizeMax = config.outerShape === 'none' ? 100 : 90
+  const isCanvaContent = config.content.type === 'canva'
+  const canvaAppName = matchingLogoVariant?.config?.text?.trim() || versionName
 
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
@@ -743,6 +742,7 @@ export function FaviconEditor({
             containerOverlayImage={paintContainerOverlay}
             contentOverlayImage={paintContentOverlay}
             hasContainer={paintHasContainer || hasOuterShape}
+            innerDrawSize={faviconInnerDrawSize(config, 512)}
             initialVectors={paintVectors}
             initialLayerOrder={paintLayerOrder}
             outsideContentSettings={paintOutsideContent}
@@ -858,6 +858,7 @@ export function FaviconEditor({
           <PreviewStage
             className="flex-1"
             leadingControls={
+              !isCanvaContent ? (
               <button
                 type="button"
                 onClick={openPaint}
@@ -866,6 +867,7 @@ export function FaviconEditor({
               >
                 <Paintbrush size={13} /> Edit
               </button>
+              ) : undefined
             }
           >
             <div className="flex flex-col items-center gap-8">
@@ -1074,7 +1076,8 @@ export function FaviconEditor({
                 { label: 'Icon Library', value: 'lucide' },
                 { label: 'Custom SVG', value: 'svg-markup' },
                 { label: 'SVG Path (d=)', value: 'svg' },
-                { label: 'Image Upload', value: 'image' }
+                { label: 'Image Upload', value: 'image' },
+                { label: 'Canva', value: 'canva' }
               ]}
               onChange={(v) => setContent({ type: v as FaviconConfig['content']['type'] })}
             />
@@ -1246,6 +1249,17 @@ export function FaviconEditor({
                 />
               </>
             )}
+            {config.content.type === 'canva' && (
+              <CanvaPromptPanel
+                content={config.content}
+                faviconConfig={config}
+                logoIcon={matchingLogoVariant?.config?.icon ?? null}
+                appName={canvaAppName}
+                onChange={(patch) => setContent(patch)}
+              />
+            )}
+            {!isCanvaContent && (
+              <>
             <SliderRow label="Offset X" value={config.content.offsetX ?? 0} min={-80} max={80} onChange={(v) => setContent({ offsetX: v })} unit="px" />
             <SliderRow label="Offset Y" value={config.content.offsetY ?? 0} min={-80} max={80} onChange={(v) => setContent({ offsetY: v })} unit="px" />
             <ColorRow label="Border" value={(config.content.contentBorderColor ?? 'transparent') === 'transparent' ? '#000000' : (config.content.contentBorderColor ?? '#000000')} onChange={(v) => setContent({ contentBorderColor: v })} />
@@ -1277,6 +1291,8 @@ export function FaviconEditor({
                 <SliderRow label="Spread" value={config.content.contentShadowSpread ?? 0} min={0} max={40} onChange={(v) => setContent({ contentShadowSpread: v })} unit="px" />
                 <SliderRow label="Offset X" value={config.content.contentShadowOffsetX ?? 0} min={-30} max={30} onChange={(v) => setContent({ contentShadowOffsetX: v })} unit="px" />
                 <SliderRow label="Offset Y" value={config.content.contentShadowOffsetY ?? 3} min={-30} max={30} onChange={(v) => setContent({ contentShadowOffsetY: v })} unit="px" />
+              </>
+            )}
               </>
             )}
           </Section>

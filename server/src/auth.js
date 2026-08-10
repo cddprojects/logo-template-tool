@@ -3,6 +3,11 @@ import bcrypt from 'bcryptjs'
 
 const COOKIE = 'ig_session'
 
+export function getSessionDays() {
+  const days = Number(process.env.SESSION_DAYS || 30)
+  return Number.isFinite(days) && days > 0 ? days : 30
+}
+
 export function getJwtSecret() {
   const secret = process.env.JWT_SECRET
   if (secret && secret.length >= 16) return secret
@@ -16,19 +21,24 @@ export function signUser(user) {
   return jwt.sign(
     { sub: user.id, email: user.email, role: user.role },
     getJwtSecret(),
-    { expiresIn: '7d' }
+    { expiresIn: `${getSessionDays()}d` }
   )
 }
 
 export function cookieOptions() {
   const secure = process.env.COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production'
+  const maxAge = getSessionDays() * 24 * 60 * 60 * 1000
   return {
     httpOnly: true,
     secure,
     sameSite: 'lax',
-    maxAge: 7 * 24 * 60 * 60 * 1000,
+    maxAge,
     path: '/'
   }
+}
+
+export function setSessionCookie(res, user) {
+  res.cookie(COOKIE, signUser(user), cookieOptions())
 }
 
 export function clearCookieOptions() {

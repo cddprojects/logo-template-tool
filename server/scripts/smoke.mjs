@@ -94,6 +94,25 @@ try {
     })
   })
   if (!user.ok) throw new Error('create user failed: ' + (await user.text()))
+  const { user: member } = await user.json()
+
+  const pw = await fetch(`http://127.0.0.1:8799/api/users/${member.id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ password: 'newpass12' })
+  })
+  if (!pw.ok) throw new Error('password patch failed: ' + (await pw.text()))
+
+  const del = await fetch(`http://127.0.0.1:8799/api/users/${member.id}`, {
+    method: 'DELETE',
+    headers: { Cookie: cookie }
+  })
+  if (!del.ok) throw new Error('delete user failed: ' + (await del.text()))
+
+  const me2 = await fetch('http://127.0.0.1:8799/api/auth/me', { headers: { Cookie: cookie } })
+  if (!me2.ok) throw new Error('session refresh failed')
+  const refreshed = parseSetCookie(me2)
+  if (!refreshed) throw new Error('session cookie not refreshed on /me')
 
   console.log('SMOKE OK')
   process.exitCode = 0

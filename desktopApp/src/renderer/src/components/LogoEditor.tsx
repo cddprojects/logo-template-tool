@@ -12,6 +12,7 @@ import {
   applyPaintContentSyncToFaviconContent,
   applyPaintContentSyncToIcon,
   applyPaintOuterSyncToFavicon,
+  logoPaintInnerDrawSize,
   outsideContentFromIcon,
   switchIconSourceType,
   updateFaviconStashAfterSave,
@@ -459,7 +460,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             }
           : {})
       },
-      0, 0, SIZE, 2
+      drawX, drawY, drawSize, 2
     ).catch(() => {})
 
     setPaintContainer(containerCanvas.toDataURL('image/png'))
@@ -652,9 +653,11 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
     const renderId = ++renderIdRef.current
     const renderConfig = { ...safeConfig, icon: effectiveIcon }
 
+    const faviconForIconRender = isSyncedWithFavicon ? faviconCfg : undefined
+
     const doRender = () => {
       if (renderId !== renderIdRef.current) return
-      renderLogo(canvasRef.current!, renderConfig, 2).catch(() => {})
+      renderLogo(canvasRef.current!, renderConfig, 2, true, faviconForIconRender).catch(() => {})
     }
 
     const rafId = requestAnimationFrame(doRender)
@@ -673,7 +676,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       if (fontsTimer) clearTimeout(fontsTimer)
       document.fonts.removeEventListener('loadingdone', onFontsLoaded)
     }
-  }, [safeConfig, effectiveIcon, isActive])
+  }, [safeConfig, effectiveIcon, isActive, isSyncedWithFavicon, faviconCfg])
 
   const addVariant = () => {
     const isLight = variants.length === 1
@@ -746,23 +749,13 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   }
 
   const unlinkFromFavicon = useCallback(() => {
-    // Drop sync and bake the currently visible (favicon-derived) icon into
-    // custom `icon` so the logo does not jump back to a stale pre-sync design.
-    if (!effectiveIcon) {
-      updateConfig({
-        iconLinked: false,
-        iconSyncBroken: false,
-        syncedIconSnapshot: null
-      })
-      return
-    }
+    // Restore the original custom icon — it was preserved in `icon` while synced.
     updateConfig({
       iconLinked: false,
       iconSyncBroken: false,
-      syncedIconSnapshot: null,
-      icon: structuredClone(effectiveIcon)
+      syncedIconSnapshot: null
     })
-  }, [updateConfig, effectiveIcon])
+  }, [updateConfig])
 
   // Copy the full style (config) of a variant to the clipboard.
   const copyStyle = (id: string) => {
@@ -874,7 +867,13 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       const variantIndex = Math.max(0, variants.findIndex((v) => v.id === active.id))
       const exportConfig = { ...safeConfig, icon: effectiveIcon }
       const nameOpts = { nameStyle: exportNameStyle, variantIndex }
-      if (format === 'png') await exportLogoPng(exportConfig, versionName, exportScale, label, nameOpts)
+      if (format === 'png') {
+        await exportLogoPng(exportConfig, versionName, exportScale, label, {
+          ...nameOpts,
+          highQuality: true,
+          faviconIconSource: isSyncedWithFavicon ? faviconCfg : undefined
+        })
+      }
       else await exportLogoSvg(exportConfig, versionName, label, nameOpts)
       setExporting('done:' + format)
       setTimeout(() => setExporting(null), 1500)
@@ -886,7 +885,13 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   const handleSizePreview = async () => {
     if (!safeConfig || !effectiveIcon) return
     const canvas = document.createElement('canvas')
-    await renderLogo(canvas, { ...safeConfig, icon: effectiveIcon }, exportScale, true)
+    await renderLogo(
+      canvas,
+      { ...safeConfig, icon: effectiveIcon },
+      exportScale,
+      true,
+      isSyncedWithFavicon ? faviconCfg : undefined
+    )
     setPreviewDims({ w: canvas.width, h: canvas.height })
     setPreviewDataUrl(canvas.toDataURL('image/png'))
   }
@@ -909,6 +914,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             containerOverlayImage={paintContainerOverlay}
             contentOverlayImage={paintContentOverlay}
             hasContainer={paintHasContainer || hasIconContainer}
+            innerDrawSize={logoPaintInnerDrawSize(effectiveIcon, 512)}
             initialVectors={paintVectors}
             initialLayerOrder={paintLayerOrder}
             outsideContentSettings={paintOutsideContent}

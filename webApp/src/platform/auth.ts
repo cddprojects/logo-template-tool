@@ -193,16 +193,34 @@ export async function createUser(input: {
   return { ok: true, user: result.data.user }
 }
 
+/** Change role and/or password (admin). */
+export async function patchUser(
+  id: string,
+  patch: { role?: UserRole; password?: string }
+): Promise<{ ok: true; user: AuthUser } | { ok: false; error: string }> {
+  const result = await api<{ user: AuthUser }>(`/api/users/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(patch)
+  })
+  if (!result.ok) return { ok: false, error: result.error }
+  return { ok: true, user: result.data.user }
+}
+
 export async function patchUserRole(
   id: string,
   role: UserRole
 ): Promise<{ ok: true; user: AuthUser } | { ok: false; error: string }> {
-  const result = await api<{ user: AuthUser }>(`/api/users/${encodeURIComponent(id)}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ role })
+  return patchUser(id, { role })
+}
+
+export async function deleteUser(
+  id: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const result = await api<{ ok: boolean }>(`/api/users/${encodeURIComponent(id)}`, {
+    method: 'DELETE'
   })
   if (!result.ok) return { ok: false, error: result.error }
-  return { ok: true, user: result.data.user }
+  return { ok: true }
 }
 
 /** Import server template JSON into the editor via existing listeners. */

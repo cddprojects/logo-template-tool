@@ -48,7 +48,12 @@ const FAVICON_TYPE_KEYS: Record<ContentType, readonly string[]> = {
     'imageColor1', 'imageColor2', 'imageColor3', 'imageColor4', 'imageColor5',
     ...SHARED_CONTENT_KEYS
   ],
-  svg: ['svgPath', 'svgColor', ...SHARED_CONTENT_KEYS]
+  svg: ['svgPath', 'svgColor', ...SHARED_CONTENT_KEYS],
+  canva: [
+    'canvaBusinessType', 'canvaDesignType', 'canvaPrimaryColor', 'canvaSecondaryColor',
+    'canvaImageReference',
+    ...SHARED_CONTENT_KEYS
+  ]
 }
 
 const ICON_TYPE_KEYS: Record<IconSourceType, readonly string[]> = {
@@ -135,6 +140,35 @@ export function clampSizeRatio(n: number): number {
 }
 
 /**
+ * Logo icon inner drawable size at paint resolution (outer shadow inset).
+ * Matches LogoEditor paint bakes where the content layer disables the container.
+ */
+export function logoPaintInnerDrawSize(icon: IconConfig, canvasSize = 512): number {
+  let outerSize = canvasSize
+  const hasOuterShadow =
+    !!icon.shadowEnabled &&
+    !!icon.containerEnabled &&
+    icon.containerShape !== 'none'
+  if (hasOuterShadow) {
+    const scaledBlur = icon.shadowBlur ?? 8
+    const iconSpread = icon.shadowSpread ?? 0
+    const iconOx = icon.shadowOffsetX ?? 0
+    const iconOy = icon.shadowOffsetY ?? 4
+    const blurExtent = scaledBlur * 2
+    const shadowPad =
+      Math.ceil(
+        Math.max(
+          blurExtent + iconSpread + Math.abs(iconOx),
+          blurExtent + iconSpread + Math.abs(iconOy),
+          0
+        )
+      ) + 4
+    outerSize = Math.max(16, canvasSize - shadowPad * 2)
+  }
+  return Math.max(16, outerSize)
+}
+
+/**
  * Paint contentBound stamp box from live outside sizeRatio.
  * Uses crop only for aspect ratio — never crop pixel size (alpha bbox is
  * slightly smaller than the bake every time and would shrink on each Save).
@@ -143,9 +177,11 @@ export function proxyBoxFromSizeRatio(
   sizeRatio: number | undefined,
   resolution: number,
   aspectW = 1,
-  aspectH = 1
+  aspectH = 1,
+  innerDrawSize?: number
 ): { w: number; h: number } {
-  const target = clampSizeRatio(sizeRatio ?? 0.5) * Math.max(1, resolution)
+  const drawArea = Math.max(1, innerDrawSize ?? resolution)
+  const target = clampSizeRatio(sizeRatio ?? 0.5) * drawArea
   const aw = Math.max(1e-6, aspectW)
   const ah = Math.max(1e-6, aspectH)
   if (aw >= ah) {
@@ -300,6 +336,7 @@ function faviconSizeRatio(content: FaviconContent): number {
     case 'lucide': return content.lucideSizeRatio ?? 0.6
     case 'svg-markup': return content.svgMarkupSizeRatio ?? 0.7
     case 'image': return content.imageSizeRatio ?? 0.8
+    case 'canva': return 0.6
     default: return 0.6
   }
 }
@@ -311,6 +348,7 @@ function faviconFillColor(content: FaviconContent): string {
     case 'lucide':
     case 'svg-markup': return content.lucideColor ?? '#ffffff'
     case 'svg': return content.svgColor ?? '#ffffff'
+    case 'canva': return content.canvaPrimaryColor ?? '#6366f1'
     default: return '#ffffff'
   }
 }
@@ -493,8 +531,15 @@ export function buildPaintContentSync(opts: {
    * outers). Do not push a sampled colour into backgroundColor / containerColor.
    */
   syncOuterFillColor?: boolean
+  /**
+   * Inner drawable area at paint resolution (smaller than canvas when outer
+   * shadow insets the shape). sizeRatio is stored relative to this, not the
+   * full canvas, so saved content matches what Paint shows vs the outer shape.
+   */
+  innerDrawSize?: number
 }): PaintContentSync {
   const res = Math.max(1, opts.resolution || 512)
+  const drawArea = Math.max(1, opts.innerDrawSize ?? res)
   const sync: PaintContentSync = {}
 
   // Outer Fill → live backgroundColor / containerColor (and clear overlay if full recolor).
@@ -566,7 +611,7 @@ export function buildPaintContentSync(opts: {
       fontFamily: linked.fontFamily ?? 'Inter',
       fontWeight: String(linked.weight ?? (linked.bold ? 700 : 400)),
       fontItalic: !!linked.italic,
-      fontSizeRatio: clampSizeRatio(fs / res),
+      fontSizeRatio: clampSizeRatio(fs / drawArea),
       letterSpacing: paintPxToDesign(linked.letterSpacing ?? 0, res)
     }
     sync.fillColor = sync.letters.textColor
@@ -583,7 +628,7 @@ export function buildPaintContentSync(opts: {
     const h = Math.abs(b.y - a.y)
     sync.offsetX = paintPxToDesign(cx - res / 2, res)
     sync.offsetY = paintPxToDesign(cy - res / 2, res)
-    sync.sizeRatio = clampSizeRatio(Math.max(w, h) / res)
+    sync.sizeRatio = clampSizeRatio(Math.max(w, h) / drawArea)
     if (proxy.color) sync.fillColor = proxy.color
     Object.assign(sync, shadowSyncFromVector(proxy, res))
     return sync

@@ -1,9 +1,16 @@
 #!/bin/sh
 set -eu
 
-mkdir -p "${DATA_DIR:-/data}/templates" /run/nginx /var/log/nginx
+DATA_ROOT="${DATA_DIR:-/data}"
+mkdir -p "${DATA_ROOT}/templates" /run/nginx /var/log/nginx
 
-echo "[start] DATA_DIR=${DATA_DIR:-/data}"
+echo "[start] DATA_DIR=${DATA_ROOT}"
+if [ -f "${DATA_ROOT}/app.sqlite" ]; then
+  echo "[start] existing database found — data should persist across redeploys if /data is a mounted volume"
+else
+  echo "[start] no database yet — will create on first API start"
+  echo "[start] IMPORTANT: mount persistent storage to /data in Coolify or data will reset each deploy"
+fi
 
 cd /app/server
 node src/index.js &

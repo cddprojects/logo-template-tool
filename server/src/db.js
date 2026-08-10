@@ -4,11 +4,62 @@ import path from 'path'
 import bcrypt from 'bcryptjs'
 import { nanoid } from 'nanoid'
 
-export function openDb(dataDir) {
-  fs.mkdirSync(dataDir, { recursive: true })
-  fs.mkdirSync(path.join(dataDir, 'templates'), { recursive: true })
+export function getDataPaths(dataDir) {
+  const root = path.resolve(dataDir)
+  return {
+    root,
+    dbPath: path.join(root, 'app.sqlite'),
+    templatesDir: path.join(root, 'templates')
+  }
+}
 
-  const dbPath = path.join(dataDir, 'app.sqlite')
+export function describeDataStore(dataDir) {
+  const { root, dbPath, templatesDir } = getDataPaths(dataDir)
+  const dbExists = fs.existsSync(dbPath)
+  let userCount = 0
+  let templateCount = 0
+  if (dbExists) {
+    try {
+      const db = new Database(dbPath, { readonly: true, fileMustExist: true })
+      userCount = db.prepare('SELECT COUNT(*) AS n FROM users').get().n
+      templateCount = db.prepare('SELECT COUNT(*) AS n FROM templates').get().n
+      db.close()
+    } catch {
+      // ignore — openDb will surface errors on startup
+    }
+  }
+  let templateFiles = 0
+  try {
+    if (fs.existsSync(templatesDir)) {
+      const walk = (dir) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const full = path.join(dir, entry.name)
+          if (entry.isDirectory()) walk(full)
+          else if (entry.name.endsWith('.igtemplate')) templateFiles++
+        }
+      }
+      walk(templatesDir)
+    }
+  } catch {
+    // ignore
+  }
+  return {
+    dataDir: root,
+    dbPath,
+    templatesDir,
+    dbExists,
+    userCount,
+    templateCount,
+    templateFiles
+  }
+}
+
+export function openDb(dataDir) {
+  const { root, dbPath, templatesDir } = getDataPaths(dataDir)
+  fs.mkdirSync(root, { recursive: true })
+  fs.mkdirSync(templatesDir, { recursive: true })
+
+  const existed = fs.existsSync(dbPath)
   const db = new Database(dbPath)
   db.pragma('journal_mode = WAL')
   db.exec(`
@@ -31,6 +82,13 @@ export function openDb(dataDir) {
   `)
 
   seedAdmin(db)
+
+  const users = db.prepare('SELECT COUNT(*) AS n FROM users').get().n
+  const templates = db.prepare('SELECT COUNT(*) AS n FROM templates').get().n
+  console.log(
+    `[server] database ${existed ? 'opened' : 'created'}: ${dbPath} (${users} users, ${templates} templates)`
+  )
+
   return db
 }
 
@@ -52,7 +110,7 @@ function seedAdmin(db) {
 }
 
 export function templatesDir(dataDir, userId) {
-  const dir = path.join(dataDir, 'templates', userId)
+  const dir = path.join(getDataPaths(dataDir).templatesDir, userId)
   fs.mkdirSync(dir, { recursive: true })
   return dir
 }

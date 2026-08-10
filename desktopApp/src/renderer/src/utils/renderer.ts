@@ -4,7 +4,6 @@ import { resolveImageDataUrl } from './imageRecolor'
 import {
   applyPaintDecorations,
   applyPaintLayerDecorations,
-  paintCompositeResolution,
   sessionUsesLayeredPaint,
   shouldSkipLiveLettersForPaintSession
 } from './paintDecorations'
@@ -439,29 +438,8 @@ export async function drawIcon(
   size: number,
   superSample = 2
 ): Promise<void> {
-  // Paint Fill overlays are authored at session.resolution. Composite live +
-  // paint there first so scaled preview/export doesn't reveal old outlines.
-  // Include outer-shadow padding so the offscreen is not clipped to the icon box.
-  const paintRes = paintCompositeResolution(icon.paintSession)
-  if (paintRes && paintRes !== size) {
-    const { pad: resPad } = iconOuterShadowPad(icon, paintRes)
-    const off = document.createElement('canvas')
-    off.width = paintRes + resPad * 2
-    off.height = paintRes + resPad * 2
-    const octx = off.getContext('2d')!
-    octx.imageSmoothingEnabled = true
-    octx.imageSmoothingQuality = 'high'
-    await drawIcon(octx, icon, resPad, resPad, paintRes, superSample)
-    const outPad = resPad * (size / paintRes)
-    ctx.drawImage(
-      off,
-      x - outPad,
-      y - outPad,
-      size + outPad * 2,
-      size + outPad * 2
-    )
-    return
-  }
+  // Paint Fill overlays are authored at session.resolution. Overlays scale via
+  // drawScaledPng in applyPaintLayerDecorations — render live Inner at `size`.
 
   // Outer container shadow — always via an isolated padded canvas so hexagon /
   // star / etc. shadows are never clipped by the icon rect or a paint offscreen.
@@ -1020,11 +998,37 @@ export interface LogoRenderResult {
   height: number
 }
 
+/**
+ * When a logo icon is synced to a favicon twin, reuse the favicon renderer at
+ * native (or higher) resolution and downscale into the logo icon slot. This
+ * matches favicon-tab sharpness better than re-drawing via drawIcon at the
+ * smaller logo layout size.
+ */
+async function drawSyncedFaviconIcon(
+  ctx: CanvasRenderingContext2D,
+  faviconConfig: FaviconConfig,
+  x: number,
+  y: number,
+  displaySize: number
+): Promise<void> {
+  const renderSize = Math.max(faviconConfig.size ?? 256, Math.ceil(displaySize))
+  const off = document.createElement('canvas')
+  off.width = renderSize
+  off.height = renderSize
+  await renderFavicon(off, { ...faviconConfig, size: renderSize })
+  ctx.save()
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(off, x, y, displaySize, displaySize)
+  ctx.restore()
+}
+
 export async function renderLogo(
   canvas: HTMLCanvasElement,
   config: LogoConfig,
   scale = 1,
-  highQuality = false
+  highQuality = false,
+  faviconIconSource?: FaviconConfig | null
 ): Promise<LogoRenderResult> {
   const ctx = canvas.getContext('2d')!
   ctx.imageSmoothingEnabled = true
@@ -1162,7 +1166,11 @@ export async function renderLogo(
   }
 
   if (icon.visible && icon.shape !== 'none') {
-    await drawIcon(ctx, icon, iconX, iconY, iconSize, highQuality ? 2 : 1)
+    if (faviconIconSource) {
+      await drawSyncedFaviconIcon(ctx, faviconIconSource, iconX, iconY, iconSize)
+    } else {
+      await drawIcon(ctx, icon, iconX, iconY, iconSize, highQuality ? 2 : 1)
+    }
   }
 
   // ── Text rendering (ink-based positioning) ───────────────────────────────
@@ -1340,27 +1348,15 @@ async function renderFaviconOuterShapeOnly(
 /**
  * Renders the favicon shape + content to `ctx` at (0,0) at `size×size`, without any shadow.
  * Used internally so the result can be composited with a shadow pass.
- * When a paint session exists, live layers + Fill overlays are composited at the
- * paint resolution first, then scaled — matching Paint mode and avoiding
- * leftover outlines from resolution-mismatched edges.
+ * Paint overlays scale via applyPaintLayerDecorations at the target `size`.
  */
 async function renderFaviconInner(
   ctx: CanvasRenderingContext2D,
   config: FaviconConfig,
   size: number
 ): Promise<void> {
-  const paintRes = paintCompositeResolution(config.paintSession)
-  if (paintRes && paintRes !== size) {
-    const off = document.createElement('canvas')
-    off.width = paintRes
-    off.height = paintRes
-    const octx = off.getContext('2d')!
-    octx.imageSmoothingEnabled = true
-    octx.imageSmoothingQuality = 'high'
-    await renderFaviconInnerAt(octx, config, paintRes)
-    ctx.drawImage(off, 0, 0, size, size)
-    return
-  }
+  // Paint overlays scale via drawScaledPng in applyPaintLayerDecorations — render
+  // live Inner at the target size so sizeRatio matches Paint (no upscale-then-shrink).
   await renderFaviconInnerAt(ctx, config, size)
 }
 
@@ -1647,6 +1643,68 @@ async function applyFaviconInsetShadow(
   ctx.drawImage(insetCanvas, x, y)
 }
 
+/** Side inset (each edge) when outer shadow shrinks the favicon shape inward. */
+function faviconOuterShadowPad(config: FaviconConfig, canvasSize: number): number {
+  const hasShadow = config.shadowEnabled && config.outerShape !== 'none'
+  if (!hasShadow || (config.shadowInset ?? false)) return 0
+  const shadowScale = canvasSize / 256
+  const spread = (config.shadowSpread ?? 0) * shadowScale
+  const sBlur = (config.shadowBlur ?? 12) * shadowScale
+  const sOx = (config.shadowOffsetX ?? 0) * shadowScale
+  const sOy = (config.shadowOffsetY ?? 4) * shadowScale
+  const blurExtent = sBlur * 1.5
+  const padL = Math.max(0, spread + blurExtent - sOx)
+  const padR = Math.max(0, spread + blurExtent + sOx)
+  const padT = Math.max(0, spread + blurExtent - sOy)
+  const padB = Math.max(0, spread + blurExtent + sOy)
+  return Math.ceil(Math.max(padL, padR, padT, padB)) + 2
+}
+
+/** Inner drawable size for favicon content (matches renderFavicon outer-shadow inset). */
+export function faviconInnerDrawSize(config: FaviconConfig, canvasSize: number): number {
+  if ((config.shadowInset ?? false) || config.outerShape === 'none') return canvasSize
+  const shadowPad = faviconOuterShadowPad(config, canvasSize)
+  if (shadowPad <= 0) return canvasSize
+  return Math.max(16, canvasSize - shadowPad * 2)
+}
+
+/**
+ * Bake Inner content for Paint at the same scale as the live favicon (shadow
+ * inset), centered on a square paint-resolution canvas.
+ */
+export async function bakeFaviconPaintContentLayer(
+  canvas: HTMLCanvasElement,
+  config: FaviconConfig,
+  content: FaviconConfig['content'],
+  paintResolution = 512
+): Promise<void> {
+  const res = paintResolution
+  const innerDraw = faviconInnerDrawSize(config, res)
+  const innerX = Math.floor((res - innerDraw) / 2)
+  const innerY = innerX
+  const inner = document.createElement('canvas')
+  inner.width = innerDraw
+  inner.height = innerDraw
+  await renderFavicon(inner, {
+    ...config,
+    size: innerDraw,
+    paintSession: null,
+    transparentBg: true,
+    borderWidth: 0,
+    borderColor: 'transparent',
+    outerShape: 'none',
+    outerShapeImageDataUrl: '',
+    outerShapeSvgMarkup: '',
+    shadowEnabled: false,
+    content
+  }).catch(() => {})
+  canvas.width = res
+  canvas.height = res
+  const ctx = canvas.getContext('2d')!
+  ctx.clearRect(0, 0, res, res)
+  ctx.drawImage(inner, innerX, innerY, innerDraw, innerDraw)
+}
+
 export async function renderFavicon(canvas: HTMLCanvasElement, config: FaviconConfig): Promise<void> {
   const size = config.size           // canvas is ALWAYS this exact size
   const shadowInset = config.shadowInset ?? false
@@ -1694,17 +1752,7 @@ export async function renderFavicon(canvas: HTMLCanvasElement, config: FaviconCo
     // Canvas never changes size. Instead, the favicon shape shrinks inward so
     // the outer shadow fits entirely within the original size×size square.
     // shadowPad = amount to inset on each side (symmetric = 1:1 ratio preserved).
-    let shadowPad = 0
-    if (hasShadow) {
-      // Gaussian blur visually spreads ~1.5× the blur radius; account for that
-      // so the shadow is never clipped at the edges of the fixed-size canvas.
-      const blurExtent = sBlur * 1.5
-      const padL = Math.max(0, spread + blurExtent - sOx)
-      const padR = Math.max(0, spread + blurExtent + sOx)
-      const padT = Math.max(0, spread + blurExtent - sOy)
-      const padB = Math.max(0, spread + blurExtent + sOy)
-      shadowPad  = Math.ceil(Math.max(padL, padR, padT, padB)) + 2
-    }
+    const shadowPad = hasShadow ? faviconOuterShadowPad(config, size) : 0
 
     const innerSize = Math.max(16, size - shadowPad * 2)
     const innerX    = Math.floor((size - innerSize) / 2)
@@ -1908,6 +1956,8 @@ async function drawFaviconContent(
       }
       break
     }
+    case 'canva':
+      break
   }
 
   // Content border / stroke.
@@ -2234,6 +2284,8 @@ export async function generateFaviconSvg(config: FaviconConfig): Promise<string>
       }
       break
     }
+    case 'canva':
+      break
   }
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${outerEl}${innerEl}</svg>`

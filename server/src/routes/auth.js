@@ -1,11 +1,10 @@
 import { Router } from 'express'
 import {
   COOKIE,
-  cookieOptions,
   clearCookieOptions,
   publicUser,
   requireAuth,
-  signUser,
+  setSessionCookie,
   verifyPassword
 } from '../auth.js'
 
@@ -34,7 +33,7 @@ export function authRoutes(db) {
       role: row.role,
       created_at: row.created_at
     }
-    res.cookie(COOKIE, signUser(user), cookieOptions())
+    setSessionCookie(res, user)
     res.json({ user: publicUser(user) })
   })
 
@@ -44,6 +43,8 @@ export function authRoutes(db) {
   })
 
   router.get('/me', requireAuth(db), (req, res) => {
+    // Sliding session — keep users signed in while the cookie is still valid.
+    setSessionCookie(res, req.user)
     res.json({ user: publicUser(req.user) })
   })
 

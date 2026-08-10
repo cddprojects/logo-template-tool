@@ -71,7 +71,13 @@ export function isFaviconMathShape(shape: FaviconOuterShape): boolean {
   )
 }
 
-export type ContentType = 'letters' | 'shape' | 'svg' | 'lucide' | 'svg-markup' | 'image'
+export type ContentType = 'letters' | 'shape' | 'svg' | 'lucide' | 'svg-markup' | 'image' | 'canva'
+
+export type CanvaBusinessType = 'recruitment-services' | 'dropshipping' | 'fraud-recovery-services'
+
+export type CanvaDesignType = 'vector' | 'abstract' | 'vector-art' | 'icon'
+
+export type CanvaImageReference = 'none' | 'favicon' | 'favicon-inner' | 'logo-icon'
 
 // ── Unified icon data ─────────────────────────────────────────────────────────
 
@@ -277,6 +283,13 @@ export interface FaviconContent {
   imageColor3: string
   imageColor4: string
   imageColor5: string
+  // canva prompt settings (no rendered inner content)
+  canvaBusinessType: CanvaBusinessType
+  canvaDesignType: CanvaDesignType
+  canvaPrimaryColor: string
+  /** Empty string = no secondary color. */
+  canvaSecondaryColor: string
+  canvaImageReference: CanvaImageReference
   // universal content offset (px, relative to center)
   offsetX: number
   offsetY: number
@@ -764,6 +777,11 @@ export const DEFAULT_FAVICON_CONFIG: FaviconConfig = {
       imageColor3: '',
       imageColor4: '',
       imageColor5: '',
+      canvaBusinessType: 'recruitment-services',
+      canvaDesignType: 'icon',
+      canvaPrimaryColor: '#6366f1',
+      canvaSecondaryColor: '',
+      canvaImageReference: 'none',
       offsetX: 0,
       offsetY: 0,
       contentShadowEnabled: false,

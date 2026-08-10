@@ -1,5 +1,13 @@
-# Optional local/Coolify-style run. In Coolify you can also set a persistent
-# volume mount for /data and env vars without compose.
+# Coolify / production: mount persistent storage at /data (SQLite + templates).
+# Without this volume, users and templates are lost on every container replace.
+#
+# Coolify UI: Application → Persistent Storage → Add
+#   Name:     kitteasy-data   (any name)
+#   Mount:    /data
+#
+# Required env:
+#   DATA_DIR=/data
+#   JWT_SECRET=<long random string — keep stable across deploys or sessions reset>
 services:
   web:
     build: .
@@ -9,7 +17,7 @@ services:
       DATA_DIR: /data
       JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-secret}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@kitteasy.com}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-incorrect}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       NODE_ENV: production
     volumes:

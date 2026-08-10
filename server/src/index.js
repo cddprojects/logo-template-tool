@@ -3,7 +3,7 @@ import cookieParser from 'cookie-parser'
 import cors from 'cors'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { openDb } from './db.js'
+import { openDb, describeDataStore } from './db.js'
 import { authRoutes } from './routes/auth.js'
 import { usersRoutes } from './routes/users.js'
 import { templatesRoutes } from './routes/templates.js'
@@ -27,7 +27,17 @@ app.use(express.json({ limit: '25mb' }))
 app.use(cookieParser())
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true })
+  const store = describeDataStore(dataDir)
+  res.json({
+    ok: true,
+    dataDir: store.dataDir,
+    persistent: {
+      database: store.dbExists,
+      users: store.userCount,
+      templates: store.templateCount,
+      templateFiles: store.templateFiles
+    }
+  })
 })
 
 app.use('/api/auth', authRoutes(db))

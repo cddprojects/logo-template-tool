@@ -250,6 +250,11 @@ interface IconPaintEditorProps {
   contentOverlayImage?: string | null
   /** Working resolution (square). */
   resolution?: number
+  /**
+   * Inner drawable area at paint resolution (smaller than resolution when outer
+   * shadow insets the shape). Used for content size ratios vs the outer shape.
+   */
+  innerDrawSize?: number
   title?: string
   /** Whether the icon actually has an outer shape / container to edit. */
   hasContainer?: boolean
@@ -615,8 +620,13 @@ function outsideShadowToPaint(
   }
 }
 
-function lineFromOutsideText(settings: OutsideTextSettings, resolution: number): LineObj {
-  const fontSize = Math.max(4, Math.round(resolution * (settings.fontSizeRatio ?? 0.52)))
+function lineFromOutsideText(
+  settings: OutsideTextSettings,
+  resolution: number,
+  innerDrawSize = resolution
+): LineObj {
+  const drawArea = Math.max(1, innerDrawSize)
+  const fontSize = Math.max(4, Math.round(drawArea * (settings.fontSizeRatio ?? 0.52)))
   // Favicon renderer scales letterSpacing by areaSize/256; paint uses full resolution.
   const letterSpacing = (settings.letterSpacing ?? 0) * (resolution / 256)
   const weight = parseFontWeightNum(settings.fontWeight)
@@ -651,9 +661,11 @@ function lineFromOutsideText(settings: OutsideTextSettings, resolution: number):
 function applyOutsideTextToLine(
   l: LineObj,
   settings: OutsideTextSettings,
-  resolution: number
+  resolution: number,
+  innerDrawSize = resolution
 ): LineObj {
-  const fontSize = Math.max(4, Math.round(resolution * (settings.fontSizeRatio ?? 0.52)))
+  const drawArea = Math.max(1, innerDrawSize)
+  const fontSize = Math.max(4, Math.round(drawArea * (settings.fontSizeRatio ?? 0.52)))
   const letterSpacing = (settings.letterSpacing ?? 0) * (resolution / 256)
   const weight = parseFontWeightNum(settings.fontWeight)
   const off = outsideOffsetToPaint(settings, resolution)
@@ -679,14 +691,21 @@ function applyOutsideTextToLine(
 function lineFromContentProxy(
   crop: { dataUrl: string; w: number; h: number },
   settings: OutsideContentSettings,
-  resolution: number
+  resolution: number,
+  innerDrawSize = resolution
 ): LineObj {
   const off = outsideOffsetToPaint(settings, resolution)
   const shadow = outsideShadowToPaint(settings, resolution)
   const cx = resolution / 2 + off.x
   const cy = resolution / 2 + off.y
   // Size from live sizeRatio; crop only supplies pixels + aspect (not bbox size).
-  const { w, h } = proxyBoxFromSizeRatio(settings.sizeRatio, resolution, crop.w, crop.h)
+  const { w, h } = proxyBoxFromSizeRatio(
+    settings.sizeRatio,
+    resolution,
+    crop.w,
+    crop.h,
+    innerDrawSize
+  )
   return {
     id: genId(),
     type: 'stamp',
@@ -713,7 +732,8 @@ function applyOutsideContentToProxy(
   l: LineObj,
   settings: OutsideContentSettings,
   resolution: number,
-  freshCrop?: { dataUrl: string; w: number; h: number }
+  freshCrop?: { dataUrl: string; w: number; h: number },
+  innerDrawSize = resolution
 ): LineObj {
   const off = outsideOffsetToPaint(settings, resolution)
   const shadow = outsideShadowToPaint(settings, resolution)
@@ -723,7 +743,13 @@ function applyOutsideContentToProxy(
   if (freshCrop || settings.sizeRatio != null) {
     const aspectW = freshCrop?.w ?? w
     const aspectH = freshCrop?.h ?? h
-    ;({ w, h } = proxyBoxFromSizeRatio(settings.sizeRatio, resolution, aspectW, aspectH))
+    ;({ w, h } = proxyBoxFromSizeRatio(
+      settings.sizeRatio,
+      resolution,
+      aspectW,
+      aspectH,
+      innerDrawSize
+    ))
   }
   const cx = resolution / 2 + off.x
   const cy = resolution / 2 + off.y
@@ -1723,6 +1749,7 @@ export function IconPaintEditor({
   containerOverlayImage = null,
   contentOverlayImage = null,
   resolution = 512,
+  innerDrawSize,
   title = 'Edit icon',
   hasContainer = true,
   initialVectors,
@@ -1989,6 +2016,7 @@ export function IconPaintEditor({
 
   const W = resolution
   const H = resolution
+  const innerDraw = Math.max(16, innerDrawSize ?? W)
 
   const ensureOffscreenCanvas = (ref: React.MutableRefObject<HTMLCanvasElement | null>) => {
     if (!ref.current) ref.current = document.createElement('canvas')
@@ -2237,7 +2265,7 @@ export function IconPaintEditor({
           visible: l.visible ?? l.editable ?? true
         }))
       } else if (outside && outsideAll?.kind !== 'proxy') {
-        const seeded = lineFromOutsideText(outside, W)
+        const seeded = lineFromOutsideText(outside, W, innerDraw)
         restored = [seeded]
         autoSelected = true
         setUseOutsideText(true)
@@ -2262,7 +2290,7 @@ export function IconPaintEditor({
           // Re-center after font metrics settle.
           const cur = linesRef.current.find((l) => l.id === seeded.id)
           if (!cur || !outsideTextRef.current) return
-          const next = applyOutsideTextToLine(cur, outsideTextRef.current, W)
+          const next = applyOutsideTextToLine(cur, outsideTextRef.current, W, innerDraw)
           linesRef.current = linesRef.current.map((l) => (l.id === next.id ? next : l))
           setLines([...linesRef.current])
           setTxtShadow(!!next.shadow)
@@ -2284,11 +2312,11 @@ export function IconPaintEditor({
             (l) => l.contentBound && (l.type === 'stamp' || l.type === 'shape')
           )
           if (existing) {
-            const next = applyOutsideContentToProxy(existing, outsideAll, W, crop)
+            const next = applyOutsideContentToProxy(existing, outsideAll, W, crop, innerDraw)
             restored = restored.map((l) => (l.id === next.id ? next : l))
             seededProxy = next
           } else {
-            seededProxy = lineFromContentProxy(crop, outsideAll, W)
+            seededProxy = lineFromContentProxy(crop, outsideAll, W, innerDraw)
             restored = [...restored, seededProxy]
           }
           // Live Inner settings stay outside — clear base so we don't double-draw.
@@ -2322,7 +2350,7 @@ export function IconPaintEditor({
         setUseOutsideText(linkOutside)
         // Re-apply live outside Inner letters settings (text/font/color/size/offset).
         if (linkOutside && linked && outside) {
-          const next = applyOutsideTextToLine(linked, outside, W)
+          const next = applyOutsideTextToLine(linked, outside, W, innerDraw)
           restored = restored.map((l) => (l.id === next.id ? next : l))
           setTextValue(next.text ?? '')
           setFontFamily(next.fontFamily ?? 'Inter')
@@ -2344,7 +2372,7 @@ export function IconPaintEditor({
           loadFont(next.fontFamily ?? 'Inter').then(() => {
             const cur = linesRef.current.find((l) => l.id === next.id)
             if (!cur || !outsideTextRef.current) return
-            const recentered = applyOutsideTextToLine(cur, outsideTextRef.current, W)
+            const recentered = applyOutsideTextToLine(cur, outsideTextRef.current, W, innerDraw)
             linesRef.current = linesRef.current.map((l) => (l.id === recentered.id ? recentered : l))
             setLines([...linesRef.current])
             setTxtShadow(!!recentered.shadow)
@@ -2369,7 +2397,7 @@ export function IconPaintEditor({
       pushHistory()
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [containerImage, contentImage, containerOverlayImage, contentOverlayImage, hasContainer, initialVectors, initialLayerOrder])
+  }, [containerImage, contentImage, containerOverlayImage, contentOverlayImage, hasContainer, initialVectors, initialLayerOrder, innerDrawSize])
 
   const restoreTaggedSnapshot = (snap: Snap, tags: string[]) => {
     const cc = containerCtx()
@@ -3501,7 +3529,7 @@ export function IconPaintEditor({
     // Text: place a new text object and edit it on the canvas.
     if (tool === 'text') {
       if (useOutsideText && outsideTextRef.current) {
-        const nl = lineFromOutsideText(outsideTextRef.current, W)
+        const nl = lineFromOutsideText(outsideTextRef.current, W, innerDraw)
         // Keep optical center (linked letters); click only starts edit.
         linesRef.current = [...linesRef.current, nl]
         commitLines([...linesRef.current])
@@ -3509,7 +3537,7 @@ export function IconPaintEditor({
         loadFont(nl.fontFamily ?? 'Inter').then(() => {
           const cur = linesRef.current.find((l) => l.id === nl.id)
           if (!cur || !outsideTextRef.current) return
-          const next = applyOutsideTextToLine(cur, outsideTextRef.current, W)
+          const next = applyOutsideTextToLine(cur, outsideTextRef.current, W, innerDraw)
           linesRef.current = linesRef.current.map((l) => (l.id === next.id ? next : l))
           commitLines(linesRef.current)
           redrawLines(); drawHandles()
@@ -5958,6 +5986,7 @@ export function IconPaintEditor({
     const contentSync = buildPaintContentSync({
       vectors,
       resolution: W,
+      innerDrawSize: innerDraw,
       contentComposite,
       containerBase: baseCc,
       containerOverlay: cc,
@@ -6433,14 +6462,14 @@ export function IconPaintEditor({
         : linesRef.current.find((l) => l.type === 'text' && l.linkedOutsideText)
           ?? linesRef.current.find((l) => l.type === 'text')
     if (!target) {
-      const seeded = lineFromOutsideText(settings, W)
+      const seeded = lineFromOutsideText(settings, W, innerDraw)
       linesRef.current = [...linesRef.current, seeded]
       commitLines(linesRef.current)
       selectLine(seeded)
       loadFont(seeded.fontFamily ?? 'Inter').then(() => {
         const cur = linesRef.current.find((l) => l.id === seeded.id)
         if (!cur) return
-        const next = applyOutsideTextToLine(cur, settings, W)
+        const next = applyOutsideTextToLine(cur, settings, W, innerDraw)
         linesRef.current = linesRef.current.map((l) => (l.id === next.id ? next : l))
         commitLines(linesRef.current)
         setTextValue(next.text ?? '')
@@ -6463,7 +6492,7 @@ export function IconPaintEditor({
       })
       return
     }
-    const next = applyOutsideTextToLine(target, settings, W)
+    const next = applyOutsideTextToLine(target, settings, W, innerDraw)
     linesRef.current = linesRef.current.map((l) => (l.id === next.id ? next : l))
     commitLines(linesRef.current)
     selectedIdRef.current = next.id

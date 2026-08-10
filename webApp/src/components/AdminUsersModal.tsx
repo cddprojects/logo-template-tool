@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useState } from 'react'
 import {
   createUser,
+  deleteUser,
+  getAuthUser,
   listUsers,
-  patchUserRole,
+  patchUser,
   type AuthUser,
   type UserRole
 } from '../platform/auth'
@@ -19,6 +21,11 @@ export function AdminUsersModal({ onClose }: AdminUsersModalProps): JSX.Element 
   const [password, setPassword] = useState('')
   const [role, setRole] = useState<UserRole>('member')
   const [creating, setCreating] = useState(false)
+  const [resetId, setResetId] = useState<string | null>(null)
+  const [resetPassword, setResetPassword] = useState('')
+  const [busyId, setBusyId] = useState<string | null>(null)
+
+  const currentUser = getAuthUser()
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -53,20 +60,60 @@ export function AdminUsersModal({ onClose }: AdminUsersModalProps): JSX.Element 
   }
 
   const handleRoleChange = async (id: string, next: UserRole) => {
+    setBusyId(id)
     setError(null)
-    const result = await patchUserRole(id, next)
+    const result = await patchUser(id, { role: next })
+    setBusyId(null)
+    if (!result.ok) {
+      setError(result.error)
+      await refresh()
+      return
+    }
+    await refresh()
+  }
+
+  const handleResetPassword = async (id: string) => {
+    if (resetPassword.length < 6) {
+      setError('Password must be at least 6 characters')
+      return
+    }
+    setBusyId(id)
+    setError(null)
+    const result = await patchUser(id, { password: resetPassword })
+    setBusyId(null)
     if (!result.ok) {
       setError(result.error)
       return
+    }
+    setResetId(null)
+    setResetPassword('')
+  }
+
+  const handleDelete = async (u: AuthUser) => {
+    if (!confirm(`Delete account “${u.email}”? Their templates will also be removed.`)) return
+    setBusyId(u.id)
+    setError(null)
+    const result = await deleteUser(u.id)
+    setBusyId(null)
+    if (!result.ok) {
+      setError(result.error)
+      return
+    }
+    if (resetId === u.id) {
+      setResetId(null)
+      setResetPassword('')
     }
     await refresh()
   }
 
   return (
     <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/60 p-4">
-      <div className="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-2xl">
+      <div className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-2xl">
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
-          <h2 className="text-sm font-semibold text-text">Users</h2>
+          <div>
+            <h2 className="text-sm font-semibold text-text">Users</h2>
+            <p className="text-[10px] text-muted">All accounts, including admins</p>
+          </div>
           <button
             type="button"
             onClick={onClose}
@@ -124,26 +171,81 @@ export function AdminUsersModal({ onClose }: AdminUsersModalProps): JSX.Element 
           {loading ? (
             <p className="text-xs text-muted">Loading…</p>
           ) : (
-            <ul className="space-y-1">
-              {users.map((u) => (
-                <li
-                  key={u.id}
-                  className="flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-surface2"
-                >
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-xs font-medium text-text">{u.email}</p>
-                    <p className="text-[10px] text-muted">{u.createdAt?.slice(0, 10)}</p>
-                  </div>
-                  <select
-                    value={u.role}
-                    onChange={(e) => void handleRoleChange(u.id, e.target.value as UserRole)}
-                    className="rounded-md border border-border bg-bg px-2 py-1 text-[11px] text-text outline-none focus:border-accent"
+            <ul className="space-y-2">
+              {users.map((u) => {
+                const isSelf = u.id === currentUser?.id
+                const isReset = resetId === u.id
+                return (
+                  <li
+                    key={u.id}
+                    className="rounded-lg border border-border bg-surface2/40 px-3 py-2.5"
                   >
-                    <option value="member">member</option>
-                    <option value="admin">admin</option>
-                  </select>
-                </li>
-              ))}
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-xs font-medium text-text">
+                          {u.email}
+                          {isSelf && (
+                            <span className="ml-1.5 text-[10px] font-normal text-accent">(you)</span>
+                          )}
+                        </p>
+                        <p className="text-[10px] text-muted">
+                          {u.role} · joined {u.createdAt?.slice(0, 10)}
+                        </p>
+                      </div>
+                      <select
+                        value={u.role}
+                        disabled={busyId === u.id}
+                        onChange={(e) => void handleRoleChange(u.id, e.target.value as UserRole)}
+                        className="rounded-md border border-border bg-bg px-2 py-1 text-[11px] text-text outline-none focus:border-accent disabled:opacity-50"
+                      >
+                        <option value="member">member</option>
+                        <option value="admin">admin</option>
+                      </select>
+                      <button
+                        type="button"
+                        disabled={busyId === u.id}
+                        onClick={() => {
+                          setResetId(isReset ? null : u.id)
+                          setResetPassword('')
+                          setError(null)
+                        }}
+                        className="rounded-md border border-border px-2 py-1 text-[11px] text-text-dim hover:border-accent hover:text-accent disabled:opacity-50"
+                      >
+                        {isReset ? 'Cancel' : 'Password'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busyId === u.id}
+                        onClick={() => void handleDelete(u)}
+                        className="rounded-md px-2 py-1 text-[11px] text-danger hover:bg-surface3 disabled:opacity-50"
+                        title={isSelf ? 'Cannot delete the last admin' : 'Delete account'}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                    {isReset && (
+                      <div className="mt-2 flex items-center gap-2 border-t border-border pt-2">
+                        <input
+                          type="password"
+                          minLength={6}
+                          value={resetPassword}
+                          onChange={(e) => setResetPassword(e.target.value)}
+                          placeholder="New password (min 6)"
+                          className="min-w-0 flex-1 rounded-md border border-border bg-bg px-2.5 py-1.5 text-xs text-text outline-none focus:border-accent"
+                        />
+                        <button
+                          type="button"
+                          disabled={busyId === u.id}
+                          onClick={() => void handleResetPassword(u.id)}
+                          className="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-accent-hover disabled:opacity-50"
+                        >
+                          Update
+                        </button>
+                      </div>
+                    )}
+                  </li>
+                )
+              })}
             </ul>
           )}
         </div>

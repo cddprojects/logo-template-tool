@@ -131,6 +131,8 @@ export function buildFaviconFileName(
 export interface ExportNameOpts {
   nameStyle?: ExportNameStyle
   variantIndex?: number
+  highQuality?: boolean
+  faviconIconSource?: FaviconConfig
 }
 
 // ── Logo export ───────────────────────────────────────────────────────────────
@@ -143,7 +145,13 @@ export async function exportLogoPng(
   opts?: ExportNameOpts
 ): Promise<void> {
   const canvas = document.createElement('canvas')
-  await renderLogo(canvas, config, scale)
+  await renderLogo(
+    canvas,
+    config,
+    scale,
+    opts?.highQuality ?? true,
+    opts?.faviconIconSource
+  )
   const filename = buildLogoFileName(
     opts?.nameStyle ?? 'full',
     versionName,
