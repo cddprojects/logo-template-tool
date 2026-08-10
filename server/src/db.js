@@ -95,11 +95,31 @@ export function openDb(dataDir) {
 function seedAdmin(db) {
   const email = (process.env.ADMIN_EMAIL || 'admin@kitteasy.com').trim().toLowerCase()
   const password = process.env.ADMIN_PASSWORD || 'changeme'
-  const existing = db.prepare('SELECT id FROM users WHERE email = ?').get(email)
-  if (existing) return
+  const forceReset = process.env.ADMIN_PASSWORD_RESET === 'true'
 
-  const anyAdmin = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get()
-  if (anyAdmin) return
+  const existing = db.prepare('SELECT id, email FROM users WHERE email = ?').get(email)
+  if (existing) {
+    if (forceReset) {
+      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(
+        bcrypt.hashSync(password, 12),
+        existing.id
+      )
+      console.log(`[server] Reset admin password for ${email} (ADMIN_PASSWORD_RESET=true)`)
+    }
+    return
+  }
+
+  const anyAdmin = db
+    .prepare("SELECT id, email FROM users WHERE role = 'admin' LIMIT 1")
+    .get()
+  if (anyAdmin) {
+    console.warn(
+      `[server] Admin account already exists (${anyAdmin.email}). ` +
+        'ADMIN_EMAIL/ADMIN_PASSWORD env vars only apply on a fresh database. ' +
+        'To apply ADMIN_PASSWORD to that email, set ADMIN_PASSWORD_RESET=true for one deploy, then remove it.'
+    )
+    return
+  }
 
   const id = nanoid()
   const hash = bcrypt.hashSync(password, 12)

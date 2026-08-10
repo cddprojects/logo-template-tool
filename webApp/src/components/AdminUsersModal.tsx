@@ -21,9 +21,9 @@ export function AdminUsersModal({ onClose }: AdminUsersModalProps): JSX.Element 
   const [password, setPassword] = useState('')
   const [role, setRole] = useState<UserRole>('member')
   const [creating, setCreating] = useState(false)
-  const [resetId, setResetId] = useState<string | null>(null)
-  const [resetPassword, setResetPassword] = useState('')
+  const [passwordDrafts, setPasswordDrafts] = useState<Record<string, string>>({})
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [savedId, setSavedId] = useState<string | null>(null)
 
   const currentUser = getAuthUser()
 
@@ -73,20 +73,27 @@ export function AdminUsersModal({ onClose }: AdminUsersModalProps): JSX.Element 
   }
 
   const handleResetPassword = async (id: string) => {
-    if (resetPassword.length < 6) {
+    const nextPassword = passwordDrafts[id] ?? ''
+    if (nextPassword.length < 6) {
       setError('Password must be at least 6 characters')
       return
     }
     setBusyId(id)
     setError(null)
-    const result = await patchUser(id, { password: resetPassword })
+    setSavedId(null)
+    const result = await patchUser(id, { password: nextPassword })
     setBusyId(null)
     if (!result.ok) {
       setError(result.error)
       return
     }
-    setResetId(null)
-    setResetPassword('')
+    setPasswordDrafts((prev) => {
+      const next = { ...prev }
+      delete next[id]
+      return next
+    })
+    setSavedId(id)
+    window.setTimeout(() => setSavedId((current) => (current === id ? null : current)), 2000)
   }
 
   const handleDelete = async (u: AuthUser) => {
@@ -99,10 +106,11 @@ export function AdminUsersModal({ onClose }: AdminUsersModalProps): JSX.Element 
       setError(result.error)
       return
     }
-    if (resetId === u.id) {
-      setResetId(null)
-      setResetPassword('')
-    }
+    setPasswordDrafts((prev) => {
+      const next = { ...prev }
+      delete next[u.id]
+      return next
+    })
     await refresh()
   }
 
@@ -112,7 +120,10 @@ export function AdminUsersModal({ onClose }: AdminUsersModalProps): JSX.Element 
         <div className="flex items-center justify-between border-b border-border px-4 py-3">
           <div>
             <h2 className="text-sm font-semibold text-text">Users</h2>
-            <p className="text-[10px] text-muted">All accounts, including admins</p>
+            <p className="text-[10px] text-muted">
+              Manage every account. Passwords are stored securely and cannot be viewed — set a new
+              one for any user below.
+            </p>
           </div>
           <button
             type="button"
@@ -170,83 +181,94 @@ export function AdminUsersModal({ onClose }: AdminUsersModalProps): JSX.Element 
 
           {loading ? (
             <p className="text-xs text-muted">Loading…</p>
+          ) : users.length === 0 ? (
+            <p className="text-xs text-muted">No accounts found.</p>
           ) : (
-            <ul className="space-y-2">
-              {users.map((u) => {
-                const isSelf = u.id === currentUser?.id
-                const isReset = resetId === u.id
-                return (
-                  <li
-                    key={u.id}
-                    className="rounded-lg border border-border bg-surface2/40 px-3 py-2.5"
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-xs font-medium text-text">
-                          {u.email}
-                          {isSelf && (
-                            <span className="ml-1.5 text-[10px] font-normal text-accent">(you)</span>
-                          )}
-                        </p>
-                        <p className="text-[10px] text-muted">
-                          {u.role} · joined {u.createdAt?.slice(0, 10)}
-                        </p>
-                      </div>
-                      <select
-                        value={u.role}
-                        disabled={busyId === u.id}
-                        onChange={(e) => void handleRoleChange(u.id, e.target.value as UserRole)}
-                        className="rounded-md border border-border bg-bg px-2 py-1 text-[11px] text-text outline-none focus:border-accent disabled:opacity-50"
-                      >
-                        <option value="member">member</option>
-                        <option value="admin">admin</option>
-                      </select>
-                      <button
-                        type="button"
-                        disabled={busyId === u.id}
-                        onClick={() => {
-                          setResetId(isReset ? null : u.id)
-                          setResetPassword('')
-                          setError(null)
-                        }}
-                        className="rounded-md border border-border px-2 py-1 text-[11px] text-text-dim hover:border-accent hover:text-accent disabled:opacity-50"
-                      >
-                        {isReset ? 'Cancel' : 'Password'}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={busyId === u.id}
-                        onClick={() => void handleDelete(u)}
-                        className="rounded-md px-2 py-1 text-[11px] text-danger hover:bg-surface3 disabled:opacity-50"
-                        title={isSelf ? 'Cannot delete the last admin' : 'Delete account'}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                    {isReset && (
-                      <div className="mt-2 flex items-center gap-2 border-t border-border pt-2">
-                        <input
-                          type="password"
-                          minLength={6}
-                          value={resetPassword}
-                          onChange={(e) => setResetPassword(e.target.value)}
-                          placeholder="New password (min 6)"
-                          className="min-w-0 flex-1 rounded-md border border-border bg-bg px-2.5 py-1.5 text-xs text-text outline-none focus:border-accent"
-                        />
+            <div className="space-y-2">
+              <p className="text-[10px] text-muted">
+                {users.length} account{users.length === 1 ? '' : 's'} — create more above, or set a
+                new password for any row.
+              </p>
+              <ul className="space-y-2">
+                {users.map((u) => {
+                  const isSelf = u.id === currentUser?.id
+                  const draft = passwordDrafts[u.id] ?? ''
+                  return (
+                    <li
+                      key={u.id}
+                      className="rounded-lg border border-border bg-surface2/40 px-3 py-2.5"
+                    >
+                      <div className="flex flex-wrap items-start gap-2">
+                        <div className="min-w-[140px] flex-1">
+                          <p className="truncate text-xs font-medium text-text">
+                            {u.email}
+                            {isSelf && (
+                              <span className="ml-1.5 text-[10px] font-normal text-accent">
+                                (you)
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-[10px] text-muted">
+                            {u.role} · joined {u.createdAt?.slice(0, 10)}
+                          </p>
+                        </div>
+                        <select
+                          value={u.role}
+                          disabled={busyId === u.id}
+                          onChange={(e) => void handleRoleChange(u.id, e.target.value as UserRole)}
+                          className="rounded-md border border-border bg-bg px-2 py-1 text-[11px] text-text outline-none focus:border-accent disabled:opacity-50"
+                          aria-label={`Role for ${u.email}`}
+                        >
+                          <option value="member">member</option>
+                          <option value="admin">admin</option>
+                        </select>
+                        <div className="flex min-w-[220px] flex-1 items-center gap-2">
+                          <input
+                            type="password"
+                            minLength={6}
+                            value={draft}
+                            disabled={busyId === u.id}
+                            onChange={(e) => {
+                              setError(null)
+                              setSavedId(null)
+                              setPasswordDrafts((prev) => ({
+                                ...prev,
+                                [u.id]: e.target.value
+                              }))
+                            }}
+                            placeholder="New password (min 6)"
+                            className="min-w-0 flex-1 rounded-md border border-border bg-bg px-2.5 py-1.5 text-xs text-text outline-none focus:border-accent disabled:opacity-50"
+                            aria-label={`New password for ${u.email}`}
+                          />
+                          <button
+                            type="button"
+                            disabled={busyId === u.id || draft.length < 6}
+                            onClick={() => void handleResetPassword(u.id)}
+                            className="shrink-0 rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-accent-hover disabled:opacity-50"
+                          >
+                            {busyId === u.id ? 'Saving…' : 'Set password'}
+                          </button>
+                        </div>
                         <button
                           type="button"
                           disabled={busyId === u.id}
-                          onClick={() => void handleResetPassword(u.id)}
-                          className="rounded-md bg-accent px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-accent-hover disabled:opacity-50"
+                          onClick={() => void handleDelete(u)}
+                          className="rounded-md px-2 py-1 text-[11px] text-danger hover:bg-surface3 disabled:opacity-50"
+                          title={isSelf ? 'Cannot delete the last admin' : 'Delete account'}
                         >
-                          Update
+                          Delete
                         </button>
                       </div>
-                    )}
-                  </li>
-                )
-              })}
-            </ul>
+                      {savedId === u.id && (
+                        <p className="mt-2 text-[10px] text-emerald-400">
+                          Password updated for {u.email}.
+                        </p>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
           )}
         </div>
       </div>

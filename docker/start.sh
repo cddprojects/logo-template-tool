@@ -6,10 +6,14 @@ mkdir -p "${DATA_ROOT}/templates" /run/nginx /var/log/nginx
 
 echo "[start] DATA_DIR=${DATA_ROOT}"
 if [ -f "${DATA_ROOT}/app.sqlite" ]; then
-  echo "[start] existing database found — data should persist across redeploys if /data is a mounted volume"
+  echo "[start] existing database found at ${DATA_ROOT}/app.sqlite"
+  echo "[start] if user counts drop after redeploy, add Coolify Persistent Storage mounted at /data"
 else
-  echo "[start] no database yet — will create on first API start"
-  echo "[start] IMPORTANT: mount persistent storage to /data in Coolify or data will reset each deploy"
+  echo "[start] WARNING: no database at ${DATA_ROOT}/app.sqlite — a new empty database will be created"
+  echo "[start] mount persistent storage at /data BEFORE creating users, or accounts are lost each redeploy"
+fi
+if [ "${ADMIN_PASSWORD_RESET:-}" = "true" ]; then
+  echo "[start] ADMIN_PASSWORD_RESET=true — admin password will be updated from ADMIN_PASSWORD on startup"
 fi
 
 cd /app/server

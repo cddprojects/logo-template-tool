@@ -8,6 +8,9 @@
 # Required env:
 #   DATA_DIR=/data
 #   JWT_SECRET=<long random string — keep stable across deploys or sessions reset>
+#   ADMIN_EMAIL / ADMIN_PASSWORD — only used when the database is empty (first boot)
+#   ADMIN_PASSWORD_RESET=true — one-time: set admin password from ADMIN_PASSWORD, then remove
+#   COOKIE_SECURE=true when the site is served over HTTPS (Coolify + TLS)
 services:
   web:
     build: .
@@ -18,6 +21,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-secret}
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@kitteasy.com}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-incorrect}
+      ADMIN_PASSWORD_RESET: ${ADMIN_PASSWORD_RESET:-false}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       NODE_ENV: production
     volumes:
