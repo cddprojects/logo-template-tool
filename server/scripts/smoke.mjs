@@ -11,7 +11,7 @@ fs.rmSync(dataDir, { recursive: true, force: true })
 const env = {
   ...process.env,
   DATA_DIR: dataDir,
-  PORT: '8799',
+  API_PORT: '8799',
   JWT_SECRET: 'smoke-test-secret-key',
   ADMIN_EMAIL: 'admin@example.com',
   ADMIN_PASSWORD: 'secret12',

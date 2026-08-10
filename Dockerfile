@@ -28,7 +28,7 @@ COPY docker/start.sh /start.sh
 RUN chmod +x /start.sh && mkdir -p /data /run/nginx
 
 ENV DATA_DIR=/data
-ENV PORT=8787
+ENV API_PORT=8787
 ENV NODE_ENV=production
 ENV COOKIE_SECURE=true
 

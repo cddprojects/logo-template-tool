@@ -10,7 +10,8 @@ import { templatesRoutes } from './routes/templates.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const dataDir = process.env.DATA_DIR || path.resolve(__dirname, '../../data')
-const port = Number(process.env.PORT || 8787)
+// Coolify sets PORT=80 for the public container port; API stays on an internal port behind nginx.
+const port = Number(process.env.API_PORT || 8787)
 
 const db = openDb(dataDir)
 const app = express()
