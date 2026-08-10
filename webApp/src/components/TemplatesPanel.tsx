@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ConfirmDialog } from '@renderer/components/ConfirmDialog'
+import { Search, X } from '@renderer/components/Icons'
 import { downloadIgTemplate, pause } from '@renderer/utils/templateFile'
 import {
   copyTemplate,
@@ -29,6 +30,8 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
   const [bulkAction, setBulkAction] = useState<BulkAction>('')
   const [bulkBusy, setBulkBusy] = useState(false)
   const [pendingDeleteIds, setPendingDeleteIds] = useState<string[] | null>(null)
+  const [query, setQuery] = useState('')
+  const searchRef = useRef<HTMLInputElement>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -51,8 +54,19 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
   const others = useMemo(() => templates.filter((t) => !t.isOwn), [templates])
   const list = tab === 'mine' ? mine : others
 
-  const allListChecked = list.length > 0 && list.every((t) => checkedIds.has(t.id))
-  const someListChecked = list.some((t) => checkedIds.has(t.id))
+  const filteredList = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return list
+    return list.filter((t) => {
+      const name = t.name.toLowerCase()
+      const owner = t.ownerEmail.toLowerCase()
+      return name.includes(q) || owner.includes(q)
+    })
+  }, [list, query])
+
+  const allListChecked =
+    filteredList.length > 0 && filteredList.every((t) => checkedIds.has(t.id))
+  const someListChecked = filteredList.some((t) => checkedIds.has(t.id))
 
   const toggleChecked = (id: string) => {
     setCheckedIds((prev) => {
@@ -67,9 +81,9 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
     setCheckedIds((prev) => {
       const next = new Set(prev)
       if (allListChecked) {
-        list.forEach((t) => next.delete(t.id))
+        filteredList.forEach((t) => next.delete(t.id))
       } else {
-        list.forEach((t) => next.add(t.id))
+        filteredList.forEach((t) => next.add(t.id))
       }
       return next
     })
@@ -78,6 +92,7 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
   useEffect(() => {
     setCheckedIds(new Set())
     setBulkAction('')
+    setQuery('')
   }, [tab])
 
   const selectedTemplates = useMemo(
@@ -334,6 +349,32 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
             </label>
           </div>
 
+          <div className="border-b border-border px-4 py-2">
+            <div className="flex items-center gap-1.5 rounded-md border border-border bg-surface2 px-2.5 py-1.5 focus-within:border-accent/50">
+              <Search size={12} className="shrink-0 text-muted" />
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={tab === 'mine' ? 'Search my templates…' : 'Search by name or owner…'}
+                className="min-w-0 flex-1 bg-transparent text-xs text-text placeholder:text-muted outline-none"
+              />
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQuery('')
+                    searchRef.current?.focus()
+                  }}
+                  className="text-muted hover:text-text"
+                  aria-label="Clear search"
+                >
+                  <X size={11} />
+                </button>
+              )}
+            </div>
+          </div>
+
           {list.length > 0 && (
             <div className="flex items-center gap-2 border-b border-border px-4 py-2">
               <label className="flex items-center gap-1.5 shrink-0 cursor-pointer">
@@ -385,9 +426,13 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
                   ? 'No templates yet. Export a version or upload a .igtemplate file.'
                   : 'No templates from other users.'}
               </p>
+            ) : filteredList.length === 0 ? (
+              <p className="px-2 py-6 text-center text-xs text-muted">
+                No templates match &ldquo;{query}&rdquo;
+              </p>
             ) : (
               <ul className="space-y-0.5">
-                {list.map((t) => (
+                {filteredList.map((t) => (
                   <li
                     key={t.id}
                     className="flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-surface2"
@@ -453,9 +498,12 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
             )}
           </div>
 
-          {checkedIds.size > 0 && (
+          {(checkedIds.size > 0 || query.trim()) && (
             <div className="border-t border-border px-4 py-2 text-[10px] text-muted">
-              {checkedIds.size} selected
+              {checkedIds.size > 0 && `${checkedIds.size} selected`}
+              {checkedIds.size > 0 && query.trim() && ' · '}
+              {query.trim() &&
+                `${filteredList.length} / ${list.length} shown`}
             </div>
           )}
         </div>
