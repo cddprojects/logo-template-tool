@@ -84,6 +84,39 @@ try {
     throw new Error('template missing from list')
   }
 
+  const wsGet = await fetch('http://127.0.0.1:8799/api/workspace', {
+    headers: { Cookie: cookie }
+  })
+  if (!wsGet.ok) throw new Error('workspace get failed: ' + (await wsGet.text()))
+  const emptyWs = await wsGet.json()
+  if (emptyWs.versions?.length) throw new Error('workspace should start empty')
+
+  const sampleVersions = [
+    {
+      id: 'v_smoke_1',
+      name: 'Smoke',
+      description: '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      logos: [],
+      favicons: []
+    }
+  ]
+  const wsPut = await fetch('http://127.0.0.1:8799/api/workspace', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ versions: sampleVersions })
+  })
+  if (!wsPut.ok) throw new Error('workspace put failed: ' + (await wsPut.text()))
+
+  const wsGet2 = await fetch('http://127.0.0.1:8799/api/workspace', {
+    headers: { Cookie: cookie }
+  })
+  const savedWs = await wsGet2.json()
+  if (savedWs.versions?.length !== 1 || savedWs.versions[0].id !== 'v_smoke_1') {
+    throw new Error('workspace round-trip failed')
+  }
+
   const user = await fetch('http://127.0.0.1:8799/api/users', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Cookie: cookie },

@@ -325,6 +325,7 @@ export function useVersions() {
   const [versions, setVersionsState] = useState<Version[]>([])
   const [loaded, setLoaded] = useState(false)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const loadedRef = useRef(false)
 
   // Always-current ref so callbacks never need to close over `versions` state.
   // This lets us declare all callbacks with stable identities (empty / [save] deps).
@@ -358,9 +359,11 @@ export function useVersions() {
 
   // Load from file on mount + listen for template imports from main process
   useEffect(() => {
+    loadedRef.current = false
     window.api.loadVersions().then((raw) => {
       const migrated = (raw as Record<string, unknown>[]).map(migrateVersion)
       setVersionsState(migrated)
+      loadedRef.current = true
       setLoaded(true)
       curLabelRef.current = 'Opened project'
       curTimeRef.current = Date.now()
@@ -372,27 +375,41 @@ export function useVersions() {
       setVersionsState((prev) => {
         if (prev.some((v) => v.id === version.id)) return prev
         const next = [...prev, version]
-        // Persist immediately: this cancels any stale pending save and replaces it
-        // with the full state that includes the newly imported template, preventing
-        // a race where a stale debounced save would overwrite the template.
-        persist(next)
+        versionsRef.current = next
+        if (loadedRef.current) persist(next)
         return next
       })
     })
 
-    // Hot-reload when the REST API patches a version externally
     window.api.onVersionsReloaded((raw) => {
       const migrated = (raw as Record<string, unknown>[]).map(migrateVersion)
+      loadedRef.current = true
       setVersionsState(migrated)
+      setLoaded(true)
     })
+
+    return () => {
+      if (saveTimer.current) {
+        clearTimeout(saveTimer.current)
+        saveTimer.current = null
+      }
+      if (loadedRef.current) {
+        void window.api.saveVersions(versionsRef.current)
+      }
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Debounced save to file whenever versions change (after initial load)
   const persist = useCallback((next: Version[]) => {
+    if (!loadedRef.current) return
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => {
-      window.api.saveVersions(next)
+      saveTimer.current = null
+      void window.api.saveVersions(next).then((result) => {
+        if (result && result.success === false) {
+          console.error('[versions] save failed:', result.error)
+        }
+      })
     }, 400)
   }, [])
 

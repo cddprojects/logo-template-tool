@@ -172,6 +172,25 @@ export async function copyTemplate(
   return { ok: true, template: result.data.template }
 }
 
+export async function loadWorkspace(): Promise<
+  { ok: true; versions: unknown[] } | { ok: false; error: string }
+> {
+  const result = await api<{ versions: unknown[] }>('/api/workspace')
+  if (!result.ok) return { ok: false, error: result.error }
+  return { ok: true, versions: Array.isArray(result.data.versions) ? result.data.versions : [] }
+}
+
+export async function saveWorkspace(
+  versions: unknown[]
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const result = await api<{ ok: boolean }>('/api/workspace', {
+    method: 'PUT',
+    body: JSON.stringify({ versions })
+  })
+  if (!result.ok) return { ok: false, error: result.error }
+  return { ok: true }
+}
+
 export async function listUsers(): Promise<
   { ok: true; users: AuthUser[] } | { ok: false; error: string }
 > {

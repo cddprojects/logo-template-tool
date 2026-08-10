@@ -1,6 +1,8 @@
 import { Router } from 'express'
+import fs from 'fs'
 import { nanoid } from 'nanoid'
 import { hashPassword, publicUser, requireAdmin, requireAuth } from '../auth.js'
+import { workspaceFilePath } from '../db.js'
 
 function getUser(db, id) {
   return db.prepare('SELECT id, email, role, created_at FROM users WHERE id = ?').get(id)
@@ -13,7 +15,7 @@ function lastAdminGuard(db, user) {
   return null
 }
 
-export function usersRoutes(db) {
+export function usersRoutes(db, dataDir) {
   const router = Router()
   router.use(requireAuth(db), requireAdmin)
 
@@ -115,6 +117,12 @@ export function usersRoutes(db) {
       return
     }
     db.prepare('DELETE FROM users WHERE id = ?').run(id)
+    try {
+      const workspace = workspaceFilePath(dataDir, id)
+      if (fs.existsSync(workspace)) fs.unlinkSync(workspace)
+    } catch {
+      // ignore
+    }
     res.json({ ok: true })
   })
 

@@ -12,7 +12,8 @@ export function getDataPaths(dataDir) {
   return {
     root,
     dbPath: path.join(root, 'app.sqlite'),
-    templatesDir: path.join(root, 'templates')
+    templatesDir: path.join(root, 'templates'),
+    workspaceDir: path.join(root, 'workspace')
   }
 }
 
@@ -121,9 +122,10 @@ export function describeDataStore(dataDir) {
 }
 
 export function openDb(dataDir) {
-  const { root, dbPath, templatesDir } = getDataPaths(dataDir)
+  const { root, dbPath, templatesDir, workspaceDir } = getDataPaths(dataDir)
   fs.mkdirSync(root, { recursive: true })
   fs.mkdirSync(templatesDir, { recursive: true })
+  fs.mkdirSync(workspaceDir, { recursive: true })
 
   const existed = fs.existsSync(dbPath)
   const db = new Database(dbPath)
@@ -220,4 +222,8 @@ export function templatesDir(dataDir, userId) {
 
 export function templateFilePath(dataDir, userId, templateId) {
   return path.join(templatesDir(dataDir, userId), `${templateId}.igtemplate`)
+}
+
+export function workspaceFilePath(dataDir, userId) {
+  return path.join(getDataPaths(dataDir).workspaceDir, `${userId}.json`)
 }

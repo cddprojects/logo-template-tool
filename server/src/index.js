@@ -7,6 +7,7 @@ import { openDb, describeDataStore } from './db.js'
 import { authRoutes } from './routes/auth.js'
 import { usersRoutes } from './routes/users.js'
 import { templatesRoutes } from './routes/templates.js'
+import { workspaceRoutes } from './routes/workspace.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const dataDir = process.env.DATA_DIR || path.resolve(__dirname, '../../data')
@@ -44,8 +45,9 @@ app.get('/api/health', (_req, res) => {
 })
 
 app.use('/api/auth', authRoutes(db))
-app.use('/api/users', usersRoutes(db))
+app.use('/api/users', usersRoutes(db, dataDir))
 app.use('/api/templates', templatesRoutes(db, dataDir))
+app.use('/api/workspace', workspaceRoutes(db, dataDir))
 
 app.use((err, _req, res, _next) => {
   console.error('[server]', err)

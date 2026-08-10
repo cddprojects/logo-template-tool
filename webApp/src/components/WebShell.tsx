@@ -65,7 +65,7 @@ export function WebShell(): JSX.Element {
 
   return (
     <>
-      <App />
+      <App key={user.id} />
       {showTemplates && <TemplatesPanel onClose={() => setShowTemplates(false)} />}
       {showAdmin && user.role === 'admin' && (
         <AdminUsersModal onClose={() => setShowAdmin(false)} />

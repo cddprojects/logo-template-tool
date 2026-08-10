@@ -12,36 +12,33 @@ import { iconifyFetch, iconifySearch } from './iconify'
 import {
   createTemplate,
   getAuthUser,
+  loadWorkspace,
   logout,
+  saveWorkspace,
   subscribeAuth,
   WEB_OPEN_TEMPLATES
 } from './auth'
 
-const VERSIONS_KEY = 'imggen:versions'
+const LEGACY_VERSIONS_KEY = 'imggen:versions'
 
 type Listener<T> = (payload: T) => void
 
 const templateImportedListeners: Listener<unknown>[] = []
 const versionsReloadedListeners: Listener<unknown[]>[] = []
 
-function readVersions(): unknown[] {
+function clearLegacyBrowserVersions(): void {
   try {
-    const raw = localStorage.getItem(VERSIONS_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed : []
+    localStorage.removeItem(LEGACY_VERSIONS_KEY)
   } catch {
-    return []
+    // ignore
   }
 }
 
-function writeVersions(data: unknown[]): { success: boolean; error?: string } {
-  try {
-    localStorage.setItem(VERSIONS_KEY, JSON.stringify(data))
-    return { success: true }
-  } catch (e) {
-    return { success: false, error: String(e) }
-  }
+async function reloadWorkspaceForListeners(): Promise<void> {
+  const result = await loadWorkspace()
+  if (!result.ok) return
+  clearLegacyBrowserVersions()
+  versionsReloadedListeners.forEach((cb) => cb(result.versions))
 }
 
 async function fetchGoogleFont(
@@ -186,6 +183,14 @@ async function exportGroup(
 export function installWebApi(): void {
   ;(window as Window & { __WEB__?: boolean }).__WEB__ = true
 
+  subscribeAuth((user) => {
+    if (user) {
+      void reloadWorkspaceForListeners()
+    } else {
+      versionsReloadedListeners.forEach((cb) => cb([]))
+    }
+  })
+
   ;(window as Window & {
     __webAuth?: {
       getUser: () => ReturnType<typeof getAuthUser>
@@ -236,10 +241,24 @@ export function installWebApi(): void {
 
     exportGroup,
 
-    loadVersions: async (): Promise<unknown[]> => readVersions(),
+    loadVersions: async (): Promise<unknown[]> => {
+      const result = await loadWorkspace()
+      if (!result.ok) {
+        console.error('[web] failed to load workspace from server:', result.error)
+        return []
+      }
+      clearLegacyBrowserVersions()
+      return result.versions
+    },
 
-    saveVersions: async (data: unknown[]): Promise<{ success: boolean; error?: string }> =>
-      writeVersions(data),
+    saveVersions: async (data: unknown[]): Promise<{ success: boolean; error?: string }> => {
+      const result = await saveWorkspace(data)
+      if (!result.ok) {
+        console.error('[web] failed to save workspace to server:', result.error)
+        return { success: false, error: result.error }
+      }
+      return { success: true }
+    },
 
     fetchGoogleFont,
 
