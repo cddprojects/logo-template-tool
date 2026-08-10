@@ -235,7 +235,12 @@ export function Sidebar({
         </p>
         <button
           onClick={handleOpenFolder}
-          title="Open templates folder"
+          title={
+            typeof window !== 'undefined' &&
+            !!(window as Window & { __WEB__?: boolean }).__WEB__
+              ? 'Browse template library'
+              : 'Open templates folder'
+          }
           className="flex items-center gap-1 text-[10px] text-muted hover:text-accent transition-colors"
         >
           <FolderOpen size={11} />

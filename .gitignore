@@ -1,9 +1,16 @@
 node_modules/
 desktopApp/node_modules/
 webApp/node_modules/
+server/node_modules/
 desktopApp/dist-app/
 desktopApp/out/
 webApp/dist/
 webApp/public/downloads/*.exe
+data/*.sqlite
+data/*.sqlite-*
+data/templates/
+data-test*/
 .DS_Store
 *.log
+.env
+.env.*

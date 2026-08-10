@@ -44,6 +44,12 @@ export default defineConfig({
     fs: {
       // Allow Vite to serve/import from the sibling desktopApp tree.
       allow: [path.resolve(__dirname, '..')]
+    },
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:8787',
+        changeOrigin: true
+      }
     }
   },
   build: {

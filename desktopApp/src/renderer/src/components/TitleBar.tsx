@@ -2,6 +2,14 @@ import { useState, useEffect } from 'react'
 import { Minus, X, ImageIcon, HelpCircle } from './Icons'
 import { HelpGuideModal } from './HelpGuideModal'
 
+type WebAuthUser = { email: string; role: 'member' | 'admin' }
+
+type WebAuthBridge = {
+  getUser: () => WebAuthUser | null
+  subscribe: (cb: (user: WebAuthUser | null) => void) => () => void
+  logout: () => Promise<void>
+}
+
 // Inline styles are mandatory for -webkit-app-region on Windows.
 // Vite's production CSS minifier (lightningcss) strips unknown vendor-prefixed
 // properties from stylesheets, so the property must be set via the element's
@@ -33,6 +41,7 @@ function RestoreIcon() {
 export function TitleBar(): JSX.Element {
   const [maximized, setMaximized] = useState(false)
   const [showHelp, setShowHelp] = useState(false)
+  const [webUser, setWebUser] = useState<WebAuthUser | null>(null)
   // Web build sets window.__WEB__; hide Electron-only window chrome there.
   const isWeb =
     typeof window !== 'undefined' &&
@@ -43,9 +52,22 @@ export function TitleBar(): JSX.Element {
     window.api?.onWindowMaximized?.((isMax: boolean) => setMaximized(isMax))
   }, [isWeb])
 
+  useEffect(() => {
+    if (!isWeb) return
+    const bridge = (window as Window & { __webAuth?: WebAuthBridge }).__webAuth
+    if (!bridge) return
+    return bridge.subscribe((u) => setWebUser(u))
+  }, [isWeb])
+
   const minimize = () => window.api?.windowMinimize()
   const toggleMaximize = () => window.api?.windowMaximize()
   const close = () => window.api?.windowClose()
+
+  const handleLogout = async () => {
+    const bridge = (window as Window & { __webAuth?: WebAuthBridge }).__webAuth
+    if (bridge) await bridge.logout()
+    else window.location.reload()
+  }
 
   return (
     <>
@@ -70,6 +92,31 @@ export function TitleBar(): JSX.Element {
             <HelpCircle size={14} />
           </button>
         </div>
+
+        {/* Web account controls */}
+        {isWeb && webUser && (
+          <div className="flex items-center gap-2">
+            {webUser.role === 'admin' && (
+              <button
+                type="button"
+                onClick={() => window.dispatchEvent(new CustomEvent('web:open-admin'))}
+                className="rounded-md px-2 py-1 text-[11px] text-muted hover:bg-surface3 hover:text-text"
+              >
+                Users
+              </button>
+            )}
+            <span className="max-w-[160px] truncate text-[11px] text-muted" title={webUser.email}>
+              {webUser.email}
+            </span>
+            <button
+              type="button"
+              onClick={() => void handleLogout()}
+              className="rounded-md px-2 py-1 text-[11px] text-muted hover:bg-surface3 hover:text-text"
+            >
+              Sign out
+            </button>
+          </div>
+        )}
 
         {/* Window controls — Electron only */}
         {!isWeb && (

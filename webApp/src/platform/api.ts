@@ -9,6 +9,13 @@ import {
   pngBuffersToIco
 } from './download'
 import { iconifyFetch, iconifySearch } from './iconify'
+import {
+  createTemplate,
+  getAuthUser,
+  logout,
+  subscribeAuth,
+  WEB_OPEN_TEMPLATES
+} from './auth'
 
 const VERSIONS_KEY = 'imggen:versions'
 
@@ -176,38 +183,24 @@ async function exportGroup(
   }
 }
 
-function pickTemplateFiles(): void {
-  const input = document.createElement('input')
-  input.type = 'file'
-  input.accept = '.igtemplate,application/json'
-  input.multiple = true
-  input.onchange = async () => {
-    const files = [...(input.files ?? [])]
-    for (const file of files) {
-      try {
-        const text = await file.text()
-        const tmpl = JSON.parse(text) as Record<string, unknown>
-        const now = new Date().toISOString()
-        const version = {
-          id: `v_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-          name: (tmpl.name as string) || file.name.replace(/\.igtemplate$/i, ''),
-          description: (tmpl.description as string) || '',
-          createdAt: now,
-          updatedAt: now,
-          logos: (tmpl.logos as unknown[]) ?? [],
-          favicons: (tmpl.favicons as unknown[]) ?? []
-        }
-        templateImportedListeners.forEach((cb) => cb(version))
-      } catch (err) {
-        console.error('Failed to import template', file.name, err)
-      }
-    }
-  }
-  input.click()
-}
-
 export function installWebApi(): void {
   ;(window as Window & { __WEB__?: boolean }).__WEB__ = true
+
+  ;(window as Window & {
+    __webAuth?: {
+      getUser: () => ReturnType<typeof getAuthUser>
+      subscribe: typeof subscribeAuth
+      logout: typeof logout
+    }
+  }).__webAuth = {
+    getUser: getAuthUser,
+    subscribe: subscribeAuth,
+    logout
+  }
+
+  window.addEventListener('web:template-imported', ((e: CustomEvent) => {
+    templateImportedListeners.forEach((cb) => cb(e.detail))
+  }) as EventListener)
 
   const api = {
     exportFile: async (
@@ -255,31 +248,23 @@ export function installWebApi(): void {
     ): Promise<{ success: boolean; filePath?: string; error?: string }> => {
       try {
         const v = version as { name?: string; description?: string; logos?: unknown; favicons?: unknown }
-        const payload = {
+        const result = await createTemplate({
           name: v.name ?? 'Untitled',
           description: v.description ?? '',
           logos: v.logos ?? [],
           favicons: v.favicons ?? []
-        }
-        const safe = String(payload.name)
-          .toLowerCase()
-          .replace(/[^a-z0-9._-]+/g, '-')
-          .replace(/^-+|-+$/g, '') || 'template'
-        const filename = `${safe}.igtemplate`
-        downloadBlob(
-          new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }),
-          filename
-        )
-        return { success: true, filePath: filename }
+        })
+        if (!result.ok) return { success: false, error: result.error }
+        return { success: true, filePath: result.template.id }
       } catch (e) {
         return { success: false, error: String(e) }
       }
     },
 
     openTemplatesFolder: async (): Promise<{ success: boolean; path?: string }> => {
-      // Web: open a file picker to import .igtemplate files.
-      pickTemplateFiles()
-      return { success: true, path: 'import' }
+      // Web: open the server templates panel (browse / copy / upload).
+      window.dispatchEvent(new CustomEvent(WEB_OPEN_TEMPLATES))
+      return { success: true, path: 'library' }
     },
 
     onTemplateImported: (cb: (version: unknown) => void) => {

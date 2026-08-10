@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+**/dist-app
+.git
+data
+data-test
+**/.env
+**/*.sqlite
+desktopApp/node_modules
+webApp/node_modules
+webApp/dist
+server/node_modules

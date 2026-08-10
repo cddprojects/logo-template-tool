@@ -1,0 +1,19 @@
+# Optional local/Coolify-style run. In Coolify you can also set a persistent
+# volume mount for /data and env vars without compose.
+services:
+  web:
+    build: .
+    ports:
+      - "8080:80"
+    environment:
+      DATA_DIR: /data
+      JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-secret}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@kitteasy.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-changeme}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      NODE_ENV: production
+    volumes:
+      - kitteasy-data:/data
+
+volumes:
+  kitteasy-data:
