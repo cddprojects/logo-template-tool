@@ -130,6 +130,30 @@ export function stripContentProxyVectors(vectors: PaintVector[] | null | undefin
   return (vectors ?? []).filter((v) => !isContentProxyVector(v))
 }
 
+/**
+ * Inner letters allow only one linkedOutsideText vector. Copies keep the flag
+ * and Save would sync position/text from the wrong (usually centered) layer.
+ */
+export function normalizeLinkedTextVectors(
+  vectors: PaintVector[] | null | undefined,
+  preferredId?: string | null
+): PaintVector[] {
+  const list = vectors ?? []
+  const linked = list.filter((v) => v.type === 'text' && v.linkedOutsideText)
+  if (linked.length <= 1) return list
+  const keepId =
+    preferredId && linked.some((v) => v.id === preferredId)
+      ? preferredId
+      : linked[linked.length - 1]!.id
+  return list.map((v) => {
+    if (v.type === 'text' && v.linkedOutsideText && v.id !== keepId) {
+      const { linkedOutsideText: _l, ...rest } = v
+      return rest as PaintVector
+    }
+    return v
+  })
+}
+
 export function paintPxToDesign(px: number, resolution: number): number {
   const res = Math.max(1, resolution || 512)
   return Math.round(px * (DESIGN_SIZE / res))
@@ -593,7 +617,8 @@ export function buildPaintContentSync(opts: {
     }
   }
 
-  const linked = opts.vectors.find((v) => v.type === 'text' && v.linkedOutsideText)
+  const linkedTexts = opts.vectors.filter((v) => v.type === 'text' && v.linkedOutsideText)
+  const linked = linkedTexts.length ? linkedTexts[linkedTexts.length - 1] : undefined
   const proxy = opts.vectors.find(
     (v) => v.contentBound && (v.type === 'stamp' || v.type === 'shape') && v.pts.length >= 2
   )

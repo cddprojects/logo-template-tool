@@ -763,19 +763,15 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
 
   const unlinkFromFavicon = useCallback(() => {
     if (!safeConfig) return
-    // Keep what the user was seeing (live favicon twin) as their custom icon.
-    const visible =
-      isSyncedWithFavicon && faviconContent
-        ? faviconContentToIconConfig(faviconContent, safeConfig.icon, faviconCfg)
-        : safeConfig.icon
+    // Restore the original custom icon preserved while synced — do not overwrite
+    // with the live favicon mirror.
     updateConfig({
       iconLinked: false,
       iconSyncBroken: false,
       syncedIconSnapshot: null,
-      syncedIcon: null,
-      icon: structuredClone(visible)
+      syncedIcon: null
     })
-  }, [safeConfig, isSyncedWithFavicon, faviconContent, faviconCfg, updateConfig])
+  }, [safeConfig, updateConfig])
 
   // Copy the full style (config) of a variant to the clipboard.
   const copyStyle = (id: string) => {

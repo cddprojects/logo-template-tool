@@ -22,6 +22,7 @@ import {
   clampSizeRatio,
   cropOpaqueToDataUrl,
   emptyOverlayPng,
+  normalizeLinkedTextVectors,
   proxyBoxFromSizeRatio,
   stripContentProxyVectors
 } from '../utils/paintSettingsSync'
@@ -5453,7 +5454,15 @@ export function IconPaintEditor({
       ...c,
       id: genId(),
       pts: c.pts.map((p) => ({ x: p.x + 16, y: p.y + 16 })),
-      layer: c.layer ?? activeAddLayer()
+      layer: c.layer ?? activeAddLayer(),
+      // Pasted copies are paint decorations — only one linkedOutsideText layer
+      // drives live Inner letters outside Paint.
+      linkedOutsideText: undefined,
+      contentBound: undefined,
+      name:
+        c.type === 'text' && c.linkedOutsideText
+          ? 'Text copy'
+          : c.name
     }
     if (nl.type === 'stamp' && nl.imageDataUrl) ensureStampImage(nl.imageDataUrl)
     linesRef.current = [...linesRef.current, nl]
@@ -5973,7 +5982,10 @@ export function IconPaintEditor({
     const ct = ensureOffscreenCanvas(contentCanvasRef)
     const baseCc = ensureOffscreenCanvas(baseContainerCanvasRef)
     const baseCt = ensureOffscreenCanvas(baseContentCanvasRef)
-    const vectors = cloneLines(linesRef.current) as unknown as PaintVector[]
+    const vectors = normalizeLinkedTextVectors(
+      cloneLines(linesRef.current) as unknown as PaintVector[],
+      selectedIdRef.current
+    )
     // Inner base + overlay for optical center / offset sync when no linked text.
     const contentComposite = document.createElement('canvas')
     contentComposite.width = W
