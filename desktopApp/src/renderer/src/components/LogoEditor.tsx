@@ -229,16 +229,15 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
 
   // Memoized: `faviconContentToIconConfig` runs expensive field copies + SVG
   // template replacement on every call. Only recompute when inputs actually change.
-  // Synced → live favicon twin (also mirrored into `syncedIcon`). Custom → `icon`.
   const effectiveIcon = useMemo<IconConfig | undefined>(() => {
     if (!safeConfig) return undefined
-    if (isSyncedWithFavicon && faviconContent) {
-      return faviconContentToIconConfig(faviconContent, safeConfig.icon, faviconCfg)
-    }
-    return isShowingFrozenSync && safeConfig.syncedIconSnapshot
-      ? safeConfig.syncedIconSnapshot
-      : safeConfig.icon
-  }, [safeConfig, faviconContent, faviconCfg, isSyncedWithFavicon, isShowingFrozenSync])
+    return resolveLogoEffectiveIcon(
+      safeConfig,
+      faviconContent,
+      faviconCfg,
+      canSyncWithFavicon
+    )
+  }, [safeConfig, faviconContent, faviconCfg, canSyncWithFavicon])
 
   const updateConfig = useCallback(
     (patch: Partial<LogoConfig>) => {
@@ -552,11 +551,14 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
               }
             }
           }
-          // Unsynced / frozen: persist onto the visible icon surface.
-          const baseIcon =
-            v.config.iconSyncBroken && v.config.syncedIconSnapshot
-              ? v.config.syncedIconSnapshot
-              : v.config.icon
+          // Unsynced / frozen: persist onto what the logo actually shows, not a
+          // stale custom `icon` left behind while synced (see resolveLogoEffectiveIcon).
+          const baseIcon = resolveLogoEffectiveIcon(
+            v.config,
+            twin?.config.content,
+            twin?.config,
+            !!twin
+          )
           const icon = applyPaintContentSyncToIcon(
             { ...baseIcon, paintSession: session },
             sync
@@ -568,6 +570,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
               iconLinked: false,
               iconSyncBroken: false,
               syncedIconSnapshot: null,
+              syncedIcon: null,
               icon: updateIconStashAfterSave(icon, session)
             }
           }
@@ -749,13 +752,20 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   }
 
   const unlinkFromFavicon = useCallback(() => {
-    // Restore the original custom icon — it was preserved in `icon` while synced.
+    if (!safeConfig) return
+    // Keep what the user was seeing (live favicon twin) as their custom icon.
+    const visible =
+      isSyncedWithFavicon && faviconContent
+        ? faviconContentToIconConfig(faviconContent, safeConfig.icon, faviconCfg)
+        : safeConfig.icon
     updateConfig({
       iconLinked: false,
       iconSyncBroken: false,
-      syncedIconSnapshot: null
+      syncedIconSnapshot: null,
+      syncedIcon: null,
+      icon: structuredClone(visible)
     })
-  }, [updateConfig])
+  }, [safeConfig, isSyncedWithFavicon, faviconContent, faviconCfg, updateConfig])
 
   // Copy the full style (config) of a variant to the clipboard.
   const copyStyle = (id: string) => {
@@ -820,7 +830,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
         })
       )
     } else {
-      const sourceIcon = structuredClone(safeConfig.icon)
+      const sourceIcon = structuredClone(effectiveIcon ?? safeConfig.icon)
       onChange(
         variants.map((variant) => ({
           ...variant,
@@ -1714,6 +1724,30 @@ const COMPLEX_SHAPE_Y_OFFSET_RATIO: Record<string, number> = {
   'map-pin': -0.15,  // circular head sits at ~35% of bounding-box height
   'shield':  -0.025, // shield centre sits at ~47.5% of bounding-box height
   'badge':    0,     // badge is symmetric, centre at 50%
+}
+
+/** Icon actually shown in preview / paint open / unsynced paint save for one logo variant. */
+export function resolveLogoEffectiveIcon(
+  config: LogoConfig,
+  faviconContent: FaviconContent | undefined,
+  faviconCfg: FaviconConfig | undefined,
+  canSyncWithFavicon: boolean
+): IconConfig {
+  if ((config.iconLinked ?? true) && canSyncWithFavicon && faviconContent) {
+    return faviconContentToIconConfig(faviconContent, config.icon, faviconCfg)
+  }
+  if (
+    !config.iconLinked &&
+    config.iconSyncBroken &&
+    config.syncedIconSnapshot
+  ) {
+    return config.syncedIconSnapshot
+  }
+  // After unlink the stored custom `icon` is often stale; keep the last synced mirror.
+  if (!config.iconLinked && config.syncedIcon) {
+    return config.syncedIcon
+  }
+  return config.icon
 }
 
 export function faviconContentToIconConfig(content: FaviconContent, base: IconConfig, faviconCfg?: FaviconConfig): IconConfig {

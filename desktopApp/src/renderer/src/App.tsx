@@ -193,7 +193,7 @@ export default function App(): JSX.Element {
     if (!sel) return
     setGroupExporting(true)
     try {
-      const [{ renderLogo, renderFavicon }, { faviconContentToIconConfig }, { groupExportFileName }] = await Promise.all([
+      const [{ renderLogo, renderFavicon }, { resolveLogoEffectiveIcon }, { groupExportFileName }] = await Promise.all([
         import('./utils/renderer'),
         import('./components/LogoEditor'),
         import('./utils/exporter'),
@@ -208,21 +208,17 @@ export default function App(): JSX.Element {
         const cfg = logoVariant.config
 
         // Sync only when a favicon variant shares the exact same label.
-        let effectiveIcon = cfg.icon
-        let faviconIconSource: import('./types').FaviconConfig | undefined
         const matchingFavicon = sel.favicons.find((f) => f.label === logoVariant.label)
-        if (cfg.iconLinked ?? true) {
-          if (matchingFavicon?.config?.content) {
-            effectiveIcon = faviconContentToIconConfig(
-              matchingFavicon.config.content,
-              cfg.icon,
-              matchingFavicon.config
-            )
-            faviconIconSource = matchingFavicon.config
-          }
-        } else if (cfg.iconSyncBroken && cfg.syncedIconSnapshot) {
-          effectiveIcon = cfg.syncedIconSnapshot
-        }
+        const effectiveIcon = resolveLogoEffectiveIcon(
+          cfg,
+          matchingFavicon?.config?.content,
+          matchingFavicon?.config,
+          !!matchingFavicon
+        )
+        const faviconIconSource =
+          (cfg.iconLinked ?? true) && matchingFavicon?.config
+            ? matchingFavicon.config
+            : undefined
 
         const canvas = document.createElement('canvas')
         await renderLogo(canvas, { ...cfg, icon: effectiveIcon }, 4, true, faviconIconSource)
