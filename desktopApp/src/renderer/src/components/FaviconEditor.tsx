@@ -25,6 +25,7 @@ import {
   updateIconStashAfterSave
 } from '../utils/paintSettingsSync'
 import { faviconContentToIconConfig } from './LogoEditor'
+import { contentTypeFromIconForFavicon, FAVICON_CONTENT_TYPE_OPTIONS, unwrapSvgPath } from '../utils/contentTypeSync'
 import { sanitizePaintSessionProxies, syncOutsideLettersIntoPaintSession } from '../utils/paintDecorations'
 import { CanvaPromptPanel } from './CanvaPromptPanel'
 
@@ -453,19 +454,13 @@ export function FaviconEditor({
       })
       return
     }
-    const contentType =
-      icon.sourceType === 'letters' ? 'letters'
-        : icon.sourceType === 'shape' ? 'shape'
-          : icon.sourceType === 'lucide' ? 'lucide'
-            : icon.sourceType === 'svg' ? 'svg-markup'
-              : icon.sourceType === 'image' ? 'image'
-                : config.content.type
+    const contentType = contentTypeFromIconForFavicon(icon)
     updateConfig({
       paintSession: null,
       content: {
         ...config.content,
         type: contentType,
-        text: icon.text ?? config.content.text,
+        text: contentType === 'canva' ? config.content.text : (icon.text ?? config.content.text),
         textColor: icon.textColor ?? icon.primaryColor ?? config.content.textColor,
         fontFamily: icon.fontFamily ?? config.content.fontFamily,
         fontWeight: icon.fontWeight ?? config.content.fontWeight,
@@ -483,9 +478,19 @@ export function FaviconEditor({
         lucideColor: icon.primaryColor ?? config.content.lucideColor,
         lucideSizeRatio: icon.lucideSizeRatio ?? config.content.lucideSizeRatio,
         lucideStrokeWidth: icon.lucideStrokeWidth ?? config.content.lucideStrokeWidth,
-        svgMarkup: icon.svgMarkup ?? config.content.svgMarkup,
+        svgMarkup: contentType === 'svg-markup' ? (icon.svgMarkup ?? '') : config.content.svgMarkup,
+        svgPath: contentType === 'svg' ? unwrapSvgPath(icon.svgMarkup ?? '') : config.content.svgPath,
+        svgColor: contentType === 'svg' ? (icon.primaryColor ?? config.content.svgColor) : config.content.svgColor,
         svgMarkupSizeRatio: icon.svgMarkupSizeRatio ?? config.content.svgMarkupSizeRatio,
         svgMarkupUseOriginalColors: icon.svgMarkupUseOriginalColors ?? false,
+        svgMarkupSecondaryColor: icon.svgMarkupSecondaryColor ?? '',
+        svgMarkupTertiaryColor: icon.svgMarkupTertiaryColor ?? '',
+        svgMarkupColor4: icon.svgMarkupColor4 ?? '',
+        svgMarkupColor5: icon.svgMarkupColor5 ?? '',
+        canvaPrimaryColor:
+          contentType === 'canva'
+            ? (icon.textColor ?? icon.primaryColor ?? config.content.canvaPrimaryColor)
+            : config.content.canvaPrimaryColor,
         imageDataUrl: icon.imageDataUrl ?? '',
         imageSizeRatio: icon.imageSizeRatio ?? 0.8,
         imageUseOriginalColors: icon.imageUseOriginalColors ?? true,
@@ -1070,15 +1075,7 @@ export function FaviconEditor({
 
           <Section title="Inner Content">
             <SelectRow label="Content type" value={config.content.type}
-              options={[
-                { label: 'Letters / Text', value: 'letters' },
-                { label: 'Geometric Shape', value: 'shape' },
-                { label: 'Icon Library', value: 'lucide' },
-                { label: 'Custom SVG', value: 'svg-markup' },
-                { label: 'SVG Path (d=)', value: 'svg' },
-                { label: 'Image Upload', value: 'image' },
-                { label: 'Canva', value: 'canva' }
-              ]}
+              options={FAVICON_CONTENT_TYPE_OPTIONS}
               onChange={(v) => setContent({ type: v as FaviconConfig['content']['type'] })}
             />
 

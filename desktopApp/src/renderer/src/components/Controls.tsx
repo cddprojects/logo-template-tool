@@ -714,15 +714,19 @@ interface SelectRowProps {
   value: string
   options: { label: string; value: string }[]
   onChange: (v: string) => void
+  disabled?: boolean
 }
 
-export function SelectRow({ label, value, options, onChange }: SelectRowProps): JSX.Element {
+export function SelectRow({ label, value, options, onChange, disabled }: SelectRowProps): JSX.Element {
   return (
     <Row label={label}>
       <select
         value={value}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.value)}
-        className="w-full min-w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs text-text focus:outline-none focus:border-accent appearance-none cursor-pointer"
+        className={`w-full min-w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs text-text focus:outline-none focus:border-accent appearance-none ${
+          disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
+        }`}
       >
         {options.map((o) => (
           <option key={o.value} value={o.value}>

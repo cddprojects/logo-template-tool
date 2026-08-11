@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useCallback, useState, useMemo, lazy, Suspense } from 'react'
 import { Download, FileImage, FileCode2, RefreshCw, CheckCircle2, Plus, X, Pencil, Upload, Link, Unlink, Eye, ClipboardCopy, ClipboardPaste, GripVertical, Paintbrush, ArrowDownToLine } from 'lucide-react'
-import type { LogoConfig, LogoLayout, AssetVariant, FaviconConfig, FaviconContent, IconConfig, ShapeType, PaintSaveResult, PaintSession, PaintVector, PaintLayerId, OuterShapeCategory, PaintSaveTargets, OutsideContentSettings } from '../types'
+import type { LogoConfig, LogoLayout, AssetVariant, FaviconConfig, FaviconContent, IconConfig, ShapeType, PaintSaveResult, PaintSession, PaintVector, PaintLayerId, OuterShapeCategory, PaintSaveTargets, OutsideContentSettings, ContentType } from '../types'
 import { FONT_FAMILIES } from '../types'
 import { renderLogo, drawIcon } from '../utils/renderer'
 import { sanitizePaintSessionProxies, syncOutsideLettersIntoPaintSession } from '../utils/paintDecorations'
@@ -19,12 +19,20 @@ import {
   updateIconStashAfterSave
 } from '../utils/paintSettingsSync'
 import {
+  contentTypeFromIcon,
+  FAVICON_CONTENT_TYPE_OPTIONS,
+  iconPatchForContentType,
+  unwrapSvgPath,
+  wrapSvgPath
+} from '../utils/contentTypeSync'
+import {
   Section,
   ColorRow,
   SliderRow,
   TextRow,
   TextareaRow,
   ToggleRow,
+  SelectRow,
   ShapeGrid,
   FontSelect,
   WeightSelect,
@@ -325,10 +333,12 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       updateConfig({
         icon: next,
         iconSyncBroken: false,
-        syncedIconSnapshot: null
+        syncedIconSnapshot: null,
+        // Drop stale favicon mirror so custom preview/export never diverges from `icon`.
+        ...(safeConfig!.iconLinked ? {} : { syncedIcon: null })
       })
     },
-    [safeConfig?.icon, updateConfig]
+    [safeConfig?.icon, safeConfig?.iconLinked, updateConfig]
   )
 
   // ── Paint editor ──────────────────────────────────────────────────────────
@@ -821,7 +831,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             config: {
               ...variant.config,
               icon: structuredClone(mirrored),
-              syncedIcon: structuredClone(mirrored),
+              syncedIcon: null,
               iconLinked: false,
               iconSyncBroken: false,
               syncedIconSnapshot: null
@@ -1291,27 +1301,34 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
 
             <ToggleRow label="Visible" value={safeConfig.icon.visible} onChange={(v) => setIcon({ visible: v })} />
 
+            {(isSyncedWithFavicon || isShowingFrozenSync) && safeConfig.icon.visible && (
+              <SelectRow
+                label="Icon source"
+                value={faviconContent?.type ?? contentTypeFromIcon(effectiveIcon ?? safeConfig.icon)}
+                options={FAVICON_CONTENT_TYPE_OPTIONS}
+                onChange={() => {}}
+                disabled
+              />
+            )}
+
             {!isSyncedWithFavicon && !isShowingFrozenSync && safeConfig.icon.visible && (
               <>
-                {/* Source type selector */}
-                <div className="py-1.5">
-                  <p className="text-xs text-muted mb-2">Icon source</p>
-                  <div className="grid grid-cols-3 gap-1">
-                    {(['shape', 'letters', 'lucide', 'svg', 'image'] as const).map((t) => (
-                      <button
-                        key={t}
-                        onClick={() => setIcon({ sourceType: t })}
-                        className={`py-1 rounded text-[10px] font-medium transition-colors ${
-                          safeConfig.icon.sourceType === t ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
-                        }`}
-                      >
-                        {t === 'svg' ? 'SVG' : t === 'lucide' ? 'Library' : t === 'letters' ? 'Text' : t === 'image' ? 'Image' : 'Shape'}
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <SelectRow
+                  label="Icon source"
+                  value={contentTypeFromIcon(safeConfig.icon)}
+                  options={FAVICON_CONTENT_TYPE_OPTIONS}
+                  onChange={(v) =>
+                    setIcon(
+                      iconPatchForContentType(
+                        v as ContentType,
+                        safeConfig.icon,
+                        matchingFaviconVariant?.config.content
+                      )
+                    )
+                  }
+                />
 
-                {safeConfig.icon.sourceType === 'shape' && (
+                {contentTypeFromIcon(safeConfig.icon) === 'shape' && (
                   <>
                     <ShapeGrid label="Shape" value={safeConfig.icon.shape} onChange={(v) => setIcon({ shape: v })} includeNone />
                     <SliderRow label="Size %" value={Math.round((safeConfig.icon.shapeSizeRatio ?? 1.0) * 100)} min={10} max={100} onChange={(v) => setIcon({ shapeSizeRatio: v / 100 })} unit="%" />
@@ -1326,7 +1343,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                     )}
                   </>
                 )}
-                {safeConfig.icon.sourceType === 'letters' && (
+                {contentTypeFromIcon(safeConfig.icon) === 'letters' && (
                   <>
                     <TextRow label="Text" value={safeConfig.icon.text ?? ''} placeholder="A" onChange={(v) => setIcon({ text: v })} />
                     <FontSelect label="Font" value={safeConfig.icon.fontFamily ?? 'Inter'} onChange={(v) => setIcon({ fontFamily: v })} />
@@ -1351,31 +1368,72 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                     <ColorRow label="Color" value={safeConfig.icon.textColor ?? '#ffffff'} onChange={(v) => setIcon({ textColor: v })} />
                   </>
                 )}
-                {(safeConfig.icon.sourceType === 'lucide' || safeConfig.icon.sourceType === 'svg') && (
+                {contentTypeFromIcon(safeConfig.icon) === 'lucide' && (
                   <>
                     <div className="py-1.5">
                       <IconPicker
                         value={safeConfig.icon}
                         onChange={(patch) => {
-                          // Auto-detect multi-color when a new SVG markup is applied
                           if (patch.svgMarkup !== undefined) {
                             patch = { ...patch, svgMarkupUseOriginalColors: hasMultipleColors(patch.svgMarkup ?? '') }
                           }
                           setIcon(patch)
                         }}
                         onOpenSettings={onOpenSettings}
-                        tabs={safeConfig.icon.sourceType === 'lucide' ? ['library', 'browse', 'ai'] : ['browse', 'svg', 'ai']}
+                        tabs={['library', 'browse', 'ai']}
                       />
                     </div>
-                    {safeConfig.icon.sourceType === 'lucide' && (
-                      <SliderRow label="Size %" value={Math.round((safeConfig.icon.lucideSizeRatio ?? 1.0) * 100)} min={10} max={100} onChange={(v) => setIcon({ lucideSizeRatio: v / 100 })} unit="%" />
-                    )}
-                    {safeConfig.icon.sourceType === 'svg' && (
-                      <SliderRow label="Size %" value={Math.round((safeConfig.icon.svgMarkupSizeRatio ?? 1.0) * 100)} min={10} max={100} onChange={(v) => setIcon({ svgMarkupSizeRatio: v / 100 })} unit="%" />
-                    )}
+                    <SliderRow label="Size %" value={Math.round((safeConfig.icon.lucideSizeRatio ?? 1.0) * 100)} min={10} max={100} onChange={(v) => setIcon({ lucideSizeRatio: v / 100 })} unit="%" />
                   </>
                 )}
-                {safeConfig.icon.sourceType === 'image' && (
+                {contentTypeFromIcon(safeConfig.icon) === 'svg-markup' && (
+                  <>
+                    <div className="py-1.5">
+                      <IconPicker
+                        value={safeConfig.icon}
+                        onChange={(patch) => {
+                          if (patch.svgMarkup !== undefined) {
+                            patch = { ...patch, svgMarkupUseOriginalColors: hasMultipleColors(patch.svgMarkup ?? '') }
+                          }
+                          setIcon(patch)
+                        }}
+                        onOpenSettings={onOpenSettings}
+                        tabs={['browse', 'svg', 'ai']}
+                      />
+                    </div>
+                    <SliderRow label="Size %" value={Math.round((safeConfig.icon.svgMarkupSizeRatio ?? 1.0) * 100)} min={10} max={100} onChange={(v) => setIcon({ svgMarkupSizeRatio: v / 100 })} unit="%" />
+                  </>
+                )}
+                {contentTypeFromIcon(safeConfig.icon) === 'svg' && (
+                  <>
+                    <div className="py-1.5">
+                      <TextareaRow
+                        label="SVG path"
+                        value={unwrapSvgPath(safeConfig.icon.svgMarkup ?? '')}
+                        placeholder="M 0 0 L 100 0..."
+                        onChange={(v) =>
+                          setIcon({
+                            svgMarkup: wrapSvgPath(v, safeConfig.icon.primaryColor ?? '#ffffff')
+                          })
+                        }
+                      />
+                    </div>
+                    <ColorRow
+                      label="Color"
+                      value={safeConfig.icon.primaryColor ?? '#ffffff'}
+                      onChange={(v) =>
+                        setIcon({
+                          primaryColor: v,
+                          svgMarkup: wrapSvgPath(
+                            unwrapSvgPath(safeConfig.icon.svgMarkup ?? ''),
+                            v
+                          )
+                        })
+                      }
+                    />
+                  </>
+                )}
+                {contentTypeFromIcon(safeConfig.icon) === 'image' && (
                   <>
                     <IconImageUpload
                       imageDataUrl={safeConfig.icon.imageDataUrl ?? ''}
@@ -1404,23 +1462,33 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                   </>
                 )}
 
-                {safeConfig.icon.sourceType !== 'letters' && safeConfig.icon.sourceType !== 'image' && (
+                {contentTypeFromIcon(safeConfig.icon) === 'canva' && (
+                  <p className="text-[10px] text-muted leading-snug py-1">
+                    Canva prompts are configured on the matching Favicon variant. Use{' '}
+                    <span className="text-text">From favicon</span> or sync to mirror that workflow.
+                  </p>
+                )}
+
+                {(() => {
+                  const ct = contentTypeFromIcon(safeConfig.icon)
+                  if (['letters', 'image', 'canva', 'svg'].includes(ct)) return null
+                  return (
                   <>
-                    {safeConfig.icon.sourceType === 'svg' && (
+                    {ct === 'svg-markup' && (
                       <ToggleRow
                         label="Original colors"
                         value={safeConfig.icon.svgMarkupUseOriginalColors ?? false}
                         onChange={(v) => setIcon({ svgMarkupUseOriginalColors: v })}
                       />
                     )}
-                    {!(safeConfig.icon.sourceType === 'svg' && (safeConfig.icon.svgMarkupUseOriginalColors ?? false)) && (
+                    {!(ct === 'svg-markup' && (safeConfig.icon.svgMarkupUseOriginalColors ?? false)) && (
                       <>
                         <ColorRow
-                          label={safeConfig.icon.sourceType === 'svg' ? 'Color 1' : 'Color'}
+                          label={ct === 'svg-markup' ? 'Color 1' : 'Color'}
                           value={safeConfig.icon.primaryColor}
                           onChange={(v) => setIcon({ primaryColor: v })}
                         />
-                        {safeConfig.icon.sourceType === 'svg' && (
+                        {ct === 'svg-markup' && (
                           <>
                             <ColorRow
                               label="Color 2"
@@ -1447,8 +1515,9 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                       </>
                     )}
                   </>
-                )}
-                {safeConfig.icon.sourceType === 'shape' && (
+                  )
+                })()}
+                {contentTypeFromIcon(safeConfig.icon) === 'shape' && (
                   <ColorRow label="Accent" value={safeConfig.icon.secondaryColor} onChange={(v) => setIcon({ secondaryColor: v })} />
                 )}
 
@@ -1743,10 +1812,8 @@ export function resolveLogoEffectiveIcon(
   ) {
     return config.syncedIconSnapshot
   }
-  // After unlink the stored custom `icon` is often stale; keep the last synced mirror.
-  if (!config.iconLinked && config.syncedIcon) {
-    return config.syncedIcon
-  }
+  // Custom mode: always render the editable `icon` field (setIcon / From favicon /
+  // paint save). Stale `syncedIcon` mirrors must not override live edits.
   return config.icon
 }
 
@@ -1757,7 +1824,8 @@ export function faviconContentToIconConfig(content: FaviconContent, base: IconCo
     lucide: 'lucide',
     'svg-markup': 'svg',
     svg: 'svg',
-    image: 'image'
+    image: 'image',
+    canva: 'letters'
   }
 
   const outerShape = faviconCfg?.outerShape ?? 'rounded'
@@ -1830,14 +1898,18 @@ export function faviconContentToIconConfig(content: FaviconContent, base: IconCo
     shape: content.shape,
     primaryColor: content.type === 'lucide' ? content.lucideColor
       : content.type === 'svg-markup' ? content.lucideColor
+      : content.type === 'svg' ? content.svgColor
       : content.type === 'shape' ? content.shapeColor
       : content.type === 'letters' ? content.textColor
+      : content.type === 'canva' ? content.canvaPrimaryColor
       : base.primaryColor,
     lucideIconName: content.lucideIconName,
     lucideStrokeWidth: content.lucideStrokeWidth,
     lucideSizeRatio: content.lucideSizeRatio ?? 0.6,
     svgMarkup: content.type === 'svg-markup' ? content.svgMarkup
-      : content.type === 'svg' ? (content.svgPath ?? '') : base.svgMarkup,
+      : content.type === 'svg'
+        ? wrapSvgPath(content.svgPath ?? '', content.svgColor ?? base.primaryColor ?? '#ffffff')
+        : base.svgMarkup,
     svgMarkupSizeRatio: content.svgMarkupSizeRatio ?? 0.7,
     svgMarkupUseOriginalColors: content.svgMarkupUseOriginalColors ?? false,
     svgMarkupSecondaryColor: content.svgMarkupSecondaryColor ?? '',
@@ -1846,8 +1918,8 @@ export function faviconContentToIconConfig(content: FaviconContent, base: IconCo
     svgMarkupColor5: content.svgMarkupColor5 ?? '',
     shapeSizeRatio: content.shapeSizeRatio ?? 0.5,
     shapeBorderRadius: Math.round((content.shapeBorderRadius ?? 0) * base.size / 256),
-    text: content.text,
-    textColor: content.textColor,
+    text: content.type === 'canva' ? ' ' : content.text,
+    textColor: content.type === 'canva' ? content.canvaPrimaryColor : content.textColor,
     fontFamily: content.fontFamily,
     fontWeight: content.fontWeight,
     fontItalic: content.fontItalic ?? false,
