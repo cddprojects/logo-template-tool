@@ -4125,13 +4125,13 @@ export function IconPaintEditor({
    * outside so size/offset/shadow/text edits update without re-opening Paint.
    * When `layer` is set, only that paint stack is included.
    */
-  const decorationsCanvas = (layer?: PaintLayerId): HTMLCanvasElement => {
+  const decorationsCanvas = (layer?: PaintLayerId, includeLinkedText = false): HTMLCanvasElement => {
     const c = document.createElement('canvas')
     c.width = W; c.height = H
     const x = c.getContext('2d')!
     const show = (l: LineObj) =>
-      !l.linkedOutsideText &&
       !l.contentBound &&
+      (includeLinkedText || !l.linkedOutsideText) &&
       (l.visible ?? l.editable ?? true) !== false
     const ids = layer
       ? [layer]
@@ -5450,22 +5450,23 @@ export function IconPaintEditor({
   const pasteVector = () => {
     const c = vectorClipRef.current
     if (!c) return
+    let baseLines = linesRef.current
+    const transferLinked = c.type === 'text' && !!c.linkedOutsideText
+    if (transferLinked) {
+      // Duplicating the live Inner layer — move the link to the pasted copy.
+      baseLines = baseLines.filter((l) => !(l.type === 'text' && l.linkedOutsideText))
+    }
     const nl: LineObj = {
       ...c,
       id: genId(),
       pts: c.pts.map((p) => ({ x: p.x + 16, y: p.y + 16 })),
       layer: c.layer ?? activeAddLayer(),
-      // Pasted copies are paint decorations — only one linkedOutsideText layer
-      // drives live Inner letters outside Paint.
-      linkedOutsideText: undefined,
+      linkedOutsideText: transferLinked ? true : undefined,
       contentBound: undefined,
-      name:
-        c.type === 'text' && c.linkedOutsideText
-          ? 'Text copy'
-          : c.name
+      name: c.type === 'text' ? 'Text' : c.name
     }
     if (nl.type === 'stamp' && nl.imageDataUrl) ensureStampImage(nl.imageDataUrl)
-    linesRef.current = [...linesRef.current, nl]
+    linesRef.current = [...baseLines, nl]
     selectLine(nl)
     if (tool !== 'pointer') {
       if (nl.type === 'text' && tool !== 'text') setTool('pointer')
@@ -6016,8 +6017,10 @@ export function IconPaintEditor({
     // contentBound proxies are Paint-only: sync size/offset/shadow, then drop them
     // so outside live Inner settings never double with a leftover raster stamp.
     const persistVectors = stripContentProxyVectors(vectors)
+    const linked = vectors.filter((v) => v.type === 'text' && v.linkedOutsideText).pop()
+    const bakeLinkedText = !!(linked && Math.abs(linked.rot ?? 0) > 0.001)
     const containerDecor = decorationsCanvas('container')
-    const contentDecor = decorationsCanvas('content')
+    const contentDecor = decorationsCanvas('content', bakeLinkedText)
     // Overlays only — live Outer/Inner settings stay outside Paint.
     await onSave(
       {
@@ -6033,7 +6036,8 @@ export function IconPaintEditor({
         decorationsPng: decorationsCanvas().toDataURL('image/png'),
         containerDecorationsPng: containerDecor.toDataURL('image/png'),
         contentDecorationsPng: contentDecor.toDataURL('image/png'),
-        contentSync
+        contentSync,
+        linkedTextInDecorations: bakeLinkedText
       },
       {
         logoIds: [...saveLogoIds],

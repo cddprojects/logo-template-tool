@@ -10,6 +10,7 @@ import type {
   PaintSession,
   PaintVector
 } from '../types'
+import { measureSpacedText } from './renderer'
 
 const DESIGN_SIZE = 256
 
@@ -140,18 +141,27 @@ export function normalizeLinkedTextVectors(
 ): PaintVector[] {
   const list = vectors ?? []
   const linked = list.filter((v) => v.type === 'text' && v.linkedOutsideText)
-  if (linked.length <= 1) return list
-  const keepId =
-    preferredId && linked.some((v) => v.id === preferredId)
-      ? preferredId
-      : linked[linked.length - 1]!.id
-  return list.map((v) => {
-    if (v.type === 'text' && v.linkedOutsideText && v.id !== keepId) {
-      const { linkedOutsideText: _l, ...rest } = v
-      return rest as PaintVector
-    }
-    return v
-  })
+  let next = list
+  if (linked.length > 1) {
+    const keepId =
+      preferredId && linked.some((v) => v.id === preferredId)
+        ? preferredId
+        : linked[linked.length - 1]!.id
+    next = list.map((v) => {
+      if (v.type === 'text' && v.linkedOutsideText && v.id !== keepId) {
+        const { linkedOutsideText: _l, ...rest } = v
+        return rest as PaintVector
+      }
+      return v
+    })
+  }
+  if (linked.length >= 1) {
+    next = next.filter((v) => {
+      if (v.type !== 'text' || v.linkedOutsideText) return true
+      return v.name !== 'Text copy'
+    })
+  }
+  return next
 }
 
 export function paintPxToDesign(px: number, resolution: number): number {
@@ -502,19 +512,13 @@ function textInkCenter(v: PaintVector): { cx: number; cy: number } | null {
   ctx.textAlign = 'left'
   ctx.textBaseline = 'top'
   let inkLeft = Infinity, inkRight = -Infinity, inkTop = Infinity, inkBottom = -Infinity
+  let boxW = fs
+  let boxH = lineH * displayRows.length
   for (let i = 0; i < displayRows.length; i++) {
     const sample = displayRows[i] || ' '
-    // Approximate spaced width; actualBoundingBox ignores letterSpacing gaps somewhat.
-    let width = 0
-    if (spacing === 0) {
-      width = ctx.measureText(sample).width
-    } else {
-      for (let ci = 0; ci < sample.length; ci++) {
-        width += ctx.measureText(sample[ci]!).width
-        if (ci < sample.length - 1) width += spacing
-      }
-    }
-    const tm = ctx.measureText(sample)
+    const tm = spacing === 0 ? ctx.measureText(sample) : measureSpacedText(ctx, sample, spacing)
+    const width = tm.width
+    boxW = Math.max(boxW, width)
     const left = tm.actualBoundingBoxLeft ?? 0
     const right = Math.max(width, tm.actualBoundingBoxRight ?? width)
     const asc = tm.actualBoundingBoxAscent ?? 0
@@ -528,9 +532,19 @@ function textInkCenter(v: PaintVector): { cx: number; cy: number } | null {
   if (!Number.isFinite(inkLeft)) {
     return { cx: p0.x + fs * 0.35, cy: p0.y + fs * 0.4 }
   }
-  return {
+  const localInk = {
     cx: p0.x + (inkLeft + inkRight) / 2,
     cy: p0.y + (inkTop + inkBottom) / 2
+  }
+  const rot = v.rot ?? 0
+  if (!rot) return localInk
+  const objCenter = { x: p0.x + boxW / 2, y: p0.y + boxH / 2 }
+  const s = Math.sin(rot), co = Math.cos(rot)
+  const dx = localInk.cx - objCenter.x
+  const dy = localInk.cy - objCenter.y
+  return {
+    cx: objCenter.x + dx * co - dy * s,
+    cy: objCenter.y + dx * s + dy * co
   }
 }
 

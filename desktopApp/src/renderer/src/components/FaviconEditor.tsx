@@ -346,7 +346,7 @@ export function FaviconEditor({
       containerDecorationsPng: result.containerDecorationsPng,
       contentDecorationsPng: result.contentDecorationsPng,
       // Linked letters stay as live outside settings (not baked into decorations).
-      linkedTextInDecorations: false
+      linkedTextInDecorations: result.linkedTextInDecorations ?? false
     })!
     const favIds = new Set(targets.faviconIds)
     const logoIds = new Set(targets.logoIds)

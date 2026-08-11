@@ -501,7 +501,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       containerDecorationsPng: result.containerDecorationsPng,
       contentDecorationsPng: result.contentDecorationsPng,
       // Linked letters stay as live outside settings (not baked into decorations).
-      linkedTextInDecorations: false
+      linkedTextInDecorations: result.linkedTextInDecorations ?? false
     })!
     const logoIds = new Set(targets.logoIds)
     const favIds = new Set(targets.faviconIds)
@@ -593,24 +593,40 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   const copyIconFromFavicon = useCallback(() => {
     if (!safeConfig || !matchingFaviconVariant?.config) return
     const fav = matchingFaviconVariant.config
-    const nextIcon = {
+    let nextIcon: IconConfig = {
       ...faviconContentToIconConfig(fav.content, safeConfig.icon, fav),
       paintSession: fav.paintSession ?? null
     }
-    // If favicon is a flattened paint image, keep logo preview as that image too.
-    if (fav.paintSession || fav.content.type === 'image') {
-      setIcon({
+    // Only flatten to a raster icon when the favicon inner content is actually image-based.
+    // paintSession alone (letters/shape + paint overlays) must keep typed inner content.
+    const flattenAsImage =
+      fav.content.type === 'image' &&
+      !!(fav.content.imageDataUrl || nextIcon.imageDataUrl)
+    if (flattenAsImage) {
+      nextIcon = {
         ...nextIcon,
         sourceType: 'image',
         imageDataUrl: fav.content.imageDataUrl || nextIcon.imageDataUrl,
         imageSizeRatio: fav.content.imageSizeRatio ?? 1,
         containerEnabled: fav.outerShape !== 'none' ? nextIcon.containerEnabled : false,
         paintSession: fav.paintSession ?? null
-      })
-    } else {
-      setIcon(nextIcon)
+      }
     }
-  }, [safeConfig, matchingFaviconVariant, setIcon])
+    if (nextIcon.sourceType !== safeConfig.icon.sourceType) {
+      nextIcon = {
+        ...switchIconSourceType(safeConfig.icon, nextIcon.sourceType),
+        ...nextIcon,
+        sourceType: nextIcon.sourceType
+      }
+    }
+    updateConfig({
+      icon: nextIcon,
+      iconLinked: false,
+      iconSyncBroken: false,
+      syncedIconSnapshot: null,
+      syncedIcon: null
+    })
+  }, [safeConfig, matchingFaviconVariant, updateConfig])
 
   // Apply a patch to EVERY variant (used for "same text on all variants").
   const updateAllVariants = useCallback(

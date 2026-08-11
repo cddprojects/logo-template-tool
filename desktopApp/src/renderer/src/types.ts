@@ -580,6 +580,8 @@ export interface PaintSaveResult {
   contentDecorationsPng?: string
   /** Outside settings sync hints (applied on Save). */
   contentSync?: PaintContentSync
+  /** When true, linked Inner letters were baked into decorations (e.g. rotation). */
+  linkedTextInDecorations?: boolean
 }
 
 /** Which logo / favicon variants receive a paint Save. */
