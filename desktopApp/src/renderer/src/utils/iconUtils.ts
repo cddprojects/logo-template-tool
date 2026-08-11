@@ -460,16 +460,23 @@ export function removeImageBackground(dataUrl: string): Promise<GenerateImageRes
       const w = canvas.width
       const h = canvas.height
 
-      // Sample the background colour from all four corners and pick the most common
-      const sampleCorner = (x: number, y: number) => {
+      const samplePixel = (x: number, y: number) => {
         const i = (y * w + x) * 4
         return [data[i], data[i + 1], data[i + 2], data[i + 3]] as const
       }
-      const corners = [sampleCorner(0, 0), sampleCorner(w - 1, 0), sampleCorner(0, h - 1), sampleCorner(w - 1, h - 1)]
-      // Use the average of corners as the target background colour
-      const bgR = Math.round(corners.reduce((s, c) => s + c[0], 0) / 4)
-      const bgG = Math.round(corners.reduce((s, c) => s + c[1], 0) / 4)
-      const bgB = Math.round(corners.reduce((s, c) => s + c[2], 0) / 4)
+      // Prefer opaque edge/corner pixels — transparent corners break bg detection.
+      const edgeSamples: Array<readonly [number, number, number, number]> = []
+      for (let x = 0; x < w; x++) {
+        edgeSamples.push(samplePixel(x, 0), samplePixel(x, h - 1))
+      }
+      for (let y = 1; y < h - 1; y++) {
+        edgeSamples.push(samplePixel(0, y), samplePixel(w - 1, y))
+      }
+      const opaqueEdges = edgeSamples.filter((c) => c[3] > 12)
+      const bgSamples = opaqueEdges.length ? opaqueEdges : edgeSamples
+      const bgR = Math.round(bgSamples.reduce((s, c) => s + c[0], 0) / bgSamples.length)
+      const bgG = Math.round(bgSamples.reduce((s, c) => s + c[1], 0) / bgSamples.length)
+      const bgB = Math.round(bgSamples.reduce((s, c) => s + c[2], 0) / bgSamples.length)
 
       const TOLERANCE = 40 // colour distance threshold
 
@@ -480,14 +487,21 @@ export function removeImageBackground(dataUrl: string): Promise<GenerateImageRes
           Math.pow(data[i + 2] - bgB, 2)
         )
 
-      // BFS flood-fill from all four corners simultaneously
+      // BFS flood-fill from the full image border
       const visited = new Uint8Array(w * h)
       const queue: number[] = []
       const seed = (x: number, y: number) => {
         const idx = y * w + x
         if (!visited[idx]) { visited[idx] = 1; queue.push(idx) }
       }
-      seed(0, 0); seed(w - 1, 0); seed(0, h - 1); seed(w - 1, h - 1)
+      for (let x = 0; x < w; x++) {
+        seed(x, 0)
+        seed(x, h - 1)
+      }
+      for (let y = 0; y < h; y++) {
+        seed(0, y)
+        seed(w - 1, y)
+      }
 
       let qi = 0
       while (qi < queue.length) {

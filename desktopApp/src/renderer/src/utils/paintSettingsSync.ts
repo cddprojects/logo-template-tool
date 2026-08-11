@@ -132,8 +132,8 @@ export function stripContentProxyVectors(vectors: PaintVector[] | null | undefin
 }
 
 /**
- * Inner letters allow only one linkedOutsideText vector. Copies keep the flag
- * and Save would sync position/text from the wrong (usually centered) layer.
+ * Inner letters allow only one linkedOutsideText vector. Extra linked flags are
+ * stripped; unlinked duplicate text layers are kept.
  */
 export function normalizeLinkedTextVectors(
   vectors: PaintVector[] | null | undefined,
@@ -141,27 +141,18 @@ export function normalizeLinkedTextVectors(
 ): PaintVector[] {
   const list = vectors ?? []
   const linked = list.filter((v) => v.type === 'text' && v.linkedOutsideText)
-  let next = list
-  if (linked.length > 1) {
-    const keepId =
-      preferredId && linked.some((v) => v.id === preferredId)
-        ? preferredId
-        : linked[linked.length - 1]!.id
-    next = list.map((v) => {
-      if (v.type === 'text' && v.linkedOutsideText && v.id !== keepId) {
-        const { linkedOutsideText: _l, ...rest } = v
-        return rest as PaintVector
-      }
-      return v
-    })
-  }
-  if (linked.length >= 1) {
-    next = next.filter((v) => {
-      if (v.type !== 'text' || v.linkedOutsideText) return true
-      return v.name !== 'Text copy'
-    })
-  }
-  return next
+  if (linked.length <= 1) return list
+  const keepId =
+    preferredId && linked.some((v) => v.id === preferredId)
+      ? preferredId
+      : linked[linked.length - 1]!.id
+  return list.map((v) => {
+    if (v.type === 'text' && v.linkedOutsideText && v.id !== keepId) {
+      const { linkedOutsideText: _l, ...rest } = v
+      return rest as PaintVector
+    }
+    return v
+  })
 }
 
 export function paintPxToDesign(px: number, resolution: number): number {

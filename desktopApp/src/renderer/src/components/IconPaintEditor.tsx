@@ -5,7 +5,7 @@ import {
   BoxSelect, Copy, ClipboardPaste, MousePointer2, Ban, Type as TypeIcon,
   Bold as BoldIcon, Italic as ItalicIcon,
   RotateCw, RotateCcw, FlipHorizontal2, FlipVertical2, Sparkles, GripVertical,
-  Crop as CropIcon, Library, Pencil, ChevronDown, ChevronRight
+  Crop as CropIcon, Library, Pencil, ChevronDown, ChevronRight, Spline
 } from 'lucide-react'
 import { FONT_FAMILY_GROUPS, FONT_WEIGHTS } from '../types'
 import type { PaintSaveResult, PaintVector, PaintLayerId, PaintSaveTargets, PaintVariantOption, OutsideTextSettings, OutsideContentSettings } from '../types'
@@ -17,6 +17,7 @@ import { PreviewStage } from './PreviewStage'
 import { IconPicker, PAINT_SVG_MIME, PAINT_LUCIDE_MIME } from './IconPicker'
 import { DEFAULT_ICON_CONFIG } from '../types'
 import type { IconConfig } from '../types'
+import { isIgTemplateFile } from '../utils/templateFile'
 import {
   buildPaintContentSync,
   clampSizeRatio,
@@ -27,7 +28,7 @@ import {
   stripContentProxyVectors
 } from '../utils/paintSettingsSync'
 
-type Tool = 'pointer' | 'brush' | 'eraser' | 'fill' | 'eyedropper' | 'line' | 'shape' | 'freepoly' | 'polygon' | 'select' | 'text'
+type Tool = 'pointer' | 'brush' | 'eraser' | 'fill' | 'eyedropper' | 'line' | 'shape' | 'freepoly' | 'polygon' | 'select' | 'text' | 'reshape'
 
 /** Paint-style brush / eraser tip shapes. */
 type BrushTip = 'round' | 'square' | 'slash' | 'backslash' | 'spray'
@@ -361,6 +362,10 @@ interface LineObj {
   shadowSpread?: number
   /** Rotation about the object's centre, in radians. */
   rot?: number
+  /** Horizontal mirror scale (default 1). Text flip toggles ±1. */
+  scaleX?: number
+  /** Vertical mirror scale (default 1). Text flip toggles ±1. */
+  scaleY?: number
   /** Drawn freehand: connect adjustable points with a smooth curve instead of straight segments. */
   drawnCurve?: boolean
   /**
@@ -372,6 +377,12 @@ interface LineObj {
   /** Seeded from outside letters — save keeps content type as letters. */
   linkedOutsideText?: boolean
   contentBound?: boolean
+  /** Tight unwarped source rect in canvas space (TL + size). */
+  reshapeSrc?: { x: number; y: number; w: number; h: number }
+  /** Destination quad in canvas space: TL, TR, BR, BL. */
+  reshapeQuad?: Pt[]
+  /** Quad at reshape init — used for symmetric snap distances. */
+  reshapeBaseQuad?: Pt[]
 }
 
 /** Cache decoded stamp images so undo/redo redraws stay sync after the first load. */
@@ -525,6 +536,533 @@ function textBBox(l: LineObj): { x: number; y: number; w: number; h: number } {
   return { x: p.x, y: p.y, w, h }
 }
 
+/** Glyph ink bounds (excludes empty line-box padding). */
+function textInkBBox(l: LineObj): { x: number; y: number; w: number; h: number } {
+  const p = l.pts[0]
+  const rows = textRows(l)
+  const fs = l.fontSize ?? 48
+  const lineH = fs * (l.lineHeight ?? 1.28)
+  const spacing = l.letterSpacing ?? 0
+  const ctx = _measCanvas?.getContext('2d')
+  if (!ctx || !rows.length) return textBBox(l)
+  ctx.font = textFontStr(l)
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'top'
+  let inkLeft = Infinity
+  let inkRight = -Infinity
+  let inkTop = Infinity
+  let inkBottom = -Infinity
+  rows.forEach((r, i) => {
+    const tm = measureSpacedText(ctx, r || ' ', spacing)
+    const left = tm.actualBoundingBoxLeft ?? 0
+    const right = Math.max(tm.width, tm.actualBoundingBoxRight ?? tm.width)
+    const asc = tm.actualBoundingBoxAscent ?? 0
+    const desc = tm.actualBoundingBoxDescent ?? fs * 0.8
+    const y0 = i * lineH
+    inkLeft = Math.min(inkLeft, p.x - left)
+    inkRight = Math.max(inkRight, p.x + right)
+    inkTop = Math.min(inkTop, p.y + y0 - asc)
+    inkBottom = Math.max(inkBottom, p.y + y0 + desc)
+  })
+  if (!Number.isFinite(inkLeft)) return textBBox(l)
+  return {
+    x: inkLeft,
+    y: inkTop,
+    w: Math.max(1, inkRight - inkLeft),
+    h: Math.max(1, inkBottom - inkTop)
+  }
+}
+
+function alphaBoundsFromCanvas(canvas: HTMLCanvasElement | null): { x: number; y: number; w: number; h: number } | null {
+  if (!canvas) return null
+  const data = canvas.getContext('2d')?.getImageData(0, 0, canvas.width, canvas.height).data
+  if (!data) return null
+  let left = canvas.width
+  let top = canvas.height
+  let right = -1
+  let bottom = -1
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      if (data[(y * canvas.width + x) * 4 + 3] === 0) continue
+      left = Math.min(left, x)
+      top = Math.min(top, y)
+      right = Math.max(right, x)
+      bottom = Math.max(bottom, y)
+    }
+  }
+  return right < left || bottom < top
+    ? null
+    : { x: left, y: top, w: right - left + 1, h: bottom - top + 1 }
+}
+
+function lineReshapeable(l: LineObj): boolean {
+  if (l.type === 'text') return !!(l.text?.trim())
+  if (l.type === 'stamp') return l.pts.length >= 2 && !!l.imageDataUrl
+  if (l.type === 'shape') return l.pts.length >= 2
+  return false
+}
+
+function renderLineUnwarpedToCanvas(ctx: CanvasRenderingContext2D, l: LineObj): void {
+  const plain: LineObj = { ...l, reshapeQuad: undefined, reshapeSrc: undefined }
+  const supportsObjectPaint =
+    (plain.type === 'shape' || plain.type === 'stamp') &&
+    !!plain.paintStrokes?.length &&
+    plain.pts.length >= 2
+  if (supportsObjectPaint) renderLine(ctx, plain)
+  else renderLineBase(ctx, plain)
+}
+
+function boundsFromLineFallback(l: LineObj): { x: number; y: number; w: number; h: number } | null {
+  if (l.type === 'text') {
+    const b = textInkBBox(l)
+    if (!lineNeedsDisplayTransform(l)) return b
+    const corners = [
+      { x: b.x, y: b.y },
+      { x: b.x + b.w, y: b.y },
+      { x: b.x + b.w, y: b.y + b.h },
+      { x: b.x, y: b.y + b.h }
+    ].map((p) => mapObjDisplayPt(p, l))
+    const xs = corners.map((p) => p.x)
+    const ys = corners.map((p) => p.y)
+    return {
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      w: Math.max(1, Math.max(...xs) - Math.min(...xs)),
+      h: Math.max(1, Math.max(...ys) - Math.min(...ys))
+    }
+  }
+  if (l.pts.length < 2) return null
+  if (l.type === 'stamp' || l.type === 'shape') {
+    const a = l.pts[0]
+    const b = l.pts[1]
+    const corners = [
+      { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y) },
+      { x: Math.max(a.x, b.x), y: Math.min(a.y, b.y) },
+      { x: Math.max(a.x, b.x), y: Math.max(a.y, b.y) },
+      { x: Math.min(a.x, b.x), y: Math.max(a.y, b.y) }
+    ].map((p) => mapObjDisplayPt(p, l))
+    const xs = corners.map((p) => p.x)
+    const ys = corners.map((p) => p.y)
+    return {
+      x: Math.min(...xs),
+      y: Math.min(...ys),
+      w: Math.max(1, Math.max(...xs) - Math.min(...xs)),
+      h: Math.max(1, Math.max(...ys) - Math.min(...ys))
+    }
+  }
+  return null
+}
+
+function computeReshapeSource(l: LineObj, W: number, H: number): { x: number; y: number; w: number; h: number } | null {
+  const temp = document.createElement('canvas')
+  temp.width = W
+  temp.height = H
+  const tctx = temp.getContext('2d')!
+  tctx.clearRect(0, 0, W, H)
+  renderLineUnwarpedToCanvas(tctx, l)
+  const raw = alphaBoundsFromCanvas(temp) ?? boundsFromLineFallback(l)
+  return raw ? padReshapeBounds(raw, W, H) : null
+}
+
+const RESHAPE_PAD = 3
+
+function padReshapeBounds(
+  b: { x: number; y: number; w: number; h: number },
+  W: number,
+  H: number
+): { x: number; y: number; w: number; h: number } {
+  const x = Math.max(0, Math.floor(b.x) - RESHAPE_PAD)
+  const y = Math.max(0, Math.floor(b.y) - RESHAPE_PAD)
+  const r = Math.min(W, Math.ceil(b.x + b.w) + RESHAPE_PAD)
+  const btm = Math.min(H, Math.ceil(b.y + b.h) + RESHAPE_PAD)
+  return { x, y, w: Math.max(1, r - x), h: Math.max(1, btm - y) }
+}
+
+function initReshapeOnLine(l: LineObj, W: number, H: number): LineObj {
+  const src = computeReshapeSource(l, W, H) ?? boundsFromLineFallback(l)
+  if (!src) return l
+  const quad: Pt[] = [
+    { x: src.x, y: src.y },
+    { x: src.x + src.w, y: src.y },
+    { x: src.x + src.w, y: src.y + src.h },
+    { x: src.x, y: src.y + src.h }
+  ]
+  return {
+    ...l,
+    reshapeSrc: src,
+    reshapeQuad: quad,
+    reshapeBaseQuad: quad.map((p) => ({ ...p }))
+  }
+}
+
+/** Horizontal mirror partner (TL↔TR, BL↔BR). */
+const reshapeMirrorX = (idx: number): number => [1, 0, 3, 2][idx]
+/** Vertical mirror partner (TL↔BL, TR↔BR). */
+const reshapeMirrorY = (idx: number): number => [3, 2, 1, 0][idx]
+/** Partner on the same vertical edge (shared X). */
+const reshapeEdgeX = (idx: number): number => [3, 2, 1, 0][idx]
+/** Partner on the same horizontal edge (shared Y). */
+const reshapeEdgeY = (idx: number): number => [1, 0, 3, 2][idx]
+
+type ReshapeCornerSnap = {
+  pt: Pt
+  verticalGuides: number[]
+  horizontalGuides: number[]
+  label: string | null
+}
+
+function applyReshapeCornerSnap(
+  raw: Pt,
+  idx: number,
+  quad: Pt[],
+  base: Pt[],
+  threshold: number,
+  shiftAxis: 'x' | 'y' | null
+): ReshapeCornerSnap {
+  let nx = raw.x
+  let ny = raw.y
+  let label: string | null = null
+  const verticalGuides: number[] = []
+  const horizontalGuides: number[] = []
+
+  type AxisSnap = { value: number; dist: number; label: string }
+  const xSnaps: AxisSnap[] = []
+  const ySnaps: AxisSnap[] = []
+
+  const addX = (value: number, snapLabel: string) => {
+    xSnaps.push({ value, dist: Math.abs(nx - value), label: snapLabel })
+  }
+  const addY = (value: number, snapLabel: string) => {
+    ySnaps.push({ value, dist: Math.abs(ny - value), label: snapLabel })
+  }
+
+  const mx = reshapeMirrorX(idx)
+  const my = reshapeMirrorY(idx)
+  const ex = reshapeEdgeX(idx)
+  const ey = reshapeEdgeY(idx)
+
+  // Symmetric width: opposite horizontal mirror moved the same distance.
+  addX(base[idx].x - (quad[mx].x - base[mx].x), 'Match width')
+  // Symmetric height: opposite vertical mirror moved the same distance.
+  addY(base[idx].y - (quad[my].y - base[my].y), 'Match height')
+  // Same edge delta as partner on the shared edge.
+  addX(base[idx].x + (quad[ex].x - base[ex].x), 'Align edge')
+  addY(base[idx].y + (quad[ey].y - base[ey].y), 'Align edge')
+
+  for (let i = 0; i < 4; i++) {
+    if (i === idx) continue
+    addX(quad[i].x, 'Align X')
+    addY(quad[i].y, 'Align Y')
+    addX(base[i].x, 'Align X')
+    addY(base[i].y, 'Align Y')
+  }
+
+  if (shiftAxis !== 'y') {
+    const best = xSnaps
+      .filter((s) => s.dist <= threshold)
+      .sort((a, b) => a.dist - b.dist)[0]
+    if (best) {
+      nx = best.value
+      verticalGuides.push(best.value)
+      label = best.label
+    }
+  }
+  if (shiftAxis !== 'x') {
+    const best = ySnaps
+      .filter((s) => s.dist <= threshold)
+      .sort((a, b) => a.dist - b.dist)[0]
+    if (best) {
+      ny = best.value
+      horizontalGuides.push(best.value)
+      label = label ?? best.label
+    }
+  }
+
+  return { pt: { x: nx, y: ny }, verticalGuides, horizontalGuides, label }
+}
+
+function quadIsAxisAlignedRect(quad: Pt[], eps = 0.75): boolean {
+  const [tl, tr, br, bl] = quad
+  return (
+    Math.abs(tl.y - tr.y) < eps &&
+    Math.abs(bl.y - br.y) < eps &&
+    Math.abs(tl.x - bl.x) < eps &&
+    Math.abs(tr.x - br.x) < eps
+  )
+}
+
+function reshapeQuadMatchesSource(
+  quad: Pt[],
+  src: { x: number; y: number; w: number; h: number },
+  eps = 1.5
+): boolean {
+  return (
+    Math.abs(quad[0].x - src.x) < eps &&
+    Math.abs(quad[0].y - src.y) < eps &&
+    Math.abs(quad[1].x - (src.x + src.w)) < eps &&
+    Math.abs(quad[1].y - src.y) < eps &&
+    Math.abs(quad[2].x - (src.x + src.w)) < eps &&
+    Math.abs(quad[2].y - (src.y + src.h)) < eps &&
+    Math.abs(quad[3].x - src.x) < eps &&
+    Math.abs(quad[3].y - (src.y + src.h)) < eps
+  )
+}
+
+function drawImageAxisRect(
+  ctx: CanvasRenderingContext2D,
+  img: CanvasImageSource,
+  sx: number, sy: number, sw: number, sh: number,
+  quad: [Pt, Pt, Pt, Pt]
+): void {
+  const x = Math.min(quad[0].x, quad[3].x)
+  const y = Math.min(quad[0].y, quad[1].y)
+  const w = Math.max(1, Math.max(quad[1].x, quad[2].x) - x)
+  const h = Math.max(1, Math.max(quad[2].y, quad[3].y) - y)
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h)
+}
+
+function homographyUnitSquareToQuad(quad: [Pt, Pt, Pt, Pt]): number[] {
+  const x0 = quad[0].x
+  const y0 = quad[0].y
+  const x1 = quad[1].x
+  const y1 = quad[1].y
+  const x2 = quad[2].x
+  const y2 = quad[2].y
+  const x3 = quad[3].x
+  const y3 = quad[3].y
+  const dx3 = x0 - x1 + x2 - x3
+  const dy3 = y0 - y1 + y2 - y3
+  let h20 = 0
+  let h21 = 0
+  if (Math.abs(dx3) > 1e-8 || Math.abs(dy3) > 1e-8) {
+    const dx1 = x1 - x2
+    const dy1 = y1 - y2
+    const dx2 = x3 - x2
+    const dy2 = y3 - y2
+    const denom = dx1 * dy2 - dx2 * dy1
+    if (Math.abs(denom) > 1e-12) {
+      h20 = (dx3 * dy2 - dx2 * dy3) / denom
+      h21 = (dx1 * dy3 - dx3 * dy1) / denom
+    }
+  }
+  return [
+    x1 - x0 + h20 * x1,
+    x3 - x0 + h21 * x3,
+    x0,
+    y1 - y0 + h20 * y1,
+    y3 - y0 + h21 * y3,
+    y0,
+    h20,
+    h21,
+    1
+  ]
+}
+
+function invert3x3(m: number[]): number[] | null {
+  const [a, b, c, d, e, f, g, h, i] = m
+  const A = e * i - f * h
+  const B = -(d * i - f * g)
+  const C = d * h - e * g
+  const D = -(b * i - c * h)
+  const E = a * i - c * g
+  const F = -(a * h - b * g)
+  const G = b * f - c * e
+  const H = -(a * f - c * d)
+  const I = a * e - b * d
+  const det = a * A + b * B + c * C
+  if (Math.abs(det) < 1e-12) return null
+  const invDet = 1 / det
+  return [
+    A * invDet, D * invDet, G * invDet,
+    B * invDet, E * invDet, H * invDet,
+    C * invDet, F * invDet, I * invDet
+  ]
+}
+
+function applyHomography(H: number[], x: number, y: number): Pt {
+  const w = H[6] * x + H[7] * y + H[8]
+  if (Math.abs(w) < 1e-12) return { x: 0, y: 0 }
+  return {
+    x: (H[0] * x + H[1] * y + H[2]) / w,
+    y: (H[3] * x + H[4] * y + H[5]) / w
+  }
+}
+
+function sampleBilinear(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  fx: number,
+  fy: number
+): [number, number, number, number] {
+  const x = Math.max(0, Math.min(w - 1.001, fx))
+  const y = Math.max(0, Math.min(h - 1.001, fy))
+  const x0 = Math.floor(x)
+  const y0 = Math.floor(y)
+  const x1 = Math.min(w - 1, x0 + 1)
+  const y1 = Math.min(h - 1, y0 + 1)
+  const tx = x - x0
+  const ty = y - y0
+  const i00 = (y0 * w + x0) * 4
+  const i10 = (y0 * w + x1) * 4
+  const i01 = (y1 * w + x0) * 4
+  const i11 = (y1 * w + x1) * 4
+  const out: [number, number, number, number] = [0, 0, 0, 0]
+  for (let c = 0; c < 4; c++) {
+    const v00 = data[i00 + c]
+    const v10 = data[i10 + c]
+    const v01 = data[i01 + c]
+    const v11 = data[i11 + c]
+    out[c] = Math.round(
+      v00 * (1 - tx) * (1 - ty) +
+      v10 * tx * (1 - ty) +
+      v01 * (1 - tx) * ty +
+      v11 * tx * ty
+    )
+  }
+  return out
+}
+
+/** Seamless projective quad warp — no triangle-mesh seam lines. */
+function drawImageHomographyQuad(
+  ctx: CanvasRenderingContext2D,
+  img: CanvasImageSource,
+  sx: number,
+  sy: number,
+  sw: number,
+  sh: number,
+  quad: [Pt, Pt, Pt, Pt]
+): void {
+  const swi = Math.max(1, Math.ceil(sw))
+  const shi = Math.max(1, Math.ceil(sh))
+  const srcCanvas = document.createElement('canvas')
+  srcCanvas.width = swi
+  srcCanvas.height = shi
+  const sctx = srcCanvas.getContext('2d')!
+  sctx.imageSmoothingEnabled = true
+  sctx.imageSmoothingQuality = 'high'
+  sctx.drawImage(img, sx, sy, sw, sh, 0, 0, swi, shi)
+  const srcData = sctx.getImageData(0, 0, swi, shi).data
+
+  const H = homographyUnitSquareToQuad(quad)
+  const Hinv = invert3x3(H)
+  if (!Hinv) {
+    drawImageAxisRect(ctx, img, sx, sy, sw, sh, quad)
+    return
+  }
+
+  const xs = quad.map((p) => p.x)
+  const ys = quad.map((p) => p.y)
+  const minX = Math.max(0, Math.floor(Math.min(...xs)))
+  const minY = Math.max(0, Math.floor(Math.min(...ys)))
+  const maxX = Math.min(ctx.canvas.width, Math.ceil(Math.max(...xs)))
+  const maxY = Math.min(ctx.canvas.height, Math.ceil(Math.max(...ys)))
+  const dw = maxX - minX
+  const dh = maxY - minY
+  if (dw <= 0 || dh <= 0) return
+
+  const out = ctx.createImageData(dw, dh)
+  const outData = out.data
+  for (let py = 0; py < dh; py++) {
+    const y = minY + py
+    for (let px = 0; px < dw; px++) {
+      const x = minX + px
+      const uv = applyHomography(Hinv, x, y)
+      if (uv.x < 0 || uv.x > 1 || uv.y < 0 || uv.y > 1) continue
+      const rgba = sampleBilinear(srcData, swi, shi, uv.x * (swi - 1), uv.y * (shi - 1))
+      const oi = (py * dw + px) * 4
+      outData[oi] = rgba[0]
+      outData[oi + 1] = rgba[1]
+      outData[oi + 2] = rgba[2]
+      outData[oi + 3] = rgba[3]
+    }
+  }
+  ctx.putImageData(out, minX, minY)
+}
+
+function resolveReshapeSource(
+  temp: HTMLCanvasElement,
+  l: LineObj,
+  W: number,
+  H: number
+): { x: number; y: number; w: number; h: number } | null {
+  const raw = alphaBoundsFromCanvas(temp) ?? boundsFromLineFallback(l)
+  if (raw) return padReshapeBounds(raw, W, H)
+  return l.reshapeSrc ?? null
+}
+
+function renderLineWithReshape(ctx: CanvasRenderingContext2D, l: LineObj): void {
+  const quad = l.reshapeQuad
+  if (!quad || quad.length !== 4) {
+    renderLineBase(ctx, l)
+    return
+  }
+  const W = ctx.canvas.width
+  const H = ctx.canvas.height
+  const temp = document.createElement('canvas')
+  temp.width = W
+  temp.height = H
+  const tctx = temp.getContext('2d')!
+  tctx.clearRect(0, 0, W, H)
+  renderLineUnwarpedToCanvas(tctx, l)
+  const src = resolveReshapeSource(temp, l, W, H)
+  if (!src) {
+    renderLineBase(ctx, l)
+    return
+  }
+  const q: [Pt, Pt, Pt, Pt] = [quad[0], quad[1], quad[2], quad[3]]
+  // Unchanged quad: draw normally — avoids mesh seam lines on entering reshape.
+  if (reshapeQuadMatchesSource(q, src)) {
+    renderLineBase(ctx, l)
+    return
+  }
+  ctx.save()
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  if (quadIsAxisAlignedRect(q)) {
+    drawImageAxisRect(ctx, temp, src.x, src.y, src.w, src.h, q)
+  } else {
+    drawImageHomographyQuad(ctx, temp, src.x, src.y, src.w, src.h, q)
+  }
+  ctx.restore()
+}
+
+function translateReshape(l: LineObj, dx: number, dy: number): void {
+  if (l.reshapeQuad) l.reshapeQuad = l.reshapeQuad.map((p) => ({ x: p.x + dx, y: p.y + dy }))
+  if (l.reshapeBaseQuad) l.reshapeBaseQuad = l.reshapeBaseQuad.map((p) => ({ x: p.x + dx, y: p.y + dy }))
+}
+
+function rotateReshapeFromSnapshot(l: LineObj, source: LineObj, center: Pt, delta: number): void {
+  if (source.reshapeQuad) {
+    l.reshapeQuad = source.reshapeQuad.map((p) => rotatePt(p, center, delta))
+  }
+  if (source.reshapeBaseQuad) {
+    l.reshapeBaseQuad = source.reshapeBaseQuad.map((p) => rotatePt(p, center, delta))
+  }
+}
+
+function mapReshapeFields(
+  l: LineObj,
+  mapPt: (p: Pt) => Pt
+): Pick<LineObj, 'reshapeQuad' | 'reshapeBaseQuad' | 'reshapeSrc'> {
+  if (!l.reshapeQuad?.length) return {}
+  return {
+    reshapeQuad: l.reshapeQuad.map(mapPt),
+    reshapeBaseQuad: l.reshapeBaseQuad?.map(mapPt),
+    reshapeSrc: l.reshapeSrc
+  }
+}
+
+function reshapeCornerAt(l: LineObj, pt: Pt): number {
+  if (!l.reshapeQuad?.length) return -1
+  for (let i = 0; i < l.reshapeQuad.length; i++) {
+    if (dist(l.reshapeQuad[i], pt) <= 12) return i
+  }
+  return -1
+}
+
 function parseFontWeightNum(weight: string | undefined): number {
   const n = parseInt(String(weight ?? '700'), 10)
   return Number.isFinite(n) ? Math.max(100, Math.min(900, n)) : 700
@@ -657,6 +1195,41 @@ function lineFromOutsideText(
   }
   probe.pts = [opticalTopLeftForText(probe, resolution / 2 + off.x, resolution / 2 + off.y)]
   return probe
+}
+
+/** Copy saved text vector fields into paint UI state (no geometry changes). */
+function textPanelStateFromLine(l: LineObj): {
+  textValue: string
+  fontFamily: string
+  fontSize: number
+  fontWeightV: number
+  bold: boolean
+  italic: boolean
+  letterSpacing: number
+  color: string
+  shadow: boolean
+  shadowColor: string
+  shadowBlur: number
+  shadowOX: number
+  shadowOY: number
+  shadowSpread: number
+} {
+  return {
+    textValue: l.text ?? '',
+    fontFamily: l.fontFamily ?? 'Inter',
+    fontSize: l.fontSize ?? 48,
+    fontWeightV: l.weight ?? 400,
+    bold: !!l.bold,
+    italic: !!l.italic,
+    letterSpacing: l.letterSpacing ?? 0,
+    color: l.color,
+    shadow: !!l.shadow,
+    shadowColor: l.shadowColor ?? '#000000b3',
+    shadowBlur: l.shadowBlur ?? 8,
+    shadowOX: l.shadowOffsetX ?? 0,
+    shadowOY: l.shadowOffsetY ?? 4,
+    shadowSpread: l.shadowSpread ?? 0
+  }
 }
 
 function applyOutsideTextToLine(
@@ -829,6 +1402,7 @@ function renderText(ctx: CanvasRenderingContext2D, l: LineObj): void {
 // Sample a line into a flat polyline for rendering / hit-testing.
 function flattenLine(l: LineObj): Pt[] {
   const p = l.pts
+  if (l.reshapeQuad?.length === 4) return [...l.reshapeQuad, l.reshapeQuad[0]]
   if (l.type === 'text') {
     const b = textBBox(l)
     return [
@@ -1051,6 +1625,29 @@ function rotatePt(p: Pt, c: Pt, ang: number): Pt {
   const dx = p.x - c.x, dy = p.y - c.y
   return { x: c.x + dx * co - dy * s, y: c.y + dx * s + dy * co }
 }
+
+/** Apply scale-then-rotate around objCenter (matches renderLineBase). */
+function mapObjDisplayPt(p: Pt, l: LineObj): Pt {
+  const c = objCenter(l)
+  const sx = l.scaleX ?? 1
+  const sy = l.scaleY ?? 1
+  let q = p
+  if ((l.scaleX ?? 1) !== 1 || (l.scaleY ?? 1) !== 1) {
+    q = { x: c.x + (q.x - c.x) * sx, y: c.y + (q.y - c.y) * sy }
+  }
+  return rotatePt(q, c, l.rot ?? 0)
+}
+
+function unmapObjDisplayPt(p: Pt, l: LineObj): Pt {
+  const c = objCenter(l)
+  const sx = l.scaleX ?? 1
+  const sy = l.scaleY ?? 1
+  let q = rotatePt(p, c, -(l.rot ?? 0))
+  if ((l.scaleX ?? 1) !== 1 || (l.scaleY ?? 1) !== 1) {
+    q = { x: c.x + (q.x - c.x) / sx, y: c.y + (q.y - c.y) / sy }
+  }
+  return q
+}
 // Top-centre anchor (unrotated) used to attach the rotate pin.
 function objTopCenter(l: LineObj): Pt {
   if (l.type === 'text') { const b = textBBox(l); return { x: b.x + b.w / 2, y: b.y } }
@@ -1061,11 +1658,15 @@ function objTopCenter(l: LineObj): Pt {
 }
 
 function renderLineBase(ctx: CanvasRenderingContext2D, l: LineObj): void {
-  if (l.rot) {
-    const c = objCenter(l)
+  const c = objCenter(l)
+  const rot = l.rot ?? 0
+  const sx = l.scaleX ?? 1
+  const sy = l.scaleY ?? 1
+  if (lineNeedsDisplayTransform(l)) {
     ctx.save()
     ctx.translate(c.x, c.y)
-    ctx.rotate(l.rot)
+    ctx.rotate(rot)
+    ctx.scale(sx, sy)
     ctx.translate(-c.x, -c.y)
     renderLineBody(ctx, l)
     ctx.restore()
@@ -1075,6 +1676,10 @@ function renderLineBase(ctx: CanvasRenderingContext2D, l: LineObj): void {
 }
 
 function renderLine(ctx: CanvasRenderingContext2D, l: LineObj): void {
+  if (l.reshapeQuad?.length === 4) {
+    renderLineWithReshape(ctx, l)
+    return
+  }
   const supportsObjectPaint = (l.type === 'shape' || l.type === 'stamp') && !!l.paintStrokes?.length && l.pts.length >= 2
   if (!supportsObjectPaint) {
     renderLineBase(ctx, l)
@@ -1092,10 +1697,14 @@ function renderLine(ctx: CanvasRenderingContext2D, l: LineObj): void {
   const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
   const w = Math.max(1, Math.abs(b.x - a.x)), h = Math.max(1, Math.abs(b.y - a.y))
   const c = objCenter(l)
+  const rot = l.rot ?? 0
+  const sx = l.scaleX ?? 1
+  const sy = l.scaleY ?? 1
   layerCtx.save()
-  if (l.rot) {
+  if (lineNeedsDisplayTransform(l)) {
     layerCtx.translate(c.x, c.y)
-    layerCtx.rotate(l.rot)
+    layerCtx.rotate(rot)
+    layerCtx.scale(sx, sy)
     layerCtx.translate(-c.x, -c.y)
   }
   for (const stroke of l.paintStrokes!) {
@@ -1295,6 +1904,9 @@ function cloneLines(arr: LineObj[]): LineObj[] {
   return arr.map((l) => ({
     ...l,
     pts: l.pts.map((p) => ({ ...p })),
+    reshapeQuad: l.reshapeQuad?.map((p) => ({ ...p })),
+    reshapeBaseQuad: l.reshapeBaseQuad?.map((p) => ({ ...p })),
+    reshapeSrc: l.reshapeSrc ? { ...l.reshapeSrc } : l.reshapeSrc,
     paintStrokes: l.paintStrokes?.map((stroke) => ({
       ...stroke,
       pts: stroke.pts.map((p) => ({ ...p }))
@@ -1315,13 +1927,88 @@ function mapCanvasPt(p: Pt, mode: CanvasXform, S: number): Pt {
   }
 }
 
+/** Rotate / flip a point around an arbitrary pivot (selection-local transform). */
+function mapLocalPt(p: Pt, mode: CanvasXform, pivot: Pt): Pt {
+  const dx = p.x - pivot.x
+  const dy = p.y - pivot.y
+  let nx = dx
+  let ny = dy
+  switch (mode) {
+    case 'cw90': nx = dy; ny = -dx; break
+    case 'ccw90': nx = -dy; ny = dx; break
+    case '180': nx = -dx; ny = -dy; break
+    case 'flipH': nx = -dx; ny = dy; break
+    case 'flipV': nx = dx; ny = -dy; break
+  }
+  return { x: pivot.x + nx, y: pivot.y + ny }
+}
+
+type XformOpts = { canvasSpace?: boolean; pivot?: Pt; /** Multi-object or full-canvas transform — mirror around shared pivot, not each item's center. */ groupTransform?: boolean }
+
 function composeCanvasRot(rot: number, mode: CanvasXform): number {
   if (mode === 'cw90') return rot + Math.PI / 2
   if (mode === 'ccw90') return rot - Math.PI / 2
   if (mode === '180') return rot + Math.PI
-  // Flips mirror orientation around the vertical/horizontal axis
-  if (mode === 'flipH' || mode === 'flipV') return -rot
   return rot
+}
+
+function normalizeRot(rot: number): number {
+  const twoPi = Math.PI * 2
+  let r = rot % twoPi
+  if (r <= -Math.PI) r += twoPi
+  if (r > Math.PI) r -= twoPi
+  return r
+}
+
+function lineNeedsDisplayTransform(l: LineObj): boolean {
+  return (l.rot ?? 0) !== 0 || (l.scaleX ?? 1) !== 1 || (l.scaleY ?? 1) !== 1
+}
+
+function textInkCenter(l: LineObj): Pt {
+  const b = textBBox(l)
+  return { x: b.x + b.w / 2, y: b.y + b.h / 2 }
+}
+
+function transformTextLine(l: LineObj, mode: CanvasXform, S: number, opts: XformOpts): LineObj {
+  const canvasSpace = opts.canvasSpace ?? false
+  const groupTransform = opts.groupTransform ?? false
+  const pivot = opts.pivot ?? objCenter(l)
+  const rot = l.rot ?? 0
+  const center = textInkCenter(l)
+  const inPlace = !canvasSpace && !groupTransform &&
+    Math.hypot(center.x - pivot.x, center.y - pivot.y) < 0.5
+
+  const mapWorld = (wp: Pt) =>
+    canvasSpace ? mapCanvasPt(wp, mode, S) : mapLocalPt(wp, mode, pivot)
+
+  const moveAnchorToCenter = (newCenter: Pt): LineObj => ({
+    ...l,
+    pts: [{
+      x: l.pts[0].x + (newCenter.x - center.x),
+      y: l.pts[0].y + (newCenter.y - center.y)
+    }]
+  })
+
+  /** Flip mirrors via scaleX/scaleY only — rotation is independent. */
+  const reflectOrientation = (base: LineObj): LineObj => {
+    const curSx = base.scaleX ?? 1
+    const curSy = base.scaleY ?? 1
+    if (mode === 'flipH') {
+      return { ...base, scaleX: -curSx, scaleY: curSy }
+    }
+    return { ...base, scaleX: curSx, scaleY: -curSy }
+  }
+
+  if (mode === 'flipH' || mode === 'flipV') {
+    if (inPlace) return { ...reflectOrientation(l), ...mapReshapeFields(l, mapWorld) }
+    return { ...reflectOrientation(moveAnchorToCenter(mapWorld(center))), ...mapReshapeFields(l, mapWorld) }
+  }
+
+  const newRot = normalizeRot(composeCanvasRot(rot, mode))
+  if (inPlace) {
+    return { ...l, rot: newRot, ...mapReshapeFields(l, mapWorld) }
+  }
+  return { ...moveAnchorToCenter(mapWorld(center)), rot: newRot, ...mapReshapeFields(l, mapWorld) }
 }
 
 function transformCanvasPixels(src: HTMLCanvasElement, mode: CanvasXform): void {
@@ -1363,16 +2050,32 @@ function transformCanvasPixels(src: HTMLCanvasElement, mode: CanvasXform): void 
   ctx.drawImage(tmp, 0, 0)
 }
 
-function transformLineObj(l: LineObj, mode: CanvasXform, S: number): LineObj {
+function transformLineObj(l: LineObj, mode: CanvasXform, S: number, opts?: XformOpts): LineObj {
+  const canvasSpace = opts?.canvasSpace ?? false
   const c = objCenter(l)
   const rot = l.rot ?? 0
+  const pivot = opts?.pivot ?? c
+
+  if (l.type === 'text') {
+    return transformTextLine(l, mode, S, opts ?? { canvasSpace, pivot })
+  }
+
+  const mapPt = (p: Pt) =>
+    canvasSpace
+      ? mapCanvasPt(rotatePt(p, c, rot), mode, S)
+      : mapLocalPt(rotatePt(p, c, rot), mode, pivot)
+
   if ((l.type === 'shape' || l.type === 'stamp') && l.pts.length === 2) {
+    const x0 = Math.min(l.pts[0].x, l.pts[1].x)
+    const y0 = Math.min(l.pts[0].y, l.pts[1].y)
+    const x1 = Math.max(l.pts[0].x, l.pts[1].x)
+    const y1 = Math.max(l.pts[0].y, l.pts[1].y)
     const corners = [
-      { x: Math.min(l.pts[0].x, l.pts[1].x), y: Math.min(l.pts[0].y, l.pts[1].y) },
-      { x: Math.max(l.pts[0].x, l.pts[1].x), y: Math.min(l.pts[0].y, l.pts[1].y) },
-      { x: Math.max(l.pts[0].x, l.pts[1].x), y: Math.max(l.pts[0].y, l.pts[1].y) },
-      { x: Math.min(l.pts[0].x, l.pts[1].x), y: Math.max(l.pts[0].y, l.pts[1].y) }
-    ].map((p) => mapCanvasPt(rotatePt(p, c, rot), mode, S))
+      { x: x0, y: y0 },
+      { x: x1, y: y0 },
+      { x: x1, y: y1 },
+      { x: x0, y: y1 }
+    ].map((p) => mapPt(p))
     const xs = corners.map((p) => p.x)
     const ys = corners.map((p) => p.y)
     return {
@@ -1381,16 +2084,48 @@ function transformLineObj(l: LineObj, mode: CanvasXform, S: number): LineObj {
         { x: Math.min(...xs), y: Math.min(...ys) },
         { x: Math.max(...xs), y: Math.max(...ys) }
       ],
-      rot: 0
+      rot: 0,
+      ...mapReshapeFields(l, mapPt)
     }
   }
-  if (l.type === 'text') {
-    const anchor = mapCanvasPt(rotatePt(l.pts[0], c, rot), mode, S)
-    return { ...l, pts: [anchor], rot: composeCanvasRot(rot, mode) }
+  const pts = l.pts.map((p) => mapPt(p))
+  return { ...l, pts, rot: 0, ...mapReshapeFields(l, mapPt) }
+}
+
+/** Also rotate/flip stamp pixels — bbox mapping alone does not mirror raster content. */
+function transformStampLineObj(l: LineObj, mode: CanvasXform, S: number, opts?: XformOpts): LineObj {
+  let next = transformLineObj(l, mode, S, opts)
+  if (l.type !== 'stamp' || !l.imageDataUrl) return next
+  const img = ensureStampImage(l.imageDataUrl)
+  if (!img || !img.complete || img.naturalWidth <= 0) return next
+  const c = document.createElement('canvas')
+  c.width = img.naturalWidth
+  c.height = img.naturalHeight
+  const ctx = c.getContext('2d')!
+  ctx.drawImage(img, 0, 0)
+  transformCanvasPixels(c, mode)
+  const imageDataUrl = c.toDataURL('image/png')
+  ensureStampImage(imageDataUrl)
+  return {
+    ...next,
+    scaleX: 1,
+    scaleY: 1,
+    imageDataUrl,
+    sourceSvgMarkup: undefined,
+    sourceStampSize: undefined
   }
-  // Lines / polygons: bake current rotation into points, then map
-  const pts = l.pts.map((p) => mapCanvasPt(rotatePt(p, c, rot), mode, S))
-  return { ...l, pts, rot: 0 }
+}
+
+function collectTransformSubtree(rootId: string, all: LineObj[]): Set<string> {
+  const ids = new Set<string>()
+  const walk = (id: string) => {
+    ids.add(id)
+    for (const child of all) {
+      if (child.parentId === id) walk(child.id)
+    }
+  }
+  walk(rootId)
+  return ids
 }
 
 // ── Preset shape geometry ─────────────────────────────────────────────────────
@@ -1585,8 +2320,12 @@ function traceShape(ctx: CanvasRenderingContext2D, kind: ShapeKind, x: number, y
 }
 
 interface Snap {
+  /** Paint overlay pixels (editable brush/eraser layer). */
   container: ImageData
   content: ImageData
+  /** Live baked base pixels (read-only until Remove BG / canvas xform). */
+  baseContainer: ImageData
+  baseContent: ImageData
   lines: LineObj[]
   layerOrder: PaintLayerId[]
 }
@@ -1801,7 +2540,9 @@ export function IconPaintEditor({
   const displayCompositeRef = useRef<HTMLCanvasElement>(null)
   const previewRef = useRef<HTMLCanvasElement>(null)
 
-  const [tool, setTool] = useState<Tool>('brush')
+  const [tool, setTool] = useState<Tool>('pointer')
+  const toolRef = useRef<Tool>('pointer')
+  toolRef.current = tool
   const [brushTip, setBrushTip] = useState<BrushTip>('round')
   /** Eraser footprint — circle or square only (independent of brush tip). */
   const [eraserTip, setEraserTip] = useState<'round' | 'square'>('round')
@@ -1860,6 +2601,8 @@ export function IconPaintEditor({
   const selectedBaseLayerRef = useRef<PaintLayerId | null>(null)
   /** Layer-panel object selection; Ctrl/Cmd-click allows multiple for Group. */
   const [selectedLayerIds, setSelectedLayerIds] = useState<Set<string>>(() => new Set())
+  const selectedLayerIdsRef = useRef(selectedLayerIds)
+  selectedLayerIdsRef.current = selectedLayerIds
   const [lineType, setLineType] = useState<LineType>('straight')
   const [startCap, setStartCap] = useState<CapType>('none')
   const [endCap, setEndCap] = useState<CapType>('arrow')
@@ -1980,8 +2723,15 @@ export function IconPaintEditor({
 
   const linesRef = useRef<LineObj[]>([])
   const selectedIdRef = useRef<string | null>(null)
+  const reshapeInitRetryRef = useRef(0)
+  const reshapeInitRetryIdRef = useRef<string | null>(null)
+  const reshapeSnapGuidesRef = useRef<{
+    vertical: number[]
+    horizontal: number[]
+    label: string | null
+  } | null>(null)
   const lineDragRef = useRef<{
-    kind: 'create' | 'draw' | 'handle' | 'move' | 'rotate'
+    kind: 'create' | 'draw' | 'handle' | 'move' | 'rotate' | 'reshapeCorner'
     id: string
     idx?: number
     grab?: Pt
@@ -2124,10 +2874,14 @@ export function IconPaintEditor({
   const snapshotState = useCallback((): Snap | null => {
     const cc = containerCtx()
     const ct = contentCtx()
-    if (!cc || !ct) return null
+    const bcc = baseCanvas('container').getContext('2d')
+    const bct = baseCanvas('content').getContext('2d')
+    if (!cc || !ct || !bcc || !bct) return null
     return {
       container: cc.getImageData(0, 0, W, H),
       content: ct.getImageData(0, 0, W, H),
+      baseContainer: bcc.getImageData(0, 0, W, H),
+      baseContent: bct.getImageData(0, 0, W, H),
       lines: cloneLines(linesRef.current),
       layerOrder: [...layerOrderRef.current]
     }
@@ -2150,11 +2904,19 @@ export function IconPaintEditor({
 
   const inferHistoryTags = (before: Snap, after: Snap): string[] => {
     const tags = new Set<string>()
-    if (imageDataChanged(before.container, after.container)) tags.add('base:container')
-    if (imageDataChanged(before.content, after.content)) tags.add('base:content')
+    if (imageDataChanged(before.container, after.container)) tags.add('overlay:container')
+    if (imageDataChanged(before.content, after.content)) tags.add('overlay:content')
+    if (before.baseContainer && after.baseContainer && imageDataChanged(before.baseContainer, after.baseContainer)) {
+      tags.add('bake:container')
+    }
+    if (before.baseContent && after.baseContent && imageDataChanged(before.baseContent, after.baseContent)) {
+      tags.add('bake:content')
+    }
     if (before.layerOrder.join('|') !== after.layerOrder.join('|')) {
-      tags.add('base:container')
-      tags.add('base:content')
+      tags.add('overlay:container')
+      tags.add('overlay:content')
+      tags.add('bake:container')
+      tags.add('bake:content')
     }
     const beforeById = new Map(before.lines.map((l) => [l.id, l]))
     const afterById = new Map(after.lines.map((l) => [l.id, l]))
@@ -2200,8 +2962,12 @@ export function IconPaintEditor({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [snapshotState])
 
+  // One init per paint open — avoid re-seeding vectors when deps tick (Strict Mode / innerDrawSize).
+  const paintBasesLoadedRef = useRef(false)
+
   // Load live bases (read-only) + paint overlays (writable).
   useEffect(() => {
+    if (paintBasesLoadedRef.current) return
     const baseCc = ensureOffscreenCanvas(baseContainerCanvasRef).getContext('2d')
     const baseCt = ensureOffscreenCanvas(baseContentCanvasRef).getContext('2d')
     const cc = containerCtx()
@@ -2263,7 +3029,10 @@ export function IconPaintEditor({
         // Drop any persisted contentBound stamps — they must stay Paint-ephemeral
         // so they cannot double with live Inner settings outside.
         restored = cloneLines(
-          stripContentProxyVectors(initialVectors) as unknown as LineObj[]
+          normalizeLinkedTextVectors(
+            stripContentProxyVectors(initialVectors),
+            null
+          ) as unknown as LineObj[]
         ).map((l) => ({
           ...l,
           visible: l.visible ?? l.editable ?? true
@@ -2352,28 +3121,28 @@ export function IconPaintEditor({
         const linked = restored.find((l) => l.type === 'text' && l.linkedOutsideText)
         const linkOutside = !!(linked && outside)
         setUseOutsideText(linkOutside)
-        // Sync typography from outside settings but keep saved paint positions.
-        if (linkOutside && linked && outside) {
-          const next = applyOutsideTextToLine(linked, outside, W, innerDraw, { preservePosition: true })
-          restored = restored.map((l) => (l.id === next.id ? next : l))
-          setTextValue(next.text ?? '')
-          setFontFamily(next.fontFamily ?? 'Inter')
-          setFontSize(next.fontSize ?? 48)
-          setFontWeightV(next.weight ?? 700)
-          setBold(!!next.bold)
-          setItalic(!!next.italic)
-          setTxtLetterSpacing(next.letterSpacing ?? 0)
-          setColor(next.color)
-          setTxtShadow(!!next.shadow)
-          setTxtShadowColor(next.shadowColor ?? '#000000b3')
-          setTxtShadowBlur(next.shadowBlur ?? 8)
-          setTxtShadowOX(next.shadowOffsetX ?? 0)
-          setTxtShadowOY(next.shadowOffsetY ?? 4)
-          setTxtShadowSpread(next.shadowSpread ?? 0)
-          selectedIdRef.current = next.id
-          setSelectedId(next.id)
-          setSelectedLayerIds(new Set([next.id]))
-          loadFont(next.fontFamily ?? 'Inter').then(() => {
+        // Restore saved vector geometry verbatim — outside settings only drive UI toggle
+        // and explicit "apply outside settings"; re-syncing typography recenters ink.
+        if (linkOutside && linked) {
+          const panel = textPanelStateFromLine(linked)
+          setTextValue(panel.textValue)
+          setFontFamily(panel.fontFamily)
+          setFontSize(panel.fontSize)
+          setFontWeightV(panel.fontWeightV)
+          setBold(panel.bold)
+          setItalic(panel.italic)
+          setTxtLetterSpacing(panel.letterSpacing)
+          setColor(panel.color)
+          setTxtShadow(panel.shadow)
+          setTxtShadowColor(panel.shadowColor)
+          setTxtShadowBlur(panel.shadowBlur)
+          setTxtShadowOX(panel.shadowOX)
+          setTxtShadowOY(panel.shadowOY)
+          setTxtShadowSpread(panel.shadowSpread)
+          selectedIdRef.current = linked.id
+          setSelectedId(linked.id)
+          setSelectedLayerIds(new Set([linked.id]))
+          loadFont(panel.fontFamily).then(() => {
             redrawLinesRef.current()
             drawHandles()
           })
@@ -2388,6 +3157,7 @@ export function IconPaintEditor({
       lastSnapshotRef.current = null
       redrawLinesRef.current()
       pushHistory()
+      paintBasesLoadedRef.current = true
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containerImage, contentImage, containerOverlayImage, contentOverlayImage, hasContainer, initialVectors, initialLayerOrder, innerDrawSize])
@@ -2395,10 +3165,23 @@ export function IconPaintEditor({
   const restoreTaggedSnapshot = (snap: Snap, tags: string[]) => {
     const cc = containerCtx()
     const ct = contentCtx()
-    if (!cc || !ct) return
-    if (tags.includes('base:container')) cc.putImageData(snap.container, 0, 0)
-    if (tags.includes('base:content')) ct.putImageData(snap.content, 0, 0)
-    if (tags.includes('base:container') && tags.includes('base:content')) {
+    const bcc = baseCanvas('container').getContext('2d')
+    const bct = baseCanvas('content').getContext('2d')
+    if (!cc || !ct || !bcc || !bct) return
+    if (tags.includes('overlay:container') || tags.includes('base:container')) {
+      cc.putImageData(snap.container, 0, 0)
+    }
+    if (tags.includes('overlay:content') || tags.includes('base:content')) {
+      ct.putImageData(snap.content, 0, 0)
+    }
+    if (tags.includes('bake:container') && snap.baseContainer) {
+      bcc.putImageData(snap.baseContainer, 0, 0)
+    }
+    if (tags.includes('bake:content') && snap.baseContent) {
+      bct.putImageData(snap.baseContent, 0, 0)
+    }
+    const layerTags = ['overlay:container', 'overlay:content', 'bake:container', 'bake:content', 'base:container', 'base:content']
+    if (layerTags.some((tag) => tags.includes(tag))) {
       const restoredOrder = normalizeLayerOrder(snap.layerOrder)
       layerOrderRef.current = restoredOrder
       setLayerOrder(restoredOrder)
@@ -2510,48 +3293,153 @@ export function IconPaintEditor({
 
   const [bgRemoving, setBgRemoving] = useState(false)
 
-  /** Rotate / flip the full paint canvas (both layers) + all session vectors. */
+  /** Rotate / flip the selected object(s), or the full canvas when nothing is selected. */
   const applyCanvasXform = (mode: CanvasXform) => {
     if (textEditIdRef.current) endTextEditRef.current()
     if (floatRef.current) { floatRef.current = null; setHasMarquee(false) }
     if (marqueeRef.current) { marqueeRef.current = null; setHasMarquee(false) }
 
-    if (containerCanvasRef.current) transformCanvasPixels(containerCanvasRef.current, mode)
-    if (contentCanvasRef.current) transformCanvasPixels(contentCanvasRef.current, mode)
+    const panelIds = [...selectedLayerIds].filter((id) => {
+      const l = linesRef.current.find((item) => item.id === id)
+      return !!l && !l.marqueeItem && isVectorVisible(l)
+    })
 
-    const next = linesRef.current.map((l) => transformLineObj(l, mode, W))
+    const hasSelectedAncestor = (l: LineObj): boolean => {
+      let parentId = l.parentId
+      while (parentId) {
+        if (panelIds.includes(parentId)) return true
+        parentId = linesRef.current.find((item) => item.id === parentId)?.parentId
+      }
+      return false
+    }
+
+    let transformIds: Set<string> | null = null
+    let pivot: Pt | null = null
+
+    if (panelIds.length >= 2) {
+      const roots = panelIds.filter((id) => {
+        const l = linesRef.current.find((item) => item.id === id)
+        return !!l && !hasSelectedAncestor(l)
+      })
+      transformIds = new Set<string>()
+      for (const id of roots) {
+        collectTransformSubtree(id, linesRef.current).forEach((tid) => transformIds!.add(tid))
+      }
+      const boxes = [...transformIds]
+        .map((id) => linesRef.current.find((item) => item.id === id))
+        .filter((l): l is LineObj => !!l)
+        .map(boundsForLine)
+      if (boxes.length) {
+        const left = Math.min(...boxes.map((b) => b.x))
+        const top = Math.min(...boxes.map((b) => b.y))
+        const right = Math.max(...boxes.map((b) => b.x + b.w))
+        const bottom = Math.max(...boxes.map((b) => b.y + b.h))
+        pivot = { x: (left + right) / 2, y: (top + bottom) / 2 }
+      }
+    } else {
+      const selId = selectedIdRef.current ?? (panelIds.length === 1 ? panelIds[0] : null)
+      const sel = selId ? linesRef.current.find((l) => l.id === selId) : null
+      if (sel) {
+        const target = checkedGroupTarget(sel) ?? sel
+        transformIds = collectTransformSubtree(target.id, linesRef.current)
+        pivot = objCenter(target)
+      }
+    }
+
+    if (transformIds && pivot) {
+      const groupTransform = panelIds.length >= 2 || transformIds.size > 1
+      const xformOpts: XformOpts = { canvasSpace: false, pivot, groupTransform }
+      const next = linesRef.current.map((l) =>
+        transformIds!.has(l.id) ? transformStampLineObj(l, mode, W, xformOpts) : l
+      )
+      syncGroupBounds(next)
+      linesRef.current = next
+      commitLines(next)
+      redrawLines()
+      drawHandles()
+      pushHistory()
+      return
+    }
+
+    const canvasOpts: XformOpts = { canvasSpace: true, groupTransform: true }
+    for (const id of layerOrderRef.current) {
+      transformCanvasPixels(baseCanvas(id), mode)
+      transformCanvasPixels(layerCanvas(id), mode)
+    }
+    const next = linesRef.current.map((l) => transformStampLineObj(l, mode, W, canvasOpts))
     linesRef.current = next
     commitLines(next)
-    selectedIdRef.current = null
-    setSelectedId(null)
     redrawLines()
     clearPreview()
     pushHistory()
   }
 
-  /** Remove background on the prioritized editable layer (corner flood-fill). */
+  const drawDataUrlToCanvas = (canvas: HTMLCanvasElement, dataUrl: string): Promise<boolean> =>
+    new Promise((resolve) => {
+      const img = new Image()
+      img.onload = () => {
+        const ctx = canvas.getContext('2d')!
+        ctx.clearRect(0, 0, canvas.width, canvas.height)
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+        resolve(true)
+      }
+      img.onerror = () => resolve(false)
+      img.src = dataUrl
+    })
+
+  /** Remove background on the selected stamp, or checked layer composites. */
   const removeBgOnLayers = async () => {
-    const targets = targetCanvases()
-    if (!targets.length) return
     setBgRemoving(true)
     try {
-      for (const canvas of targets) {
-        const result = await removeImageBackground(canvas.toDataURL('image/png'))
-        if (!result.success || !result.dataUrl) continue
-        await new Promise<void>((resolve) => {
-          const img = new Image()
-          img.onload = () => {
-            const ctx = canvas.getContext('2d')!
-            ctx.clearRect(0, 0, canvas.width, canvas.height)
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
-            resolve()
-          }
-          img.onerror = () => resolve()
-          img.src = result.dataUrl!
-        })
+      const selId = selectedIdRef.current
+      const sel = selId ? linesRef.current.find((l) => l.id === selId) : null
+      if (sel?.type === 'stamp' && sel.imageDataUrl) {
+        const result = await removeImageBackground(sel.imageDataUrl)
+        if (result.success && result.dataUrl) {
+          sel.imageDataUrl = result.dataUrl
+          sel.sourceSvgMarkup = undefined
+          sel.sourceStampSize = undefined
+          ensureStampImage(result.dataUrl)
+          commitLines([...linesRef.current])
+          redrawLines()
+          drawHandles()
+          pushHistory()
+        }
+        return
       }
-      redrawLines()
-      pushHistory()
+
+      if (floatRef.current) {
+        const result = await removeImageBackground(floatRef.current.canvas.toDataURL('image/png'))
+        if (result.success && result.dataUrl) {
+          await drawDataUrlToCanvas(floatRef.current.canvas, result.dataUrl)
+          redrawLines()
+          pushHistory()
+        }
+        return
+      }
+
+      const layerIds = [...layerOrderRef.current].reverse().filter(layerIsEditable)
+      if (!layerIds.length) return
+
+      let changed = false
+      for (const id of layerIds) {
+        const composite = document.createElement('canvas')
+        composite.width = W
+        composite.height = H
+        const cctx = composite.getContext('2d')!
+        cctx.drawImage(baseCanvas(id), 0, 0)
+        cctx.drawImage(layerCanvas(id), 0, 0)
+        const result = await removeImageBackground(composite.toDataURL('image/png'))
+        if (!result.success || !result.dataUrl) continue
+        const overlay = layerCanvas(id)
+        const base = baseCanvas(id)
+        base.getContext('2d')!.clearRect(0, 0, W, H)
+        if (await drawDataUrlToCanvas(overlay, result.dataUrl)) changed = true
+      }
+      if (changed) {
+        redrawLines()
+        pushHistory()
+      }
     } finally {
       setBgRemoving(false)
     }
@@ -2691,6 +3579,18 @@ export function IconPaintEditor({
       y: ((e.clientY - rect.top) / rect.height) * H
     }
   }
+  const dropPtOnCanvas = (e: React.DragEvent): Pt | undefined => {
+    const el = previewRef.current
+    if (!el) return undefined
+    const rect = el.getBoundingClientRect()
+    if (
+      e.clientX < rect.left || e.clientX > rect.right ||
+      e.clientY < rect.top || e.clientY > rect.bottom
+    ) {
+      return undefined
+    }
+    return clientToCanvas(e)
+  }
 
   const clearPreview = () => {
     const p = previewRef.current?.getContext('2d')
@@ -2739,8 +3639,7 @@ export function IconPaintEditor({
   }
 
   const boundsForLine = (l: LineObj): { x: number; y: number; w: number; h: number } => {
-    const center = objCenter(l)
-    const points = flattenLine(l).map((pt) => rotatePt(pt, center, l.rot ?? 0))
+    const points = flattenLine(l).map((pt) => mapObjDisplayPt(pt, l))
     const xs = points.map((pt) => pt.x)
     const ys = points.map((pt) => pt.y)
     const x = Math.min(...xs)
@@ -2892,6 +3791,43 @@ export function IconPaintEditor({
     p.restore()
   }
 
+  /** Purple guides while dragging a reshape corner onto a snap target. */
+  const drawReshapeSnapGuides = () => {
+    const guides = reshapeSnapGuidesRef.current
+    if (!guides || (!guides.vertical.length && !guides.horizontal.length)) return
+    const p = previewRef.current?.getContext('2d')
+    if (!p) return
+    const rect = previewRef.current?.getBoundingClientRect()
+    const scale = rect?.width ? W / rect.width : 1
+    p.save()
+    p.strokeStyle = '#a855f7'
+    p.fillStyle = '#a855f7'
+    p.lineWidth = Math.max(1, 1.25 * scale)
+    p.setLineDash([5 * scale, 4 * scale])
+    for (const gx of guides.vertical) {
+      p.beginPath()
+      p.moveTo(gx, 0)
+      p.lineTo(gx, H)
+      p.stroke()
+    }
+    for (const gy of guides.horizontal) {
+      p.beginPath()
+      p.moveTo(0, gy)
+      p.lineTo(W, gy)
+      p.stroke()
+    }
+    p.setLineDash([])
+    if (guides.label) {
+      p.font = `600 ${11 * scale}px Inter, sans-serif`
+      p.textAlign = 'left'
+      p.textBaseline = 'top'
+      const lx = guides.vertical[0] ?? 8 * scale
+      const ly = guides.horizontal[0] ?? 8 * scale
+      p.fillText(guides.label, lx + 6 * scale, ly + 6 * scale)
+    }
+    p.restore()
+  }
+
   /** Magenta smart guides shown while a dragged item is aligned. */
   const drawAlignmentGuides = (snap: AlignmentSnap) => {
     if (!snap.x && !snap.y) return
@@ -3014,11 +3950,10 @@ export function IconPaintEditor({
 
   // Screen position of the rotate pin (a small handle above the object's top edge).
   const rotatePinAt = (l: LineObj): Pt =>
-    rotatePt({ ...objTopCenter(l), y: objTopCenter(l).y - ROTATE_PIN_LEN }, objCenter(l), l.rot ?? 0)
+    mapObjDisplayPt({ ...objTopCenter(l), y: objTopCenter(l).y - ROTATE_PIN_LEN }, l)
 
   const drawRotatePin = (p: CanvasRenderingContext2D, l: LineObj) => {
-    const c = objCenter(l)
-    const anchor = rotatePt(objTopCenter(l), c, l.rot ?? 0)
+    const anchor = mapObjDisplayPt(objTopCenter(l), l)
     const pin = rotatePinAt(l)
     p.save()
     p.strokeStyle = '#10b981'
@@ -3085,23 +4020,97 @@ export function IconPaintEditor({
     p.restore()
   }
 
-  const alphaBounds = (canvas: HTMLCanvasElement | null): { x: number; y: number; w: number; h: number } | null => {
-    if (!canvas) return null
-    const data = canvas.getContext('2d')?.getImageData(0, 0, canvas.width, canvas.height).data
-    if (!data) return null
-    let left = canvas.width, top = canvas.height, right = -1, bottom = -1
-    for (let y = 0; y < canvas.height; y++) {
-      for (let x = 0; x < canvas.width; x++) {
-        if (data[(y * canvas.width + x) * 4 + 3] === 0) continue
-        left = Math.min(left, x)
-        top = Math.min(top, y)
-        right = Math.max(right, x)
-        bottom = Math.max(bottom, y)
-      }
+  const alphaBounds = (canvas: HTMLCanvasElement | null): { x: number; y: number; w: number; h: number } | null =>
+    alphaBoundsFromCanvas(canvas)
+
+  const drawReshapeHandles = (p: CanvasRenderingContext2D, l: LineObj) => {
+    const quad = l.reshapeQuad
+    if (!quad || quad.length !== 4) return false
+    p.save()
+    p.strokeStyle = '#a855f7'
+    p.lineWidth = 2
+    p.setLineDash([6, 4])
+    p.beginPath()
+    p.moveTo(quad[0].x, quad[0].y)
+    for (let i = 1; i < quad.length; i++) p.lineTo(quad[i].x, quad[i].y)
+    p.closePath()
+    p.stroke()
+    p.setLineDash([])
+    p.fillStyle = '#ffffff'
+    p.strokeStyle = '#a855f7'
+    p.lineWidth = 2.5
+    for (const corner of quad) {
+      p.beginPath()
+      p.arc(corner.x, corner.y, 7, 0, Math.PI * 2)
+      p.fill()
+      p.stroke()
     }
-    return right < left || bottom < top
-      ? null
-      : { x: left, y: top, w: right - left + 1, h: bottom - top + 1 }
+    p.restore()
+    return true
+  }
+
+  const ensureReshapeInit = (id: string): LineObj | null => {
+    const l = linesRef.current.find((x) => x.id === id)
+    if (!l || !lineReshapeable(l)) return null
+    if (l.reshapeQuad?.length === 4) {
+      if (!l.reshapeBaseQuad?.length) {
+        const patched = { ...l, reshapeBaseQuad: l.reshapeQuad.map((p) => ({ ...p })) }
+        linesRef.current = linesRef.current.map((x) => (x.id === id ? patched : x))
+        commitLines([...linesRef.current])
+        return patched
+      }
+      return l
+    }
+    const next = initReshapeOnLine(l, W, H)
+    if (!next.reshapeQuad?.length || !next.reshapeSrc) {
+      scheduleReshapeInitRetry(id)
+      return null
+    }
+    linesRef.current = linesRef.current.map((x) => (x.id === id ? next : x))
+    commitLines([...linesRef.current])
+    reshapeInitRetryRef.current = 0
+    reshapeInitRetryIdRef.current = null
+    return next
+  }
+
+  const scheduleReshapeInitRetry = (id: string) => {
+    if (reshapeInitRetryIdRef.current !== id) {
+      reshapeInitRetryIdRef.current = id
+      reshapeInitRetryRef.current = 0
+    }
+    if (reshapeInitRetryRef.current >= 20) return
+    reshapeInitRetryRef.current += 1
+    window.requestAnimationFrame(() => {
+      if (toolRef.current !== 'reshape') return
+      const target = linesRef.current.find((x) => x.id === id)
+      if (!target || target.reshapeQuad?.length === 4) return
+      const inited = ensureReshapeInit(id)
+      if (inited) {
+        redrawLines()
+        drawHandles()
+      }
+    })
+  }
+
+  const activateReshapeForTarget = (target: LineObj) => {
+    selectedIdRef.current = target.id
+    setSelectedId(target.id)
+    setSelectedLayerIds(new Set([target.id]))
+    setTool('reshape')
+    const inited = ensureReshapeInit(target.id)
+    if (!inited) scheduleReshapeInitRetry(target.id)
+    redrawLines()
+    drawHandles()
+  }
+
+  const reshapeTargetLine = (): LineObj | null => {
+    for (const layerId of selectedLayerIdsRef.current) {
+      const layer = linesRef.current.find((x) => x.id === layerId)
+      if (layer && lineReshapeable(layer) && isVectorVisible(layer)) return layer
+    }
+    const sel = linesRef.current.find((x) => x.id === selectedIdRef.current)
+    if (sel && lineReshapeable(sel) && isVectorVisible(sel)) return sel
+    return null
   }
 
   const drawContentHandles = (p: CanvasRenderingContext2D): boolean => {
@@ -3146,18 +4155,27 @@ export function IconPaintEditor({
     const p = previewRef.current?.getContext('2d')
     if (!p) return
     p.clearRect(0, 0, W, H)
-    const l = linesRef.current.find((x) => x.id === selectedIdRef.current)
+    const activeTool = toolRef.current
+    let l =
+      activeTool === 'reshape'
+        ? reshapeTargetLine()
+        : linesRef.current.find((x) => x.id === selectedIdRef.current) ?? null
     if (!l && drawContentHandles(p)) return
     // Never leave handles (or any preview pixels) for a hidden object layer.
     if (!l || !isVectorVisible(l)) return
-    const c = objCenter(l)
-    const rot = l.rot ?? 0
+    if (activeTool === 'reshape' && lineReshapeable(l)) {
+      if (!l.reshapeQuad?.length) l = ensureReshapeInit(l.id) ?? l
+    }
+    if (activeTool === 'reshape' || l.reshapeQuad?.length === 4) {
+      if (drawReshapeHandles(p, l)) return
+      if (activeTool === 'reshape') return
+    }
     if (l.type === 'text') {
       const b = textBBox(l)
       const corners = [
         { x: b.x, y: b.y }, { x: b.x + b.w, y: b.y },
         { x: b.x + b.w, y: b.y + b.h }, { x: b.x, y: b.y + b.h }
-      ].map((pt) => rotatePt(pt, c, rot))
+      ].map((pt) => mapObjDisplayPt(pt, l))
       p.save()
       p.strokeStyle = '#3b82f6'
       p.lineWidth = 2
@@ -3178,7 +4196,7 @@ export function IconPaintEditor({
     }
     for (let i = 0; i < l.pts.length; i++) {
       const isEnd = i === 0 || i === l.pts.length - 1
-      const pt = rotatePt(l.pts[i], c, rot)
+      const pt = mapObjDisplayPt(l.pts[i], l)
       p.save()
       p.fillStyle = '#ffffff'
       p.strokeStyle = isEnd ? '#3b82f6' : '#f59e0b'
@@ -3192,7 +4210,7 @@ export function IconPaintEditor({
     }
     drawRotatePin(p, l)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [W, H])
+  }, [W, H, tool])
 
   const commitLines = useCallback((arr: LineObj[]) => {
     linesRef.current = arr
@@ -3205,8 +4223,27 @@ export function IconPaintEditor({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fontFamily])
 
+  useEffect(() => {
+    if (tool !== 'reshape') return
+    const target = reshapeTargetLine()
+    if (!target) return
+    if (target.reshapeQuad?.length === 4) {
+      drawHandles()
+      return
+    }
+    const inited = ensureReshapeInit(target.id)
+    if (inited) {
+      redrawLines()
+      drawHandles()
+    } else {
+      scheduleReshapeInitRetry(target.id)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tool, selectedId, selectedLayerIds])
+
   const selectLine = (l: LineObj, preservePanelSelection = false) => {
-    const editTarget = checkedGroupTarget(l) ?? l
+    const editTarget =
+      toolRef.current === 'reshape' ? l : (checkedGroupTarget(l) ?? l)
     selectedIdRef.current = editTarget.id
     setSelectedId(editTarget.id)
     if (!preservePanelSelection) setSelectedLayerIds(new Set([l.id]))
@@ -3443,7 +4480,7 @@ export function IconPaintEditor({
     if (textEditIdRef.current) {
       const editing = linesRef.current.find((l) => l.id === textEditIdRef.current)
       if (editing?.type === 'text') {
-        const q = rotatePt(pt, objCenter(editing), -(editing.rot ?? 0))
+        const q = unmapObjDisplayPt(pt, editing)
         const onText = pointInPoly(flattenLine(editing), q)
         const onHandle = handleIndexAt(editing, pt) >= 0 || dist(rotatePinAt(editing), pt) <= 12
         if (onText && !onHandle) return // keep caret in the textarea
@@ -3467,7 +4504,9 @@ export function IconPaintEditor({
             kind: 'rotate', id: sel.id, center,
             startAng: Math.atan2(pt.y - center.y, pt.x - center.x),
             startRot: sel.rot ?? 0,
-            ...(sel.type === 'group' ? { snapshot: cloneLines(linesRef.current) } : {})
+            ...((sel.type === 'group' || sel.reshapeQuad?.length === 4)
+              ? { snapshot: cloneLines(linesRef.current) }
+              : {})
           }
           return
         }
@@ -3497,7 +4536,8 @@ export function IconPaintEditor({
       // 2. Selecting / moving an existing visible object (topmost first).
       const hit = [...linesRef.current].reverse().find((l) => {
         if (!isVectorVisible(l)) return false
-        const q = rotatePt(pt, objCenter(l), -(l.rot ?? 0))
+        if (l.reshapeQuad?.length === 4) return pointInPoly(l.reshapeQuad, pt)
+        const q = unmapObjDisplayPt(pt, l)
         return l.type === 'text'
           ? pointInPoly(flattenLine(l), q)
           : lineHitDist(l, q) <= Math.max(8, l.thickness) ||
@@ -3512,10 +4552,59 @@ export function IconPaintEditor({
         return
       }
 
-      // Empty Pointer click deselects.
+      // Empty Pointer click deselects canvas + layer panel.
       lineDragRef.current = null
       selectedIdRef.current = null
       setSelectedId(null)
+      setSelectedLayerIds(new Set())
+      redrawLines(); drawHandles()
+      return
+    }
+    if (tool === 'reshape') {
+      let sel = reshapeTargetLine()
+      if (sel) sel = ensureReshapeInit(sel.id) ?? linesRef.current.find((l) => l.id === sel!.id) ?? null
+      if (sel && sel.reshapeQuad?.length === 4) {
+        selectedIdRef.current = sel.id
+        setSelectedId(sel.id)
+        setSelectedLayerIds(new Set([sel.id]))
+        const ci = reshapeCornerAt(sel, pt)
+        if (ci >= 0) {
+          lineDragRef.current = {
+            kind: 'reshapeCorner',
+            id: sel.id,
+            idx: ci,
+            snapshot: cloneLines(linesRef.current)
+          }
+          return
+        }
+        if (pointInPoly(sel.reshapeQuad, pt)) {
+          lineDragRef.current = { kind: 'move', id: sel.id, grab: pt }
+          return
+        }
+      }
+      const hit = [...linesRef.current].reverse().find((l) => {
+        if (!isVectorVisible(l) || !lineReshapeable(l)) return false
+        if (l.reshapeQuad?.length === 4) return pointInPoly(l.reshapeQuad, pt)
+        const q = unmapObjDisplayPt(pt, l)
+        return l.type === 'text'
+          ? pointInPoly(flattenLine(l), q)
+          : (l.type === 'stamp' || l.type === 'shape') && l.pts.length >= 2 && pointInRect(l.pts[0], l.pts[1], q)
+      })
+      if (hit) {
+        selectLine(hit)
+        const ready = ensureReshapeInit(hit.id) ?? linesRef.current.find((l) => l.id === hit.id)
+        if (ready?.reshapeQuad?.length === 4 && pointInPoly(ready.reshapeQuad, pt)) {
+          lineDragRef.current = { kind: 'move', id: ready.id, grab: pt }
+        } else if (ready && !ready.reshapeQuad?.length) {
+          scheduleReshapeInitRetry(hit.id)
+        }
+        redrawLines(); drawHandles()
+        return
+      }
+      lineDragRef.current = null
+      selectedIdRef.current = null
+      setSelectedId(null)
+      setSelectedLayerIds(new Set())
       redrawLines(); drawHandles()
       return
     }
@@ -3806,9 +4895,52 @@ export function IconPaintEditor({
         if (l.borderWidth != null) l.borderWidth *= strokeScale
       }
       syncGroupBounds()
+    } else if (dr.kind === 'reshapeCorner') {
+      if (!l.reshapeQuad || dr.idx == null) return
+      let nx = pt.x
+      let ny = pt.y
+      let shiftAxis: 'x' | 'y' | null = null
+      if (shiftHeldRef.current && dr.snapshot) {
+        const source = dr.snapshot.find((item) => item.id === l.id)
+        const origin = source?.reshapeQuad?.[dr.idx]
+        if (origin) {
+          if (Math.abs(pt.x - origin.x) >= Math.abs(pt.y - origin.y)) {
+            ny = origin.y
+            shiftAxis = 'x'
+          } else {
+            nx = origin.x
+            shiftAxis = 'y'
+          }
+        }
+      }
+      const base = l.reshapeBaseQuad ?? l.reshapeQuad
+      const screenRect = previewRef.current?.getBoundingClientRect()
+      const scale = screenRect?.width ? W / screenRect.width : 1
+      const snapped = applyReshapeCornerSnap(
+        { x: nx, y: ny },
+        dr.idx,
+        l.reshapeQuad,
+        base,
+        6 * scale,
+        shiftAxis
+      )
+      l.reshapeQuad[dr.idx] = snapped.pt
+      reshapeSnapGuidesRef.current =
+        snapped.verticalGuides.length || snapped.horizontalGuides.length
+          ? {
+              vertical: snapped.verticalGuides,
+              horizontal: snapped.horizontalGuides,
+              label: snapped.label
+            }
+          : null
+      redrawLines()
+      drawHandles()
+      drawReshapeSnapGuides()
+      return
     } else if (dr.kind === 'move') {
       const d = { x: pt.x - dr.grab!.x, y: pt.y - dr.grab!.y }
       l.pts = l.pts.map((p) => ({ x: p.x + d.x, y: p.y + d.y }))
+      translateReshape(l, d.x, d.y)
       if (l.type === 'group') {
         const descendants = descendantIds(l.id)
         for (const child of linesRef.current) {
@@ -3890,6 +5022,10 @@ export function IconPaintEditor({
         }
       } else {
         l.rot = nextRot
+        if (dr.snapshot) {
+          const source = dr.snapshot.find((item) => item.id === l.id)
+          if (source) rotateReshapeFromSnapshot(l, source, c, nextRot - (dr.startRot ?? 0))
+        }
         syncGroupBounds()
       }
       redrawLines()
@@ -3905,11 +5041,12 @@ export function IconPaintEditor({
       baseTransformRef.current = null
       redrawLines()
       drawHandles()
-      pushHistory(['base:content'])
+      pushHistory(['overlay:content'])
       return
     }
     const dr = lineDragRef.current
     lineDragRef.current = null
+    reshapeSnapGuidesRef.current = null
     resizeSnapLockRef.current = { width: false, height: false }
     if (!dr) return
     const l = linesRef.current.find((x) => x.id === dr.id)
@@ -3938,6 +5075,11 @@ export function IconPaintEditor({
       }
     }
     syncGroupBounds()
+    if (l && dr.kind === 'handle' && (l.reshapeQuad || l.reshapeSrc)) {
+      l.reshapeQuad = undefined
+      l.reshapeSrc = undefined
+      l.reshapeBaseQuad = undefined
+    }
     commitLines([...linesRef.current])
     redrawLines(); drawHandles()
     pushHistory()
@@ -4004,7 +5146,8 @@ export function IconPaintEditor({
     drawing.current = false
     if (
       tool !== 'line' && tool !== 'freepoly' && tool !== 'pointer' &&
-      tool !== 'text' && tool !== 'brush' && tool !== 'eraser' && tool !== 'fill'
+      tool !== 'text' && tool !== 'brush' && tool !== 'eraser' && tool !== 'fill' &&
+      tool !== 'reshape'
     ) {
       selectedIdRef.current = null
       setSelectedId(null)
@@ -4032,7 +5175,7 @@ export function IconPaintEditor({
     }
     redrawLines()
     if (floatRef.current) drawSelOverlay()
-    else if (tool === 'pointer') drawHandles()
+    else if (tool === 'pointer' || tool === 'reshape') drawHandles()
     else clearPreview()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lines, selectedId, tool])
@@ -5327,49 +6470,82 @@ export function IconPaintEditor({
   const placeSvgMarkupRef = useRef(placeSvgMarkup)
   placeSvgMarkupRef.current = placeSvgMarkup
 
-  const handleStageDrop = async (e: React.DragEvent) => {
+  const isSvgDropFile = (file: File): boolean =>
+    file.type === 'image/svg+xml' || /\.svg$/i.test(file.name)
+
+  const isRasterDropFile = (file: File): boolean => {
+    if (isSvgDropFile(file)) return false
+    if (file.type.startsWith('image/')) return true
+    return /\.(png|jpe?g|gif|webp|bmp|ico|avif|tiff?)$/i.test(file.name)
+  }
+
+  const paintDropAcceptsDrag = (e: React.DragEvent): boolean => {
+    const types = [...e.dataTransfer.types]
+    if (
+      types.includes(PAINT_SVG_MIME) ||
+      types.includes(PAINT_LUCIDE_MIME) ||
+      types.includes('text/plain')
+    ) {
+      return true
+    }
+    return types.includes('Files')
+  }
+
+  const handlePaintDragOver = (e: React.DragEvent) => {
+    if (!paintDropAcceptsDrag(e)) return
     e.preventDefault()
-    e.stopPropagation()
-    const pt = clientToCanvas(e)
+    e.dataTransfer.dropEffect = 'copy'
+  }
+
+  const handleStageDrop = async (e: React.DragEvent) => {
+    const file = e.dataTransfer.files?.[0]
+    if (file && isIgTemplateFile(file)) return
+
+    let handled = false
+    const pt = dropPtOnCanvas(e)
     const svgData = e.dataTransfer.getData(PAINT_SVG_MIME) || e.dataTransfer.getData('text/plain')
     if (svgData && svgData.includes('<svg')) {
       const fromLibrary = e.dataTransfer.types.includes(PAINT_SVG_MIME) ||
         e.dataTransfer.types.includes(PAINT_LUCIDE_MIME)
       await placeSvgMarkup(svgData, pt, fromLibrary ? 'library' : 'image')
-      return
-    }
-    const lucideRaw = e.dataTransfer.getData(PAINT_LUCIDE_MIME)
-    if (lucideRaw) {
-      try {
-        const parsed = JSON.parse(lucideRaw) as { name?: string; strokeWidth?: number }
-        if (parsed.name) {
-          const markup = await renderLucideToSvg(parsed.name, 'currentColor', parsed.strokeWidth ?? 2)
-          if (markup) await placeSvgMarkup(markup, pt, 'library')
-        }
-      } catch {
-        /* ignore bad payload */
-      }
-      return
-    }
-    const file = e.dataTransfer.files?.[0]
-    if (file) {
-      if (file.type === 'image/svg+xml' || /\.svg$/i.test(file.name)) {
+      handled = true
+    } else {
+      const lucideRaw = e.dataTransfer.getData(PAINT_LUCIDE_MIME)
+      if (lucideRaw) {
         try {
-          const text = await file.text()
-          if (text.includes('<svg')) await placeSvgMarkup(text, pt)
+          const parsed = JSON.parse(lucideRaw) as { name?: string; strokeWidth?: number }
+          if (parsed.name) {
+            const markup = await renderLucideToSvg(parsed.name, 'currentColor', parsed.strokeWidth ?? 2)
+            if (markup) await placeSvgMarkup(markup, pt, 'library')
+            handled = true
+          }
         } catch {
-          /* ignore */
+          /* ignore bad payload */
         }
-        return
-      }
-      if (file.type.startsWith('image/')) {
-        try {
-          const url = await readBlobAsDataUrl(file)
-          placeExternalImage(url, pt)
-        } catch {
-          /* ignore */
+      } else if (file) {
+        if (isSvgDropFile(file)) {
+          try {
+            const text = await file.text()
+            if (text.includes('<svg')) await placeSvgMarkup(text, pt, 'image')
+            handled = true
+          } catch {
+            /* ignore */
+          }
+        } else if (isRasterDropFile(file)) {
+          try {
+            const url = await readBlobAsDataUrl(file)
+            placeExternalImage(url, pt)
+            handled = true
+          } catch {
+            /* ignore */
+          }
         }
       }
+    }
+
+    if (handled) {
+      e.preventDefault()
+      e.stopPropagation()
     }
   }
 
@@ -5442,23 +6618,19 @@ export function IconPaintEditor({
   const pasteVector = () => {
     const c = vectorClipRef.current
     if (!c) return
-    let baseLines = linesRef.current
-    const transferLinked = c.type === 'text' && !!c.linkedOutsideText
-    if (transferLinked) {
-      // Duplicating the live Inner layer — move the link to the pasted copy.
-      baseLines = baseLines.filter((l) => !(l.type === 'text' && l.linkedOutsideText))
-    }
+    const wasLinked = c.type === 'text' && !!c.linkedOutsideText
     const nl: LineObj = {
       ...c,
       id: genId(),
       pts: c.pts.map((p) => ({ x: p.x + 16, y: p.y + 16 })),
       layer: c.layer ?? activeAddLayer(),
-      linkedOutsideText: transferLinked ? true : undefined,
+      // Pasted copies are never linked — keep the original linked layer intact.
+      linkedOutsideText: undefined,
       contentBound: undefined,
-      name: c.type === 'text' ? 'Text' : c.name
+      name: c.type === 'text' ? (wasLinked ? `Text ${linesRef.current.filter((l) => l.type === 'text').length + 1}` : 'Text') : c.name
     }
     if (nl.type === 'stamp' && nl.imageDataUrl) ensureStampImage(nl.imageDataUrl)
-    linesRef.current = [...baseLines, nl]
+    linesRef.current = [...linesRef.current, nl]
     selectLine(nl)
     if (tool !== 'pointer') {
       if (nl.type === 'text' && tool !== 'text') setTool('pointer')
@@ -5519,21 +6691,18 @@ export function IconPaintEditor({
     })()
   }
 
-  const isSvgFile = (file: File) =>
-    file.type === 'image/svg+xml' || /\.svg$/i.test(file.name)
-
   const onExternalImageFile = (file: File | null | undefined) => {
     if (!file) return
-    if (isSvgFile(file)) {
+    if (isSvgDropFile(file)) {
       void file
         .text()
         .then((text) => {
-          if (text.includes('<svg')) void placeSvgMarkup(text)
+          if (text.includes('<svg')) void placeSvgMarkup(text, undefined, 'image')
         })
         .catch(() => {})
       return
     }
-    if (!file.type.startsWith('image/')) return
+    if (!isRasterDropFile(file)) return
     void readBlobAsDataUrl(file).then(placeExternalImage).catch(() => {})
   }
 
@@ -5583,7 +6752,7 @@ export function IconPaintEditor({
 
   // ── Pointer handlers ─────────────────────────────────────────────────────────
   const handlePointerMove = (pt: Pt) => {
-    if (tool === 'line' || tool === 'freepoly' || tool === 'pointer' || tool === 'shape' || tool === 'text') { lineMove(pt); return }
+    if (tool === 'line' || tool === 'freepoly' || tool === 'pointer' || tool === 'shape' || tool === 'text' || tool === 'reshape') { lineMove(pt); return }
 
     if (tool === 'select') {
       const lockAspect = shiftHeldRef.current
@@ -5716,7 +6885,7 @@ export function IconPaintEditor({
   }
 
   const handlePointerUp = (pt: Pt) => {
-    if (tool === 'line' || tool === 'freepoly' || tool === 'pointer' || tool === 'shape' || tool === 'text') { lineUp(pt); return }
+    if (tool === 'line' || tool === 'freepoly' || tool === 'pointer' || tool === 'shape' || tool === 'text' || tool === 'reshape') { lineUp(pt); return }
     if (tool === 'select') {
       if (marqueeResizeRef.current) {
         marqueeResizeRef.current = null
@@ -5776,7 +6945,7 @@ export function IconPaintEditor({
     if (openMenu) setOpenMenu(null)
     const pt = toCanvas(e)
     if (tool === 'eyedropper') { eyedrop(pt.x, pt.y); return }
-    if (tool === 'line' || tool === 'freepoly' || tool === 'pointer' || tool === 'shape' || tool === 'text') {
+    if (tool === 'line' || tool === 'freepoly' || tool === 'pointer' || tool === 'shape' || tool === 'text' || tool === 'reshape') {
       lineDown(pt)
       if (lineDragRef.current || baseTransformRef.current) startPointerDragCapture()
       return
@@ -6456,8 +7625,9 @@ export function IconPaintEditor({
   // Live-patch the selected text object (if any) with the given fields.
   const patchText = (patch: Partial<LineObj>, commit = true): void => {
     if (selectedIdRef.current && selectedObj?.type === 'text') {
-      if (commit) updateSelected(patch)
-      else updateSelectedLive(patch)
+      const next = { ...patch, reshapeQuad: undefined, reshapeSrc: undefined, reshapeBaseQuad: undefined }
+      if (commit) updateSelected(next)
+      else updateSelectedLive(next)
     }
   }
 
@@ -6895,12 +8065,12 @@ export function IconPaintEditor({
 
         <div className="w-px h-6 bg-border" />
 
-        {/* Canvas transform — full canvas + session vectors */}
+        {/* Canvas transform — selected object, or full canvas when nothing selected */}
         <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={() => applyCanvasXform('ccw90')}
-            title="Rotate canvas 90° counter-clockwise"
+            title={selectedId ? 'Rotate selection 90° counter-clockwise' : 'Rotate canvas 90° counter-clockwise'}
             className="w-8 h-8 rounded-lg flex items-center justify-center bg-surface3 text-muted hover:text-text transition-colors"
           >
             <RotateCcw size={15} />
@@ -6908,7 +8078,7 @@ export function IconPaintEditor({
           <button
             type="button"
             onClick={() => applyCanvasXform('cw90')}
-            title="Rotate canvas 90° clockwise"
+            title={selectedId ? 'Rotate selection 90° clockwise' : 'Rotate canvas 90° clockwise'}
             className="w-8 h-8 rounded-lg flex items-center justify-center bg-surface3 text-muted hover:text-text transition-colors"
           >
             <RotateCw size={15} />
@@ -6916,7 +8086,7 @@ export function IconPaintEditor({
           <button
             type="button"
             onClick={() => applyCanvasXform('180')}
-            title="Rotate canvas 180°"
+            title={selectedId ? 'Rotate selection 180°' : 'Rotate canvas 180°'}
             className="h-8 px-1.5 rounded-lg flex items-center justify-center bg-surface3 text-[10px] font-semibold text-muted hover:text-text transition-colors"
           >
             180°
@@ -6924,7 +8094,7 @@ export function IconPaintEditor({
           <button
             type="button"
             onClick={() => applyCanvasXform('flipH')}
-            title="Flip horizontally"
+            title={selectedId ? 'Flip selection horizontally' : 'Flip canvas horizontally'}
             className="w-8 h-8 rounded-lg flex items-center justify-center bg-surface3 text-muted hover:text-text transition-colors"
           >
             <FlipHorizontal2 size={15} />
@@ -6932,16 +8102,31 @@ export function IconPaintEditor({
           <button
             type="button"
             onClick={() => applyCanvasXform('flipV')}
-            title="Flip vertically"
+            title={selectedId ? 'Flip selection vertically' : 'Flip canvas vertically'}
             className="w-8 h-8 rounded-lg flex items-center justify-center bg-surface3 text-muted hover:text-text transition-colors"
           >
             <FlipVertical2 size={15} />
           </button>
           <button
             type="button"
-            disabled={noTarget || bgRemoving}
+            disabled={!reshapeTargetLine() && !(selectedObj && lineReshapeable(selectedObj))}
+            onClick={() => {
+              const target = reshapeTargetLine() ?? (selectedObj && lineReshapeable(selectedObj) ? selectedObj : null)
+              if (!target) return
+              activateReshapeForTarget(target)
+            }}
+            title="Reshape — snap to ink edges, then drag corners to warp"
+            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
+              tool === 'reshape' ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+            } disabled:opacity-30 disabled:cursor-not-allowed`}
+          >
+            <Spline size={15} />
+          </button>
+          <button
+            type="button"
+            disabled={(noTarget && selectedObj?.type !== 'stamp') || bgRemoving}
             onClick={() => { void removeBgOnLayers() }}
-            title="Remove background on checked layers (flood-fill from corners)"
+            title={selectedObj?.type === 'stamp' ? 'Remove background on selected image' : 'Remove background on checked layers'}
             className="h-8 px-2 rounded-lg flex items-center gap-1 bg-surface3 text-[10px] font-medium text-muted hover:text-text disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
           >
             <Sparkles size={12} />
@@ -7522,12 +8707,16 @@ export function IconPaintEditor({
       )}
 
       {/* Canvas + icon palette + optional save-target columns */}
-      <div className="flex flex-1 min-h-0">
+      <div
+        className="flex flex-1 min-h-0"
+        onDragOver={handlePaintDragOver}
+        onDrop={(e) => { void handleStageDrop(e) }}
+      >
       {/* Left: Library / Browse / AI icon palette */}
       <aside className="w-64 shrink-0 border-r border-border bg-surface flex flex-col min-h-0">
         <div className="px-3 py-2 border-b border-border shrink-0">
           <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">Icons</p>
-          <p className="text-[9px] text-muted/70 mt-0.5">Drag, click, or paste SVG code · mixes with paint</p>
+          <p className="text-[9px] text-muted/70 mt-0.5">Drag, click, paste, or drop image/SVG files · mixes with paint</p>
         </div>
         <div className="flex-1 min-h-0 overflow-hidden">
           <IconPicker
@@ -7560,16 +8749,9 @@ export function IconPaintEditor({
             height: 'min(70vh, 70vw)'
           }}
           onDragOver={(e) => {
-            const types = [...e.dataTransfer.types]
-            if (
-              types.includes(PAINT_SVG_MIME) ||
-              types.includes(PAINT_LUCIDE_MIME) ||
-              types.includes('Files') ||
-              types.includes('text/plain')
-            ) {
-              e.preventDefault()
-              e.dataTransfer.dropEffect = 'copy'
-            }
+            if (!paintDropAcceptsDrag(e)) return
+            e.preventDefault()
+            e.dataTransfer.dropEffect = 'copy'
           }}
           onDrop={(e) => { void handleStageDrop(e) }}
         >
@@ -7595,7 +8777,7 @@ export function IconPaintEditor({
             className="absolute inset-0 w-full h-full"
             style={{
               visibility: anythingLayerVisible ? 'visible' : 'hidden',
-              cursor: tool === 'pointer' ? 'default' : tool === 'text' ? 'text' : (noTarget && tool !== 'fill' && tool !== 'eyedropper' && tool !== 'line' && tool !== 'freepoly' && tool !== 'select' && tool !== 'shape' ? 'not-allowed' : 'crosshair')
+              cursor: tool === 'pointer' || tool === 'reshape' ? 'default' : tool === 'text' ? 'text' : (noTarget && tool !== 'fill' && tool !== 'eyedropper' && tool !== 'line' && tool !== 'freepoly' && tool !== 'select' && tool !== 'shape' ? 'not-allowed' : 'crosshair')
             }}
             onMouseDown={onDown}
             onMouseMove={onMove}
@@ -7610,7 +8792,7 @@ export function IconPaintEditor({
               const pt = toCanvas(e)
               const hit = [...linesRef.current].reverse().find((l) => {
                 if (l.type !== 'text' || !isVectorVisible(l)) return false
-                const q = rotatePt(pt, objCenter(l), -(l.rot ?? 0))
+                const q = unmapObjDisplayPt(pt, l)
                 return pointInPoly(flattenLine(l), q)
               })
               if (hit) startTextEditRef.current(hit.id)
@@ -7770,6 +8952,8 @@ export function IconPaintEditor({
             ? (textEditId ? 'Typing…' : 'Text')
             : tool === 'pointer'
             ? 'Click to select · drag to move · double-click text to type · Del deletes selected (when not typing)'
+            : tool === 'reshape'
+            ? 'Drag purple corners to warp · corners snap to match width/height and align with other points · Shift locks axis · drag inside to move'
             : tool === 'select'
             ? (hasMarquee
               ? (marqueeMode === 'coverage'

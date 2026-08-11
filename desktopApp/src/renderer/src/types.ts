@@ -407,6 +407,10 @@ export interface PaintVector {
   shadowOffsetY?: number
   shadowSpread?: number
   rot?: number
+  /** Horizontal mirror scale (default 1). Used for text flip at rot=0. */
+  scaleX?: number
+  /** Vertical mirror scale (default 1). Used for text flip at rot=0. */
+  scaleY?: number
   drawnCurve?: boolean
   /** Raster stamp (library / pasted SVG icon) drawn in the pts bbox. */
   imageDataUrl?: string
@@ -439,6 +443,12 @@ export interface PaintVector {
    * Stamp/shape that stands in for live Inner content (position/size/color sync).
    */
   contentBound?: boolean
+  /** Tight unwarped source rect in canvas space (TL + size). */
+  reshapeSrc?: { x: number; y: number; w: number; h: number }
+  /** Destination quad in canvas space: TL, TR, BR, BL. */
+  reshapeQuad?: { x: number; y: number }[]
+  /** Quad at reshape init — used for symmetric snap distances. */
+  reshapeBaseQuad?: { x: number; y: number }[]
 }
 
 /** Outside (logo/favicon) letters settings passed into Paint for sync. */

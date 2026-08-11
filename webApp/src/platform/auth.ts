@@ -252,18 +252,11 @@ export async function deleteUser(
   return { ok: true }
 }
 
+import { versionFromIgTemplate } from '@renderer/utils/templateFile'
+
 /** Import server template JSON into the editor via existing listeners. */
 export function importTemplateIntoEditor(data: Record<string, unknown>, fallbackName: string): void {
-  const now = new Date().toISOString()
-  const version = {
-    id: `v_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-    name: (data.name as string) || fallbackName,
-    description: (data.description as string) || '',
-    createdAt: now,
-    updatedAt: now,
-    logos: (data.logos as unknown[]) ?? [],
-    favicons: (data.favicons as unknown[]) ?? []
-  }
+  const version = versionFromIgTemplate(data, fallbackName)
   window.dispatchEvent(new CustomEvent('web:template-imported', { detail: version }))
 }
 

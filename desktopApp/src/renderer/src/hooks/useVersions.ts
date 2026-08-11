@@ -9,6 +9,7 @@ import {
   DEFAULT_LOGO_CONFIG,
   DEFAULT_FAVICON_CONFIG
 } from '../types'
+import { versionFromIgTemplate } from '../utils/templateFile'
 
 /** A single point on the undo/redo timeline. */
 interface Snap { state: Version[]; label: string; time: number }
@@ -506,6 +507,18 @@ export function useVersions() {
     [commit]
   )
 
+  const importTemplateVersion = useCallback(
+    (data: Record<string, unknown>, fallbackName: string): Version => {
+      const current = versionsRef.current
+      const version = migrateVersion(
+        versionFromIgTemplate(data, fallbackName) as Record<string, unknown>
+      )
+      commit([...current, version], `Import "${version.name}"`)
+      return version
+    },
+    [commit]
+  )
+
   const updateVersion = useCallback(
     (id: string, updates: Partial<Version>, actionLabel?: string) => {
       const current = versionsRef.current
@@ -656,6 +669,7 @@ export function useVersions() {
     loaded,
     createVersion,
     importImageVersion,
+    importTemplateVersion,
     updateVersion,
     deleteVersion,
     duplicateVersion,

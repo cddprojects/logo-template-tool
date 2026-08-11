@@ -26,6 +26,7 @@ interface SidebarProps {
   onDelete: (id: string) => void
   onDuplicate: (id: string) => void
   onReorder: (fromId: string, toId: string) => void
+  templateDropActive?: boolean
 }
 
 export function Sidebar({
@@ -36,7 +37,8 @@ export function Sidebar({
   onImport,
   onDelete,
   onDuplicate,
-  onReorder
+  onReorder,
+  templateDropActive = false
 }: SidebarProps): JSX.Element {
   const isWebApp =
     typeof window !== 'undefined' &&
@@ -166,7 +168,11 @@ export function Sidebar({
 
   return (
     <>
-      <aside className="flex flex-col w-56 shrink-0 bg-surface border-r border-border h-full overflow-hidden">
+      <aside
+        className={`flex flex-col w-56 shrink-0 bg-surface border-r h-full overflow-hidden transition-colors ${
+          templateDropActive ? 'border-accent bg-accent/5' : 'border-border'
+        }`}
+      >
         <div className="flex items-center justify-between px-3 py-3 border-b border-border">
           <div className="flex items-center gap-2">
             <Layers size={14} className="text-accent" />
@@ -191,6 +197,12 @@ export function Sidebar({
             </button>
           </div>
         </div>
+
+        {templateDropActive && (
+          <div className="mx-2 mt-2 px-2 py-1.5 rounded-md border border-dashed border-accent/60 bg-accent/10 text-[10px] text-accent text-center">
+            Drop .igtemplate here to import
+          </div>
+        )}
 
         <div className="px-2 py-1.5 border-b border-border">
           <div className="flex items-center gap-1.5 px-2 h-7 rounded-md bg-surface2 border border-transparent focus-within:border-accent/50 transition-colors">

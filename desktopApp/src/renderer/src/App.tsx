@@ -9,6 +9,7 @@ import { DownloadDesktopModal } from './components/DownloadDesktopModal'
 import { useVersions } from './hooks/useVersions'
 import type { Version, AssetVariant, LogoConfig, FaviconConfig } from './types'
 import { initFontLoading } from './utils/fontLoader'
+import { isIgTemplateFile } from './utils/templateFile'
 
 // Lazy-load the heavy editors so they don't block the initial paint.
 const LogoEditor = lazy(() => import('./components/LogoEditor').then((m) => ({ default: m.LogoEditor })))
@@ -59,7 +60,7 @@ class EditorErrorBoundary extends Component<{ children: React.ReactNode; onReset
 
 export default function App(): JSX.Element {
   const {
-    versions, loaded, createVersion, importImageVersion, updateVersion,
+    versions, loaded, createVersion, importImageVersion, importTemplateVersion, updateVersion,
     deleteVersion, duplicateVersion, reorderVersions,
     undo, redo, canUndo, canRedo, undoLabel, redoLabel,
     history, historyIndex, jumpTo
@@ -297,6 +298,35 @@ export default function App(): JSX.Element {
     if (copy) setSelectedId(copy.id)
   }
 
+  const [templateDropActive, setTemplateDropActive] = useState(false)
+
+  const handleAppDragOver = (e: React.DragEvent) => {
+    if (![...e.dataTransfer.types].includes('Files')) return
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'copy'
+    setTemplateDropActive(true)
+  }
+
+  const handleAppDragLeave = (e: React.DragEvent) => {
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return
+    setTemplateDropActive(false)
+  }
+
+  const handleAppDrop = async (e: React.DragEvent) => {
+    setTemplateDropActive(false)
+    const file = [...e.dataTransfer.files].find(isIgTemplateFile)
+    if (!file) return
+    e.preventDefault()
+    try {
+      const data = JSON.parse(await file.text()) as Record<string, unknown>
+      const baseName = file.name.replace(/\.igtemplate$/i, '') || 'Imported template'
+      const version = importTemplateVersion(data, baseName)
+      setSelectedId(version.id)
+    } catch {
+      /* invalid template file */
+    }
+  }
+
   // Import an existing favicon/logo image file as a new, editable version.
   const importInputRef = useRef<HTMLInputElement>(null)
   const handleImport = () => importInputRef.current?.click()
@@ -339,7 +369,12 @@ export default function App(): JSX.Element {
           </div>
         </div>
       ) : (
-        <div className="flex flex-1 min-h-0">
+        <div
+          className="flex flex-1 min-h-0"
+          onDragOver={handleAppDragOver}
+          onDragLeave={handleAppDragLeave}
+          onDrop={(e) => { void handleAppDrop(e) }}
+        >
           {/* Sidebar */}
           <Sidebar
             versions={versions}
@@ -350,6 +385,7 @@ export default function App(): JSX.Element {
             onDelete={handleDelete}
             onDuplicate={handleDuplicate}
             onReorder={reorderVersions}
+            templateDropActive={templateDropActive}
           />
           <input
             ref={importInputRef}
