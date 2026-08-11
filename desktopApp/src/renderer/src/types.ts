@@ -73,7 +73,11 @@ export function isFaviconMathShape(shape: FaviconOuterShape): boolean {
 
 export type ContentType = 'letters' | 'shape' | 'svg' | 'lucide' | 'svg-markup' | 'image' | 'canva'
 
-export type CanvaBusinessType = 'recruitment-services' | 'dropshipping' | 'fraud-recovery-services'
+export type CanvaBusinessType =
+  | 'recruitment-services'
+  | 'dropshipping'
+  | 'fraud-recovery-services'
+  | 'investment-stock'
 
 export type CanvaDesignType = 'vector' | 'abstract' | 'vector-art' | 'icon'
 

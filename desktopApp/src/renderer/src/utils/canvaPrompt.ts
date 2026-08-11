@@ -13,7 +13,8 @@ export const CANVA_AI_URL = 'https://www.canva.com/ai'
 export const CANVA_BUSINESS_TYPE_OPTIONS: { label: string; value: CanvaBusinessType }[] = [
   { label: 'Recruitment Services', value: 'recruitment-services' },
   { label: 'Dropshipping', value: 'dropshipping' },
-  { label: 'Fraud Recovery Services', value: 'fraud-recovery-services' }
+  { label: 'Fraud Recovery Services', value: 'fraud-recovery-services' },
+  { label: 'Investment/Stock', value: 'investment-stock' }
 ]
 
 export const CANVA_DESIGN_TYPE_OPTIONS: { label: string; value: CanvaDesignType }[] = [
@@ -33,7 +34,8 @@ export const CANVA_IMAGE_REFERENCE_OPTIONS: { label: string; value: CanvaImageRe
 const BUSINESS_LABELS: Record<CanvaBusinessType, string> = {
   'recruitment-services': 'Recruitment Services',
   dropshipping: 'Dropshipping',
-  'fraud-recovery-services': 'Fraud Recovery Services'
+  'fraud-recovery-services': 'Fraud Recovery Services',
+  'investment-stock': 'Investment/Stock'
 }
 
 const DESIGN_LABELS: Record<CanvaDesignType, string> = {
