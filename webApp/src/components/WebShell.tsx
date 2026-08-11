@@ -20,8 +20,15 @@ export function WebShell(): JSX.Element {
 
   useEffect(() => {
     const unsub = subscribeAuth(setUser)
-    void fetchMe().finally(() => setReady(true))
-    return unsub
+    const bootTimeout = window.setTimeout(() => setReady(true), 9000)
+    void fetchMe().finally(() => {
+      window.clearTimeout(bootTimeout)
+      setReady(true)
+    })
+    return () => {
+      window.clearTimeout(bootTimeout)
+      unsub()
+    }
   }, [])
 
   useEffect(() => {

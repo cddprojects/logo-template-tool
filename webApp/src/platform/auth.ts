@@ -43,10 +43,14 @@ export function setAuthUser(user: AuthUser | null): void {
   notify()
 }
 
+const API_FETCH_TIMEOUT_MS = 8000
+
 async function api<T>(
   path: string,
   init?: RequestInit
 ): Promise<{ ok: true; data: T } | { ok: false; error: string; status: number }> {
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), API_FETCH_TIMEOUT_MS)
   try {
     const res = await fetch(path, {
       credentials: 'include',
@@ -54,6 +58,7 @@ async function api<T>(
         'Content-Type': 'application/json',
         ...(init?.headers ?? {})
       },
+      signal: controller.signal,
       ...init
     })
     const text = await res.text()
@@ -74,7 +79,12 @@ async function api<T>(
     }
     return { ok: true, data: body as T }
   } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      return { ok: false, error: 'Request timed out', status: 0 }
+    }
     return { ok: false, error: String(e), status: 0 }
+  } finally {
+    clearTimeout(timeoutId)
   }
 }
 

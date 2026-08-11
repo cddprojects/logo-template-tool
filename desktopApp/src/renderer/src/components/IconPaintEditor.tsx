@@ -663,7 +663,8 @@ function applyOutsideTextToLine(
   l: LineObj,
   settings: OutsideTextSettings,
   resolution: number,
-  innerDrawSize = resolution
+  innerDrawSize = resolution,
+  opts?: { preservePosition?: boolean }
 ): LineObj {
   const drawArea = Math.max(1, innerDrawSize)
   const fontSize = Math.max(4, Math.round(drawArea * (settings.fontSizeRatio ?? 0.52)))
@@ -684,7 +685,9 @@ function applyOutsideTextToLine(
     linkedOutsideText: true,
     ...shadow
   }
-  next.pts = [opticalTopLeftForText(next, resolution / 2 + off.x, resolution / 2 + off.y)]
+  if (!opts?.preservePosition) {
+    next.pts = [opticalTopLeftForText(next, resolution / 2 + off.x, resolution / 2 + off.y)]
+  }
   return next
 }
 
@@ -2349,9 +2352,9 @@ export function IconPaintEditor({
         const linked = restored.find((l) => l.type === 'text' && l.linkedOutsideText)
         const linkOutside = !!(linked && outside)
         setUseOutsideText(linkOutside)
-        // Re-apply live outside Inner letters settings (text/font/color/size/offset).
+        // Sync typography from outside settings but keep saved paint positions.
         if (linkOutside && linked && outside) {
-          const next = applyOutsideTextToLine(linked, outside, W, innerDraw)
+          const next = applyOutsideTextToLine(linked, outside, W, innerDraw, { preservePosition: true })
           restored = restored.map((l) => (l.id === next.id ? next : l))
           setTextValue(next.text ?? '')
           setFontFamily(next.fontFamily ?? 'Inter')
@@ -2371,17 +2374,6 @@ export function IconPaintEditor({
           setSelectedId(next.id)
           setSelectedLayerIds(new Set([next.id]))
           loadFont(next.fontFamily ?? 'Inter').then(() => {
-            const cur = linesRef.current.find((l) => l.id === next.id)
-            if (!cur || !outsideTextRef.current) return
-            const recentered = applyOutsideTextToLine(cur, outsideTextRef.current, W, innerDraw)
-            linesRef.current = linesRef.current.map((l) => (l.id === recentered.id ? recentered : l))
-            setLines([...linesRef.current])
-            setTxtShadow(!!recentered.shadow)
-            setTxtShadowColor(recentered.shadowColor ?? '#000000b3')
-            setTxtShadowBlur(recentered.shadowBlur ?? 8)
-            setTxtShadowOX(recentered.shadowOffsetX ?? 0)
-            setTxtShadowOY(recentered.shadowOffsetY ?? 4)
-            setTxtShadowSpread(recentered.shadowSpread ?? 0)
             redrawLinesRef.current()
             drawHandles()
           })
