@@ -1626,27 +1626,56 @@ function rotatePt(p: Pt, c: Pt, ang: number): Pt {
   return { x: c.x + dx * co - dy * s, y: c.y + dx * s + dy * co }
 }
 
-/** Apply scale-then-rotate around objCenter (matches renderLineBase). */
-function mapObjDisplayPt(p: Pt, l: LineObj): Pt {
-  const c = objCenter(l)
+function lineBoxCenter(l: LineObj): Pt {
+  const b = textBBox(l)
+  return { x: b.x + b.w / 2, y: b.y + b.h / 2 }
+}
+
+/** Apply scale-then-rotate around a chosen center (matches renderLineBase). */
+function mapObjDisplayPtAt(p: Pt, l: LineObj, center: Pt): Pt {
   const sx = l.scaleX ?? 1
   const sy = l.scaleY ?? 1
   let q = p
-  if ((l.scaleX ?? 1) !== 1 || (l.scaleY ?? 1) !== 1) {
-    q = { x: c.x + (q.x - c.x) * sx, y: c.y + (q.y - c.y) * sy }
+  if (sx !== 1 || sy !== 1) {
+    q = { x: center.x + (q.x - center.x) * sx, y: center.y + (q.y - center.y) * sy }
   }
-  return rotatePt(q, c, l.rot ?? 0)
+  return rotatePt(q, center, l.rot ?? 0)
+}
+
+function unmapObjDisplayPtAt(p: Pt, l: LineObj, center: Pt): Pt {
+  const sx = l.scaleX ?? 1
+  const sy = l.scaleY ?? 1
+  let q = rotatePt(p, center, -(l.rot ?? 0))
+  if (sx !== 1 || sy !== 1) {
+    q = { x: center.x + (q.x - center.x) / sx, y: center.y + (q.y - center.y) / sy }
+  }
+  return q
+}
+
+/** Apply scale-then-rotate around objCenter (matches renderLineBase). */
+function mapObjDisplayPt(p: Pt, l: LineObj): Pt {
+  return mapObjDisplayPtAt(p, l, objCenter(l))
 }
 
 function unmapObjDisplayPt(p: Pt, l: LineObj): Pt {
-  const c = objCenter(l)
-  const sx = l.scaleX ?? 1
-  const sy = l.scaleY ?? 1
-  let q = rotatePt(p, c, -(l.rot ?? 0))
-  if ((l.scaleX ?? 1) !== 1 || (l.scaleY ?? 1) !== 1) {
-    q = { x: c.x + (q.x - c.x) / sx, y: c.y + (q.y - c.y) / sy }
+  return unmapObjDisplayPtAt(p, l, objCenter(l))
+}
+
+/** Keep on-screen ink fixed when transform origin moved from line-box to ink center. */
+function migrateTextInkTransformOrigin(l: LineObj): LineObj {
+  if (l.type !== 'text' || !lineNeedsDisplayTransform(l)) return l
+  const lineCenter = lineBoxCenter(l)
+  const ink = textInkCenter(l)
+  if (Math.hypot(lineCenter.x - ink.x, lineCenter.y - ink.y) < 0.5) return l
+  const displayInk = mapObjDisplayPtAt(ink, l, lineCenter)
+  const targetLocal = unmapObjDisplayPtAt(displayInk, l, ink)
+  return {
+    ...l,
+    pts: [{
+      x: l.pts[0].x + (targetLocal.x - ink.x),
+      y: l.pts[0].y + (targetLocal.y - ink.y)
+    }]
   }
-  return q
 }
 // Top-centre anchor (unrotated) used to attach the rotate pin.
 function objTopCenter(l: LineObj): Pt {
@@ -3035,7 +3064,25 @@ export function IconPaintEditor({
       const outsideAll = outsideContentRef.current
       let restored: LineObj[] = []
       let seededProxy: LineObj | null = null
-      let autoSelected = false
+
+      const syncLinkedTextPanel = (linked: LineObj, linkOutside: boolean) => {
+        setUseOutsideText(linkOutside)
+        const panel = textPanelStateFromLine(linked)
+        setTextValue(panel.textValue)
+        setFontFamily(panel.fontFamily)
+        setFontSize(panel.fontSize)
+        setFontWeightV(panel.fontWeightV)
+        setBold(panel.bold)
+        setItalic(panel.italic)
+        setTxtLetterSpacing(panel.letterSpacing)
+        setColor(panel.color)
+        setTxtShadow(panel.shadow)
+        setTxtShadowColor(panel.shadowColor)
+        setTxtShadowBlur(panel.shadowBlur)
+        setTxtShadowOX(panel.shadowOX)
+        setTxtShadowOY(panel.shadowOY)
+        setTxtShadowSpread(panel.shadowSpread)
+      }
 
       if (initialVectors && initialVectors.length) {
         // Drop any persisted contentBound stamps — they must stay Paint-ephemeral
@@ -3046,44 +3093,14 @@ export function IconPaintEditor({
             null
           ) as unknown as LineObj[]
         ).map((l) => ({
-          ...l,
+          ...migrateTextInkTransformOrigin(l),
           visible: l.visible ?? l.editable ?? true
         }))
       } else if (outside && outsideAll?.kind !== 'proxy') {
         const seeded = lineFromOutsideText(outside, W, innerDraw)
         restored = [seeded]
-        autoSelected = true
-        setUseOutsideText(true)
-        setTextValue(seeded.text ?? '')
-        setFontFamily(seeded.fontFamily ?? 'Inter')
-        setFontSize(seeded.fontSize ?? 48)
-        setFontWeightV(seeded.weight ?? 700)
-        setBold(!!seeded.bold)
-        setItalic(!!seeded.italic)
-        setTxtLetterSpacing(seeded.letterSpacing ?? 0)
-        setTxtShadow(!!seeded.shadow)
-        setTxtShadowColor(seeded.shadowColor ?? '#000000b3')
-        setTxtShadowBlur(seeded.shadowBlur ?? 8)
-        setTxtShadowOX(seeded.shadowOffsetX ?? 0)
-        setTxtShadowOY(seeded.shadowOffsetY ?? 4)
-        setTxtShadowSpread(seeded.shadowSpread ?? 0)
-        selectedIdRef.current = seeded.id
-        setSelectedId(seeded.id)
-        setSelectedLayerIds(new Set([seeded.id]))
-        setTool('pointer')
+        syncLinkedTextPanel(seeded, true)
         loadFont(seeded.fontFamily ?? 'Inter').then(() => {
-          // Re-center after font metrics settle.
-          const cur = linesRef.current.find((l) => l.id === seeded.id)
-          if (!cur || !outsideTextRef.current) return
-          const next = applyOutsideTextToLine(cur, outsideTextRef.current, W, innerDraw)
-          linesRef.current = linesRef.current.map((l) => (l.id === next.id ? next : l))
-          setLines([...linesRef.current])
-          setTxtShadow(!!next.shadow)
-          setTxtShadowColor(next.shadowColor ?? '#000000b3')
-          setTxtShadowBlur(next.shadowBlur ?? 8)
-          setTxtShadowOX(next.shadowOffsetX ?? 0)
-          setTxtShadowOY(next.shadowOffsetY ?? 4)
-          setTxtShadowSpread(next.shadowSpread ?? 0)
           redrawLinesRef.current()
           drawHandles()
         })
@@ -3106,11 +3123,6 @@ export function IconPaintEditor({
           }
           // Live Inner settings stay outside — clear base so we don't double-draw.
           baseCt.clearRect(0, 0, W, H)
-          autoSelected = true
-          selectedIdRef.current = seededProxy.id
-          setSelectedId(seededProxy.id)
-          setSelectedLayerIds(new Set([seededProxy.id]))
-          setTool('pointer')
           setTxtShadow(!!seededProxy.shadow)
           setTxtShadowColor(seededProxy.shadowColor ?? '#000000b3')
           setTxtShadowBlur(seededProxy.shadowBlur ?? 8)
@@ -3124,40 +3136,22 @@ export function IconPaintEditor({
         }
       }
 
-      if (!autoSelected) {
-        selectedIdRef.current = null
-        setSelectedId(null)
-        setSelectedLayerIds(new Set())
-      }
+      // Never auto-select on paint open — user picks what to edit.
+      selectedIdRef.current = null
+      setSelectedId(null)
+      setSelectedLayerIds(new Set())
+
       if (initialVectors && initialVectors.length && outside && outsideAll?.kind !== 'proxy') {
         const linked = restored.find((l) => l.type === 'text' && l.linkedOutsideText)
         const linkOutside = !!(linked && outside)
-        setUseOutsideText(linkOutside)
-        // Restore saved vector geometry verbatim — outside settings only drive UI toggle
-        // and explicit "apply outside settings"; re-syncing typography recenters ink.
         if (linkOutside && linked) {
-          const panel = textPanelStateFromLine(linked)
-          setTextValue(panel.textValue)
-          setFontFamily(panel.fontFamily)
-          setFontSize(panel.fontSize)
-          setFontWeightV(panel.fontWeightV)
-          setBold(panel.bold)
-          setItalic(panel.italic)
-          setTxtLetterSpacing(panel.letterSpacing)
-          setColor(panel.color)
-          setTxtShadow(panel.shadow)
-          setTxtShadowColor(panel.shadowColor)
-          setTxtShadowBlur(panel.shadowBlur)
-          setTxtShadowOX(panel.shadowOX)
-          setTxtShadowOY(panel.shadowOY)
-          setTxtShadowSpread(panel.shadowSpread)
-          selectedIdRef.current = linked.id
-          setSelectedId(linked.id)
-          setSelectedLayerIds(new Set([linked.id]))
-          loadFont(panel.fontFamily).then(() => {
+          syncLinkedTextPanel(linked, true)
+          loadFont(linked.fontFamily ?? 'Inter').then(() => {
             redrawLinesRef.current()
             drawHandles()
           })
+        } else if (linked) {
+          syncLinkedTextPanel(linked, false)
         }
       }
 
@@ -4652,12 +4646,8 @@ export function IconPaintEditor({
         commitLines([...linesRef.current])
         selectLine(nl)
         loadFont(nl.fontFamily ?? 'Inter').then(() => {
-          const cur = linesRef.current.find((l) => l.id === nl.id)
-          if (!cur || !outsideTextRef.current) return
-          const next = applyOutsideTextToLine(cur, outsideTextRef.current, W, innerDraw)
-          linesRef.current = linesRef.current.map((l) => (l.id === next.id ? next : l))
-          commitLines(linesRef.current)
-          redrawLines(); drawHandles()
+          redrawLines()
+          drawHandles()
         })
         startTextEditRef.current(nl.id)
         return
