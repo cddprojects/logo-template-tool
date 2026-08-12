@@ -1997,12 +1997,16 @@ function transformTextLine(l: LineObj, mode: CanvasXform, S: number, opts: Xform
   const rot = l.rot ?? 0
   const ink = textInkCenter(l)
   const displayInk = mapObjDisplayPt(ink, l)
-  const pivotDisplay = mapObjDisplayPt(pivot, l)
+  const pivotDisplay: Pt = canvasSpace
+    ? { x: S / 2, y: S / 2 }
+    : groupTransform
+      ? pivot
+      : mapObjDisplayPt(pivot, l)
   const inPlace = !canvasSpace && !groupTransform &&
     Math.hypot(displayInk.x - pivotDisplay.x, displayInk.y - pivotDisplay.y) < 0.5
 
-  const mapWorld = (wp: Pt) =>
-    canvasSpace ? mapCanvasPt(wp, mode, S) : mapLocalPt(wp, mode, pivot)
+  const mapDisplayPt = (p: Pt): Pt =>
+    canvasSpace ? mapCanvasPt(p, mode, S) : mapLocalPt(p, mode, pivotDisplay)
 
   /** Flip mirrors via scaleX/scaleY only — rotation is independent. */
   const reflectOrientation = (base: LineObj): LineObj => {
@@ -2015,20 +2019,22 @@ function transformTextLine(l: LineObj, mode: CanvasXform, S: number, opts: Xform
   }
 
   if (mode === 'flipH' || mode === 'flipV') {
-    if (inPlace) return { ...reflectOrientation(l), ...mapReshapeFields(l, mapWorld) }
-    const newDisplayInk = mapLocalPt(displayInk, mode, pivot)
+    if (inPlace) return { ...reflectOrientation(l), ...mapReshapeFields(l, mapDisplayPt) }
     return {
-      ...reflectOrientation(moveTextDisplayInkTo(l, newDisplayInk)),
-      ...mapReshapeFields(l, mapWorld)
+      ...reflectOrientation(moveTextDisplayInkTo(l, mapDisplayPt(displayInk))),
+      ...mapReshapeFields(l, mapDisplayPt)
     }
   }
 
   const newRot = normalizeRot(composeCanvasRot(rot, mode))
   if (inPlace) {
-    return { ...l, rot: newRot, ...mapReshapeFields(l, mapWorld) }
+    return { ...l, rot: newRot, ...mapReshapeFields(l, mapDisplayPt) }
   }
-  const newDisplayInk = mapLocalPt(displayInk, mode, pivot)
-  return { ...moveTextDisplayInkTo(l, newDisplayInk), rot: newRot, ...mapReshapeFields(l, mapWorld) }
+  return {
+    ...moveTextDisplayInkTo(l, mapDisplayPt(displayInk)),
+    rot: newRot,
+    ...mapReshapeFields(l, mapDisplayPt)
+  }
 }
 
 function transformCanvasPixels(src: HTMLCanvasElement, mode: CanvasXform): void {
@@ -3284,55 +3290,71 @@ export function IconPaintEditor({
     if (floatRef.current) { floatRef.current = null; setHasMarquee(false) }
     if (marqueeRef.current) { marqueeRef.current = null; setHasMarquee(false) }
 
-    const panelIds = [...selectedLayerIds].filter((id) => {
-      const l = linesRef.current.find((item) => item.id === id)
-      return !!l && !l.marqueeItem && isVectorVisible(l)
-    })
-
-    const hasSelectedAncestor = (l: LineObj): boolean => {
-      let parentId = l.parentId
-      while (parentId) {
-        if (panelIds.includes(parentId)) return true
-        parentId = linesRef.current.find((item) => item.id === parentId)?.parentId
-      }
-      return false
-    }
-
+    const selId = selectedIdRef.current
     let transformIds: Set<string> | null = null
     let pivot: Pt | null = null
 
-    if (panelIds.length >= 2) {
-      const roots = panelIds.filter((id) => {
+    if (selId) {
+      const panelIds = [...selectedLayerIds].filter((id) => {
         const l = linesRef.current.find((item) => item.id === id)
-        return !!l && !hasSelectedAncestor(l)
+        return !!l && !l.marqueeItem && isVectorVisible(l)
       })
-      transformIds = new Set<string>()
-      for (const id of roots) {
-        collectTransformSubtree(id, linesRef.current).forEach((tid) => transformIds!.add(tid))
+
+      const hasSelectedAncestor = (l: LineObj): boolean => {
+        let parentId = l.parentId
+        while (parentId) {
+          if (panelIds.includes(parentId)) return true
+          parentId = linesRef.current.find((item) => item.id === parentId)?.parentId
+        }
+        return false
       }
-      const boxes = [...transformIds]
-        .map((id) => linesRef.current.find((item) => item.id === id))
-        .filter((l): l is LineObj => !!l)
-        .map(boundsForLine)
-      if (boxes.length) {
-        const left = Math.min(...boxes.map((b) => b.x))
-        const top = Math.min(...boxes.map((b) => b.y))
-        const right = Math.max(...boxes.map((b) => b.x + b.w))
-        const bottom = Math.max(...boxes.map((b) => b.y + b.h))
-        pivot = { x: (left + right) / 2, y: (top + bottom) / 2 }
-      }
-    } else {
-      const selId = selectedIdRef.current ?? (panelIds.length === 1 ? panelIds[0] : null)
-      const sel = selId ? linesRef.current.find((l) => l.id === selId) : null
-      if (sel) {
-        const target = checkedGroupTarget(sel) ?? sel
-        transformIds = collectTransformSubtree(target.id, linesRef.current)
-        pivot = objCenter(target)
+
+      if (panelIds.length >= 2) {
+        const roots = panelIds.filter((id) => {
+          const l = linesRef.current.find((item) => item.id === id)
+          return !!l && !hasSelectedAncestor(l)
+        })
+        transformIds = new Set<string>()
+        for (const id of roots) {
+          collectTransformSubtree(id, linesRef.current).forEach((tid) => transformIds!.add(tid))
+        }
+        const boxes = [...transformIds]
+          .map((id) => linesRef.current.find((item) => item.id === id))
+          .filter((l): l is LineObj => !!l)
+          .map(boundsForLine)
+        if (boxes.length) {
+          const left = Math.min(...boxes.map((b) => b.x))
+          const top = Math.min(...boxes.map((b) => b.y))
+          const right = Math.max(...boxes.map((b) => b.x + b.w))
+          const bottom = Math.max(...boxes.map((b) => b.y + b.h))
+          pivot = { x: (left + right) / 2, y: (top + bottom) / 2 }
+        }
+      } else {
+        const sel = linesRef.current.find((l) => l.id === selId)
+        if (sel) {
+          const target = checkedGroupTarget(sel) ?? sel
+          transformIds = collectTransformSubtree(target.id, linesRef.current)
+          if (transformIds.size > 1) {
+            const boxes = [...transformIds]
+              .map((id) => linesRef.current.find((item) => item.id === id))
+              .filter((l): l is LineObj => !!l)
+              .map(boundsForLine)
+            if (boxes.length) {
+              const left = Math.min(...boxes.map((b) => b.x))
+              const top = Math.min(...boxes.map((b) => b.y))
+              const right = Math.max(...boxes.map((b) => b.x + b.w))
+              const bottom = Math.max(...boxes.map((b) => b.y + b.h))
+              pivot = { x: (left + right) / 2, y: (top + bottom) / 2 }
+            }
+          } else {
+            pivot = objCenter(target)
+          }
+        }
       }
     }
 
     if (transformIds && pivot) {
-      const groupTransform = panelIds.length >= 2 || transformIds.size > 1
+      const groupTransform = transformIds.size > 1
       const xformOpts: XformOpts = { canvasSpace: false, pivot, groupTransform }
       const next = linesRef.current.map((l) =>
         transformIds!.has(l.id) ? transformStampLineObj(l, mode, W, xformOpts) : l
@@ -3346,7 +3368,8 @@ export function IconPaintEditor({
       return
     }
 
-    const canvasOpts: XformOpts = { canvasSpace: true, groupTransform: true }
+    const canvasPivot = { x: W / 2, y: H / 2 }
+    const canvasOpts: XformOpts = { canvasSpace: true, groupTransform: true, pivot: canvasPivot }
     for (const id of layerOrderRef.current) {
       transformCanvasPixels(baseCanvas(id), mode)
       transformCanvasPixels(layerCanvas(id), mode)
