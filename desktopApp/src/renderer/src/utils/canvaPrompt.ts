@@ -57,6 +57,20 @@ export function canvaImageReference(content: FaviconContent): CanvaImageReferenc
   return content.canvaImageReference ?? 'none'
 }
 
+/** Logo "App name" field — never the version name from the sidebar. */
+export function resolveCanvaAppName(
+  logoVariants: { label?: string; config?: { text?: string | null } | null }[],
+  activeFaviconLabel?: string
+): string {
+  const matched = activeFaviconLabel
+    ? logoVariants.find((v) => v.label === activeFaviconLabel)
+    : undefined
+  const fromMatch = matched?.config?.text?.trim()
+  if (fromMatch) return fromMatch
+  const fromAny = logoVariants.find((v) => v.config?.text?.trim())?.config?.text?.trim()
+  return fromAny || 'App'
+}
+
 export function buildCanvaPrompt(content: FaviconContent, appName: string): string {
   const businessType = canvaBusinessLabel(content.canvaBusinessType ?? 'recruitment-services')
   const designType = canvaDesignLabel(content.canvaDesignType ?? 'icon')
@@ -68,7 +82,7 @@ export function buildCanvaPrompt(content: FaviconContent, appName: string): stri
     ? ` (and the secondary color used should be ${secondaryColor})`
     : ''
 
-  let prompt = `Generate a ${designType} favicon with 1:1 aspect ratio, 512px, transparent background for ${businessType} website which is named ${name} so that it suits perfectly. The primary color used should be ${primaryColor}${secondaryClause}.`
+  let prompt = `Generate a ${designType} favicon with 1:1 aspect ratio, 512px, transparent background for ${businessType} website which is named ${name} so that it suits perfectly. The primary color used should be ${primaryColor}${secondaryClause}. Do not include an outer shape, container frame, background plate, border, or shadow wrapper — only the inner icon or symbol on a transparent background.`
 
   if (canvaImageReference(content) !== 'none') {
     prompt += ' Attached is the image used for reference.'

@@ -153,7 +153,7 @@ export function CanvaPromptPanel({
         {imageRef === 'none'
           ? 'Copies the prompt to your clipboard, then opens Canva AI.'
           : 'Copies the prompt (with a reference note) and the selected image to your clipboard, then opens Canva AI. Paste into the chat (Ctrl+V).'}
-        {' '}App name: {appName || 'version name'}.
+        {' '}App name (from Logo): {appName}.
       </p>
       <details className="text-[10px] text-muted">
         <summary className="cursor-pointer hover:text-text">Preview prompt</summary>

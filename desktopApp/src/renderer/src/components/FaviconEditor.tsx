@@ -28,6 +28,7 @@ import { faviconContentToIconConfig } from './LogoEditor'
 import { contentTypeFromIconForFavicon, FAVICON_CONTENT_TYPE_OPTIONS, unwrapSvgPath } from '../utils/contentTypeSync'
 import { sanitizePaintSessionProxies, syncOutsideLettersIntoPaintSession } from '../utils/paintDecorations'
 import { CanvaPromptPanel } from './CanvaPromptPanel'
+import { resolveCanvaAppName } from '../utils/canvaPrompt'
 
 const MAX_VARIANTS = Infinity
 
@@ -729,7 +730,10 @@ export function FaviconEditor({
   // so content stays inside the container.
   const contentSizeMax = config.outerShape === 'none' ? 100 : 90
   const isCanvaContent = config.content.type === 'canva'
-  const canvaAppName = matchingLogoVariant?.config?.text?.trim() || versionName
+  const canvaAppName = useMemo(
+    () => resolveCanvaAppName(logoVariants, active?.label),
+    [logoVariants, active?.label]
+  )
 
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
