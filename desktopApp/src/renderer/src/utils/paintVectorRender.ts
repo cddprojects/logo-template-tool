@@ -254,7 +254,7 @@ export function contentVectorsForLiveRender(vectors: PaintVector[] | undefined):
   return (vectors ?? []).filter((v) => {
     if (v.parentId || v.contentBound || !isVectorVisible(v)) return false
     if ((v.layer ?? 'content') !== 'content') return false
-    if (v.linkedOutsideText) return linkedTextHasPaintTransform(v)
+    if (v.linkedOutsideText) return true
     return v.type === 'text'
   })
 }

@@ -1626,11 +1626,6 @@ function rotatePt(p: Pt, c: Pt, ang: number): Pt {
   return { x: c.x + dx * co - dy * s, y: c.y + dx * s + dy * co }
 }
 
-function lineBoxCenter(l: LineObj): Pt {
-  const b = textBBox(l)
-  return { x: b.x + b.w / 2, y: b.y + b.h / 2 }
-}
-
 /** Apply scale-then-rotate around a chosen center (matches renderLineBase). */
 function mapObjDisplayPtAt(p: Pt, l: LineObj, center: Pt): Pt {
   const sx = l.scaleX ?? 1
@@ -1661,22 +1656,6 @@ function unmapObjDisplayPt(p: Pt, l: LineObj): Pt {
   return unmapObjDisplayPtAt(p, l, objCenter(l))
 }
 
-/** Keep on-screen ink fixed when transform origin moved from line-box to ink center. */
-function migrateTextInkTransformOrigin(l: LineObj): LineObj {
-  if (l.type !== 'text' || !lineNeedsDisplayTransform(l)) return l
-  const lineCenter = lineBoxCenter(l)
-  const ink = textInkCenter(l)
-  if (Math.hypot(lineCenter.x - ink.x, lineCenter.y - ink.y) < 0.5) return l
-  const displayInk = mapObjDisplayPtAt(ink, l, lineCenter)
-  const targetLocal = unmapObjDisplayPtAt(displayInk, l, ink)
-  return {
-    ...l,
-    pts: [{
-      x: l.pts[0].x + (targetLocal.x - ink.x),
-      y: l.pts[0].y + (targetLocal.y - ink.y)
-    }]
-  }
-}
 // Top-centre anchor (unrotated) used to attach the rotate pin.
 function objTopCenter(l: LineObj): Pt {
   if (l.type === 'text') { const b = textBBox(l); return { x: b.x + b.w / 2, y: b.y } }
@@ -3093,7 +3072,7 @@ export function IconPaintEditor({
             null
           ) as unknown as LineObj[]
         ).map((l) => ({
-          ...migrateTextInkTransformOrigin(l),
+          ...l,
           visible: l.visible ?? l.editable ?? true
         }))
       } else if (outside && outsideAll?.kind !== 'proxy') {

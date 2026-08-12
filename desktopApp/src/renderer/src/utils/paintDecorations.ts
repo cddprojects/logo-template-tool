@@ -1,6 +1,6 @@
 import type { OutsideTextSettings, PaintLayerId, PaintSession, PaintVector } from '../types'
 import { loadCachedImage } from './iconUtils'
-import { outsideShadowToPaintVector, isContentProxyVector, stripContentProxyVectors } from './paintSettingsSync'
+import { outsideShadowToPaintVector, isContentProxyVector, outsideTextAnchorPt, stripContentProxyVectors } from './paintSettingsSync'
 import {
   compositeInnerContentDecor,
   contentVectorsForLiveRender,
@@ -64,15 +64,14 @@ export function paintCompositeResolution(
 }
 
 /**
- * Live letters draw outside from current settings unless Paint owns the glyphs
- * (baked in decorations, or transformed linked text vectors rendered live).
+ * Live letters draw outside only when Paint has no linked text vector.
+ * Linked text always renders from saved paint vectors (position + transforms).
  */
 export function shouldSkipLiveLettersForPaintSession(
   session: PaintSession | null | undefined
 ): boolean {
   if (!session || !sessionHasLinkedOutsideText(session)) return false
-  if (session.linkedTextInDecorations) return true
-  return (session.vectors ?? []).some(linkedTextHasPaintTransform)
+  return true
 }
 
 function shouldRenderContentVectorsLive(session: PaintSession): boolean {
@@ -87,18 +86,23 @@ function shouldRenderContentVectorsLive(session: PaintSession): boolean {
  */
 export function syncOutsideLettersIntoPaintSession(
   session: PaintSession | null | undefined,
-  letters: OutsideTextSettings
+  letters: OutsideTextSettings,
+  innerDrawSize?: number
 ): PaintSession | null | undefined {
   if (!session || session.version !== 1) return session
   const res = Math.max(1, session.resolution || 512)
+  const drawArea = Math.max(1, innerDrawSize ?? res)
   const weight = parseInt(String(letters.fontWeight ?? '700'), 10)
   const w = Number.isFinite(weight) ? Math.max(100, Math.min(900, weight)) : 700
-  const fontSize = Math.max(4, Math.round(res * (letters.fontSizeRatio ?? 0.52)))
+  const fontSize = Math.max(4, Math.round(drawArea * (letters.fontSizeRatio ?? 0.52)))
   const letterSpacing = (letters.letterSpacing ?? 0) * (res / 256)
 
   const vectors: PaintVector[] = (session.vectors ?? []).map((v) => {
     if (v.type !== 'text' || !v.linkedOutsideText) return v
     const shadow = outsideShadowToPaintVector(letters, res)
+    const anchor = linkedTextHasPaintTransform(v)
+      ? v.pts?.[0]
+      : outsideTextAnchorPt(letters, res, drawArea)
     return {
       ...v,
       text: letters.text ?? '',
@@ -109,6 +113,7 @@ export function syncOutsideLettersIntoPaintSession(
       bold: w >= 700,
       italic: !!letters.fontItalic,
       letterSpacing,
+      ...(anchor ? { pts: [{ x: anchor.x, y: anchor.y }] } : {}),
       ...shadow
     }
   })

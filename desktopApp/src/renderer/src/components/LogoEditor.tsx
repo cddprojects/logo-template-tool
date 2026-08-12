@@ -337,7 +337,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             contentShadowSpread: next.contentShadowSpread ?? 0,
             contentShadowOffsetX: next.contentShadowOffsetX ?? 0,
             contentShadowOffsetY: next.contentShadowOffsetY ?? 3
-          }) ?? null
+          }, logoPaintInnerDrawSize(next, 512)) ?? null
         }
       }
       updateConfig({

@@ -248,7 +248,7 @@ export function FaviconEditor({
           contentShadowSpread: nextContent.contentShadowSpread ?? 0,
           contentShadowOffsetX: nextContent.contentShadowOffsetX ?? 0,
           contentShadowOffsetY: nextContent.contentShadowOffsetY ?? 3
-        })
+        }, faviconInnerDrawSize(config, 512))
         updateConfig({ content: nextContent, paintSession: nextSession ?? null })
         return
       }

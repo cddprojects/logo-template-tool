@@ -6,6 +6,7 @@ import type {
   IconConfig,
   IconSourceType,
   OutsideContentSettings,
+  OutsideTextSettings,
   PaintContentSync,
   PaintSession,
   PaintVector
@@ -591,16 +592,42 @@ function textInkCenter(v: PaintVector): { cx: number; cy: number } | null {
     cx: p0.x + (inkLeft + inkRight) / 2,
     cy: p0.y + (inkTop + inkBottom) / 2
   }
-  const rot = v.rot ?? 0
-  if (!rot) return localInk
-  const objCenter = { x: p0.x + boxW / 2, y: p0.y + boxH / 2 }
-  const s = Math.sin(rot), co = Math.cos(rot)
-  const dx = localInk.cx - objCenter.x
-  const dy = localInk.cy - objCenter.y
-  return {
-    cx: objCenter.x + dx * co - dy * s,
-    cy: objCenter.y + dx * s + dy * co
+  // Paint renders text with transform origin at ink center, so display ink = local ink.
+  return localInk
+}
+
+/** Top-left anchor so glyph ink lands at outside offset (matches paint seeding). */
+export function outsideTextAnchorPt(
+  settings: OutsideTextSettings,
+  resolution: number,
+  innerDrawSize = resolution
+): { x: number; y: number } {
+  const drawArea = Math.max(1, innerDrawSize)
+  const fontSize = Math.max(4, Math.round(drawArea * (settings.fontSizeRatio ?? 0.52)))
+  const letterSpacing = (settings.letterSpacing ?? 0) * (resolution / 256)
+  const weight = parseInt(String(settings.fontWeight ?? '700'), 10)
+  const w = Number.isFinite(weight) ? Math.max(100, Math.min(900, weight)) : 700
+  const scale = resolution / 256
+  const cx = resolution / 2 + (settings.offsetX ?? 0) * scale
+  const cy = resolution / 2 + (settings.offsetY ?? 0) * scale
+  const probe: PaintVector = {
+    id: 'probe',
+    type: 'text',
+    pts: [{ x: 0, y: 0 }],
+    text: settings.text ?? '',
+    fontFamily: settings.fontFamily ?? 'Inter',
+    fontSize,
+    weight: w,
+    bold: w >= 700,
+    italic: !!settings.fontItalic,
+    letterSpacing,
+    lineHeight: 1.28,
+    color: settings.textColor ?? '#ffffff',
+    linkedOutsideText: true
   }
+  const ink = textInkCenter(probe)
+  if (!ink) return { x: cx - fontSize * 0.35, y: cy - fontSize * 0.4 }
+  return { x: cx - ink.cx, y: cy - ink.cy }
 }
 
 /**
