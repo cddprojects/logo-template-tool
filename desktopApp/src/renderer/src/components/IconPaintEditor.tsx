@@ -1608,8 +1608,7 @@ function drawCap(ctx: CanvasRenderingContext2D, at: Pt, dir: Pt, cap: CapType, c
 // Axis-aligned bounding-box centre of an object's (unrotated) geometry.
 function objCenter(l: LineObj): Pt {
   if (l.type === 'text') {
-    const b = textBBox(l)
-    return { x: b.x + b.w / 2, y: b.y + b.h / 2 }
+    return textInkCenter(l)
   }
   const pts = l.pts.length ? l.pts : [{ x: 0, y: 0 }]
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -1966,8 +1965,21 @@ function lineNeedsDisplayTransform(l: LineObj): boolean {
 }
 
 function textInkCenter(l: LineObj): Pt {
-  const b = textBBox(l)
+  const b = textInkBBox(l)
   return { x: b.x + b.w / 2, y: b.y + b.h / 2 }
+}
+
+/** Move text so its ink center lands at a target point in display (canvas) space. */
+function moveTextDisplayInkTo(l: LineObj, targetDisplay: Pt): LineObj {
+  const ink = textInkCenter(l)
+  const targetLocal = unmapObjDisplayPt(targetDisplay, l)
+  return {
+    ...l,
+    pts: [{
+      x: l.pts[0].x + (targetLocal.x - ink.x),
+      y: l.pts[0].y + (targetLocal.y - ink.y)
+    }]
+  }
 }
 
 function transformTextLine(l: LineObj, mode: CanvasXform, S: number, opts: XformOpts): LineObj {
@@ -1975,20 +1987,14 @@ function transformTextLine(l: LineObj, mode: CanvasXform, S: number, opts: Xform
   const groupTransform = opts.groupTransform ?? false
   const pivot = opts.pivot ?? objCenter(l)
   const rot = l.rot ?? 0
-  const center = textInkCenter(l)
+  const ink = textInkCenter(l)
+  const displayInk = mapObjDisplayPt(ink, l)
+  const pivotDisplay = mapObjDisplayPt(pivot, l)
   const inPlace = !canvasSpace && !groupTransform &&
-    Math.hypot(center.x - pivot.x, center.y - pivot.y) < 0.5
+    Math.hypot(displayInk.x - pivotDisplay.x, displayInk.y - pivotDisplay.y) < 0.5
 
   const mapWorld = (wp: Pt) =>
     canvasSpace ? mapCanvasPt(wp, mode, S) : mapLocalPt(wp, mode, pivot)
-
-  const moveAnchorToCenter = (newCenter: Pt): LineObj => ({
-    ...l,
-    pts: [{
-      x: l.pts[0].x + (newCenter.x - center.x),
-      y: l.pts[0].y + (newCenter.y - center.y)
-    }]
-  })
 
   /** Flip mirrors via scaleX/scaleY only — rotation is independent. */
   const reflectOrientation = (base: LineObj): LineObj => {
@@ -2002,14 +2008,19 @@ function transformTextLine(l: LineObj, mode: CanvasXform, S: number, opts: Xform
 
   if (mode === 'flipH' || mode === 'flipV') {
     if (inPlace) return { ...reflectOrientation(l), ...mapReshapeFields(l, mapWorld) }
-    return { ...reflectOrientation(moveAnchorToCenter(mapWorld(center))), ...mapReshapeFields(l, mapWorld) }
+    const newDisplayInk = mapLocalPt(displayInk, mode, pivot)
+    return {
+      ...reflectOrientation(moveTextDisplayInkTo(l, newDisplayInk)),
+      ...mapReshapeFields(l, mapWorld)
+    }
   }
 
   const newRot = normalizeRot(composeCanvasRot(rot, mode))
   if (inPlace) {
     return { ...l, rot: newRot, ...mapReshapeFields(l, mapWorld) }
   }
-  return { ...moveAnchorToCenter(mapWorld(center)), rot: newRot, ...mapReshapeFields(l, mapWorld) }
+  const newDisplayInk = mapLocalPt(displayInk, mode, pivot)
+  return { ...moveTextDisplayInkTo(l, newDisplayInk), rot: newRot, ...mapReshapeFields(l, mapWorld) }
 }
 
 function transformCanvasPixels(src: HTMLCanvasElement, mode: CanvasXform): void {

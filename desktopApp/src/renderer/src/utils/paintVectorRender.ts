@@ -83,9 +83,45 @@ function textBBox(v: PaintVector): { x: number; y: number; w: number; h: number 
   return { x: p.x, y: p.y, w, h }
 }
 
+function textInkBBox(v: PaintVector): { x: number; y: number; w: number; h: number } {
+  const p = v.pts[0] ?? { x: 0, y: 0 }
+  const rows = textRows(v)
+  const fs = v.fontSize ?? 48
+  const lineH = fs * (v.lineHeight ?? 1.28)
+  const spacing = v.letterSpacing ?? 0
+  const ctx = measCanvas?.getContext('2d')
+  if (!ctx || !rows.length) return textBBox(v)
+  ctx.font = textFontStr(v)
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'top'
+  let inkLeft = Infinity
+  let inkRight = -Infinity
+  let inkTop = Infinity
+  let inkBottom = -Infinity
+  rows.forEach((r, i) => {
+    const tm = measureSpacedText(ctx, r || ' ', spacing)
+    const left = tm.actualBoundingBoxLeft ?? 0
+    const right = Math.max(tm.width, tm.actualBoundingBoxRight ?? tm.width)
+    const asc = tm.actualBoundingBoxAscent ?? 0
+    const desc = tm.actualBoundingBoxDescent ?? fs * 0.8
+    const y0 = i * lineH
+    inkLeft = Math.min(inkLeft, p.x - left)
+    inkRight = Math.max(inkRight, p.x + right)
+    inkTop = Math.min(inkTop, p.y + y0 - asc)
+    inkBottom = Math.max(inkBottom, p.y + y0 + desc)
+  })
+  if (!Number.isFinite(inkLeft)) return textBBox(v)
+  return {
+    x: inkLeft,
+    y: inkTop,
+    w: Math.max(1, inkRight - inkLeft),
+    h: Math.max(1, inkBottom - inkTop)
+  }
+}
+
 function objCenter(v: PaintVector): Pt {
   if (v.type === 'text') {
-    const b = textBBox(v)
+    const b = textInkBBox(v)
     return { x: b.x + b.w / 2, y: b.y + b.h / 2 }
   }
   const pts = v.pts.length ? v.pts : [{ x: 0, y: 0 }]
