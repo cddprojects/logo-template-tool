@@ -219,7 +219,10 @@ export function FaviconEditor({
       const nextContent = { ...config.content, ...patch }
       const letterKeyTouched = [
         'text', 'textColor', 'fontFamily', 'fontWeight', 'fontItalic',
-        'fontUnderline', 'fontSizeRatio', 'letterSpacing', 'offsetX', 'offsetY'
+        'fontUnderline', 'fontSizeRatio', 'letterSpacing', 'offsetX', 'offsetY',
+        'contentBorderColor', 'contentBorderWidth',
+        'contentShadowEnabled', 'contentShadowInset', 'contentShadowColor',
+        'contentShadowBlur', 'contentShadowSpread', 'contentShadowOffsetX', 'contentShadowOffsetY'
       ].some((k) => k in patch)
       // Live letters draw outside — migrate legacy baked-text decorations so
       // Text / font / color changes show immediately without re-opening Paint.
@@ -238,7 +241,13 @@ export function FaviconEditor({
           fontSizeRatio: nextContent.fontSizeRatio ?? 0.52,
           letterSpacing: nextContent.letterSpacing ?? 0,
           offsetX: nextContent.offsetX ?? 0,
-          offsetY: nextContent.offsetY ?? 0
+          offsetY: nextContent.offsetY ?? 0,
+          contentShadowEnabled: !!nextContent.contentShadowEnabled,
+          contentShadowColor: nextContent.contentShadowColor ?? '#00000080',
+          contentShadowBlur: nextContent.contentShadowBlur ?? 8,
+          contentShadowSpread: nextContent.contentShadowSpread ?? 0,
+          contentShadowOffsetX: nextContent.contentShadowOffsetX ?? 0,
+          contentShadowOffsetY: nextContent.contentShadowOffsetY ?? 3
         })
         updateConfig({ content: nextContent, paintSession: nextSession ?? null })
         return

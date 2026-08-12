@@ -10,9 +10,38 @@ import type {
   PaintSession,
   PaintVector
 } from '../types'
+import type { InnerContentDecor } from './paintVectorRender'
 import { measureSpacedText } from './renderer'
 
 const DESIGN_SIZE = 256
+
+/** Map outside Inner content shadow → paint vector shadow (design 256 → paint px). */
+export function outsideShadowToPaintVector(
+  settings: Pick<
+    OutsideContentSettings,
+    | 'contentShadowEnabled'
+    | 'contentShadowColor'
+    | 'contentShadowBlur'
+    | 'contentShadowSpread'
+    | 'contentShadowOffsetX'
+    | 'contentShadowOffsetY'
+  >,
+  resolution: number
+): Pick<
+  PaintVector,
+  'shadow' | 'shadowColor' | 'shadowBlur' | 'shadowSpread' | 'shadowOffsetX' | 'shadowOffsetY'
+> {
+  const scale = resolution / DESIGN_SIZE
+  const enabled = !!settings.contentShadowEnabled
+  return {
+    shadow: enabled,
+    shadowColor: settings.contentShadowColor ?? '#00000080',
+    shadowBlur: Math.round((settings.contentShadowBlur ?? 8) * scale),
+    shadowSpread: Math.round((settings.contentShadowSpread ?? 0) * scale),
+    shadowOffsetX: Math.round((settings.contentShadowOffsetX ?? 0) * scale),
+    shadowOffsetY: Math.round((settings.contentShadowOffsetY ?? 3) * scale)
+  }
+}
 
 /** Shared content fields kept across type switches / sync. */
 const SHARED_CONTENT_KEYS = [
@@ -439,6 +468,37 @@ export function outsideContentFromIcon(icon: IconConfig): OutsideContentSettings
     sizeRatio: iconSizeRatio(icon),
     fillColor: icon.primaryColor ?? icon.textColor ?? '#ffffff',
     contentShadowEnabled: !!icon.contentShadowEnabled,
+    contentShadowColor: icon.contentShadowColor ?? '#00000080',
+    contentShadowBlur: toDesign(icon.contentShadowBlur ?? 8),
+    contentShadowSpread: toDesign(icon.contentShadowSpread ?? 0),
+    contentShadowOffsetX: toDesign(icon.contentShadowOffsetX ?? 0),
+    contentShadowOffsetY: toDesign(icon.contentShadowOffsetY ?? 3)
+  }
+}
+
+/** Inner border/shadow in 256 design units for live paint vector compositing. */
+export function innerContentDecorFromFavicon(content: FaviconContent): InnerContentDecor {
+  return {
+    contentBorderWidth: content.contentBorderWidth ?? 0,
+    contentBorderColor: content.contentBorderColor,
+    contentShadowEnabled: content.contentShadowEnabled ?? false,
+    contentShadowInset: content.contentShadowInset ?? false,
+    contentShadowColor: content.contentShadowColor ?? '#00000080',
+    contentShadowBlur: content.contentShadowBlur ?? 8,
+    contentShadowSpread: content.contentShadowSpread ?? 0,
+    contentShadowOffsetX: content.contentShadowOffsetX ?? 0,
+    contentShadowOffsetY: content.contentShadowOffsetY ?? 3
+  }
+}
+
+export function innerContentDecorFromIcon(icon: IconConfig): InnerContentDecor {
+  const iconSize = Math.max(1, icon.size || 112)
+  const toDesign = (n: number) => n * (DESIGN_SIZE / iconSize)
+  return {
+    contentBorderWidth: toDesign(icon.contentBorderWidth ?? 0),
+    contentBorderColor: icon.contentBorderColor,
+    contentShadowEnabled: icon.contentShadowEnabled ?? false,
+    contentShadowInset: icon.contentShadowInset ?? false,
     contentShadowColor: icon.contentShadowColor ?? '#00000080',
     contentShadowBlur: toDesign(icon.contentShadowBlur ?? 8),
     contentShadowSpread: toDesign(icon.contentShadowSpread ?? 0),

@@ -1,11 +1,15 @@
 import type { OutsideTextSettings, PaintLayerId, PaintSession, PaintVector } from '../types'
 import { loadCachedImage } from './iconUtils'
-import { isContentProxyVector, stripContentProxyVectors } from './paintSettingsSync'
+import { outsideShadowToPaintVector, isContentProxyVector, stripContentProxyVectors } from './paintSettingsSync'
 import {
+  compositeInnerContentDecor,
   contentVectorsForLiveRender,
   linkedTextHasPaintTransform,
-  renderPaintContentVectors
+  renderPaintContentVectors,
+  type InnerContentDecor
 } from './paintVectorRender'
+
+export type { InnerContentDecor }
 
 /** True when a session still carries an ephemeral Inner content proxy. */
 export function sessionHasContentProxy(
@@ -94,6 +98,7 @@ export function syncOutsideLettersIntoPaintSession(
 
   const vectors: PaintVector[] = (session.vectors ?? []).map((v) => {
     if (v.type !== 'text' || !v.linkedOutsideText) return v
+    const shadow = outsideShadowToPaintVector(letters, res)
     return {
       ...v,
       text: letters.text ?? '',
@@ -103,7 +108,8 @@ export function syncOutsideLettersIntoPaintSession(
       weight: w,
       bold: w >= 700,
       italic: !!letters.fontItalic,
-      letterSpacing
+      letterSpacing,
+      ...shadow
     }
   })
 
@@ -160,7 +166,8 @@ export async function applyPaintLayerDecorations(
   x: number,
   y: number,
   size: number,
-  layer: PaintLayerId
+  layer: PaintLayerId,
+  innerDecor?: InnerContentDecor
 ): Promise<void> {
   if (!session || size <= 0) return
   const res = Math.max(1, session.resolution || size)
@@ -183,12 +190,25 @@ export async function applyPaintLayerDecorations(
   }
 
   if (layer === 'content' && shouldRenderContentVectorsLive(session)) {
-    ctx.save()
-    const scale = size / res
-    ctx.translate(x, y)
-    ctx.scale(scale, scale)
-    renderPaintContentVectors(ctx, session.vectors)
-    ctx.restore()
+    const liveVectors = contentVectorsForLiveRender(session.vectors)
+    const linkedTransform = liveVectors.some(linkedTextHasPaintTransform)
+    if (linkedTransform && innerDecor) {
+      const offscreen = document.createElement('canvas')
+      offscreen.width = res
+      offscreen.height = res
+      const offCtx = offscreen.getContext('2d')!
+      offCtx.imageSmoothingEnabled = true
+      offCtx.imageSmoothingQuality = 'high'
+      renderPaintContentVectors(offCtx, session.vectors, innerDecor, res)
+      compositeInnerContentDecor(ctx, offscreen, x, y, size, innerDecor)
+    } else {
+      ctx.save()
+      const scale = size / res
+      ctx.translate(x, y)
+      ctx.scale(scale, scale)
+      renderPaintContentVectors(ctx, session.vectors, innerDecor, res)
+      ctx.restore()
+    }
   }
 }
 

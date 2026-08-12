@@ -308,7 +308,10 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       }
       const letterKeyTouched = [
         'text', 'textColor', 'fontFamily', 'fontWeight', 'fontItalic',
-        'fontUnderline', 'fontSizeRatio', 'letterSpacing', 'offsetX', 'offsetY'
+        'fontUnderline', 'fontSizeRatio', 'letterSpacing', 'offsetX', 'offsetY',
+        'contentBorderColor', 'contentBorderWidth',
+        'contentShadowEnabled', 'contentShadowInset', 'contentShadowColor',
+        'contentShadowBlur', 'contentShadowSpread', 'contentShadowOffsetX', 'contentShadowOffsetY'
       ].some((k) => k in patch)
       if (
         letterKeyTouched &&
@@ -327,7 +330,13 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             fontSizeRatio: next.fontSizeRatio ?? 0.52,
             letterSpacing: next.letterSpacing ?? 0,
             offsetX: next.offsetX ?? 0,
-            offsetY: next.offsetY ?? 0
+            offsetY: next.offsetY ?? 0,
+            contentShadowEnabled: !!next.contentShadowEnabled,
+            contentShadowColor: next.contentShadowColor ?? '#00000080',
+            contentShadowBlur: next.contentShadowBlur ?? 8,
+            contentShadowSpread: next.contentShadowSpread ?? 0,
+            contentShadowOffsetX: next.contentShadowOffsetX ?? 0,
+            contentShadowOffsetY: next.contentShadowOffsetY ?? 3
           }) ?? null
         }
       }
@@ -1534,9 +1543,42 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                   <ColorRow label="Accent" value={safeConfig.icon.secondaryColor} onChange={(v) => setIcon({ secondaryColor: v })} />
                 )}
 
-                {/* Content offset */}
-                <SliderRow label="Offset X" value={safeConfig.icon.offsetX ?? 0} min={-80} max={80} onChange={(v) => setIcon({ offsetX: v })} unit="px" />
-                <SliderRow label="Offset Y" value={safeConfig.icon.offsetY ?? 0} min={-80} max={80} onChange={(v) => setIcon({ offsetY: v })} unit="px" />
+                {contentTypeFromIcon(safeConfig.icon) !== 'canva' && (
+                  <>
+                    <SliderRow label="Offset X" value={safeConfig.icon.offsetX ?? 0} min={-80} max={80} onChange={(v) => setIcon({ offsetX: v })} unit="px" />
+                    <SliderRow label="Offset Y" value={safeConfig.icon.offsetY ?? 0} min={-80} max={80} onChange={(v) => setIcon({ offsetY: v })} unit="px" />
+                    <ColorRow label="Border" value={(safeConfig.icon.contentBorderColor ?? 'transparent') === 'transparent' ? '#000000' : (safeConfig.icon.contentBorderColor ?? '#000000')} onChange={(v) => setIcon({ contentBorderColor: v })} />
+                    <SliderRow label="Border width" value={safeConfig.icon.contentBorderWidth ?? 0} min={0} max={20} onChange={(v) => setIcon({ contentBorderWidth: v, contentBorderColor: v > 0 && (safeConfig.icon.contentBorderColor ?? 'transparent') === 'transparent' ? '#000000' : (safeConfig.icon.contentBorderColor ?? 'transparent') })} unit="px" />
+                    <ToggleRow label="Shadow" value={safeConfig.icon.contentShadowEnabled ?? false} onChange={(v) => setIcon({ contentShadowEnabled: v })} />
+                    {(safeConfig.icon.contentShadowEnabled ?? false) && (
+                      <>
+                        <div className="flex items-center gap-2 py-1.5 min-w-0">
+                          <label className="text-xs text-muted w-20 min-w-[5rem] shrink-0">Position</label>
+                          <div className="flex flex-1 min-w-0 gap-1">
+                            {(['outline', 'inset'] as const).map((pos) => (
+                              <button
+                                key={pos}
+                                onClick={() => setIcon({ contentShadowInset: pos === 'inset' })}
+                                className={`flex-1 py-1 rounded text-[10px] font-medium capitalize transition-colors ${
+                                  (safeConfig.icon.contentShadowInset ?? false) === (pos === 'inset')
+                                    ? 'bg-accent text-white'
+                                    : 'bg-surface3 text-muted hover:text-text'
+                                }`}
+                              >
+                                {pos}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <ColorRow solidOnly label="Shadow color" value={safeConfig.icon.contentShadowColor ?? '#00000080'} onChange={(v) => setIcon({ contentShadowColor: v })} />
+                        <SliderRow label="Blur" value={safeConfig.icon.contentShadowBlur ?? 8} min={0} max={40} onChange={(v) => setIcon({ contentShadowBlur: v })} unit="px" />
+                        <SliderRow label="Spread" value={safeConfig.icon.contentShadowSpread ?? 0} min={0} max={40} onChange={(v) => setIcon({ contentShadowSpread: v })} unit="px" />
+                        <SliderRow label="Offset X" value={safeConfig.icon.contentShadowOffsetX ?? 0} min={-30} max={30} onChange={(v) => setIcon({ contentShadowOffsetX: v })} unit="px" />
+                        <SliderRow label="Offset Y" value={safeConfig.icon.contentShadowOffsetY ?? 3} min={-30} max={30} onChange={(v) => setIcon({ contentShadowOffsetY: v })} unit="px" />
+                      </>
+                    )}
+                  </>
+                )}
 
                 {/* Container / outer shape */}
                 {(() => {
@@ -1665,37 +1707,6 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                     <SliderRow label="Spread" value={safeConfig.icon.shadowSpread ?? 0} min={0} max={40} onChange={(v) => setIcon({ shadowSpread: v })} unit="px" />
                     <SliderRow label="Offset X" value={safeConfig.icon.shadowOffsetX ?? 0} min={-20} max={20} onChange={(v) => setIcon({ shadowOffsetX: v })} unit="px" />
                     <SliderRow label="Offset Y" value={safeConfig.icon.shadowOffsetY ?? 4} min={-20} max={20} onChange={(v) => setIcon({ shadowOffsetY: v })} unit="px" />
-                  </>
-                )}
-                <ColorRow label="Content border" value={(safeConfig.icon.contentBorderColor ?? 'transparent') === 'transparent' ? '#000000' : (safeConfig.icon.contentBorderColor ?? '#000000')} onChange={(v) => setIcon({ contentBorderColor: v })} />
-                <SliderRow label="Content border width" value={safeConfig.icon.contentBorderWidth ?? 0} min={0} max={20} onChange={(v) => setIcon({ contentBorderWidth: v, contentBorderColor: v > 0 && (safeConfig.icon.contentBorderColor ?? 'transparent') === 'transparent' ? '#000000' : (safeConfig.icon.contentBorderColor ?? 'transparent') })} unit="px" />
-                <ToggleRow label="Content shadow" value={safeConfig.icon.contentShadowEnabled ?? false} onChange={(v) => setIcon({ contentShadowEnabled: v })} />
-                {safeConfig.icon.contentShadowEnabled && (
-                  <>
-                    {/* Outline (drop-shadow outside) vs Inset (inner glow/shadow) */}
-                    <div className="flex items-center gap-2 py-1.5 min-w-0">
-                      <label className="text-xs text-muted w-20 min-w-[5rem] shrink-0">Position</label>
-                      <div className="flex flex-1 min-w-0 gap-1">
-                        {(['outline', 'inset'] as const).map((pos) => (
-                          <button
-                            key={pos}
-                            onClick={() => setIcon({ contentShadowInset: pos === 'inset' })}
-                            className={`flex-1 py-1 rounded text-[10px] font-medium capitalize transition-colors ${
-                              (safeConfig.icon.contentShadowInset ?? false) === (pos === 'inset')
-                                ? 'bg-accent text-white'
-                                : 'bg-surface3 text-muted hover:text-text'
-                            }`}
-                          >
-                            {pos}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    <ColorRow solidOnly label="Shadow color" value={safeConfig.icon.contentShadowColor ?? '#00000080'} onChange={(v) => setIcon({ contentShadowColor: v })} />
-                    <SliderRow label="Blur" value={safeConfig.icon.contentShadowBlur ?? 8} min={0} max={40} onChange={(v) => setIcon({ contentShadowBlur: v })} unit="px" />
-                    <SliderRow label="Spread" value={safeConfig.icon.contentShadowSpread ?? 0} min={0} max={40} onChange={(v) => setIcon({ contentShadowSpread: v })} unit="px" />
-                    <SliderRow label="Offset X" value={safeConfig.icon.contentShadowOffsetX ?? 0} min={-20} max={20} onChange={(v) => setIcon({ contentShadowOffsetX: v })} unit="px" />
-                    <SliderRow label="Offset Y" value={safeConfig.icon.contentShadowOffsetY ?? 3} min={-20} max={20} onChange={(v) => setIcon({ contentShadowOffsetY: v })} unit="px" />
                   </>
                 )}
               </>

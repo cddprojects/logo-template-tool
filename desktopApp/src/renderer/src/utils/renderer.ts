@@ -7,6 +7,7 @@ import {
   sessionUsesLayeredPaint,
   shouldSkipLiveLettersForPaintSession
 } from './paintDecorations'
+import { innerContentDecorFromFavicon, innerContentDecorFromIcon } from './paintSettingsSync'
 
 // ── Gradient color utilities ──────────────────────────────────────────────────
 
@@ -597,6 +598,7 @@ export async function drawIcon(
   const localCx  = (cx - x) * SUPER   // content centre in supersampled space
   const localCy  = (cy - y) * SUPER
   const superArea = areaSize * SUPER   // effective draw area in supersampled space
+  const skipLiveLetters = shouldSkipLiveLettersForPaintSession(icon.paintSession)
 
   let iconShapeDrawSize = 0
   let iconOtherDrawSize = 0
@@ -647,7 +649,7 @@ export async function drawIcon(
       // layer when splitting Outer shape / Inner content. Do not draw glyphs or
       // an underline (a space + underline looks like a stray "-" on the canvas).
       // When Paint saved linked text into decorationsPng, skip live letters.
-      if (shouldSkipLiveLettersForPaintSession(icon.paintSession)) break
+      if (skipLiveLetters) break
       const letterText = icon.text ?? ''
       if (letterText.length > 0 && !letterText.trim()) break
       const fontSize = superArea * (icon.fontSizeRatio ?? 0.52)
@@ -684,7 +686,7 @@ export async function drawIcon(
   // Shapes use clip-and-double so the full borderWidth is visible inside the
   // shape regardless of geometry (hexagon, star, triangle, etc.).
   const icbw = (icon.contentBorderWidth ?? 0) * dprScale * SUPER
-  if (icbw > 0) {
+  if (icbw > 0 && !(skipLiveLetters && icon.sourceType === 'letters')) {
     const icbc = (icon.contentBorderColor ?? 'transparent') === 'transparent' ? '#000000' : icon.contentBorderColor
     cCtx.save()
     cCtx.strokeStyle = icbc
@@ -865,7 +867,15 @@ export async function drawIcon(
 
   // Inner paint above live Inner; Outer paint already applied under content when layered.
   if (sessionUsesLayeredPaint(icon.paintSession)) {
-    await applyPaintLayerDecorations(ctx, icon.paintSession, x, y, size, 'content')
+    await applyPaintLayerDecorations(
+      ctx,
+      icon.paintSession,
+      x,
+      y,
+      size,
+      'content',
+      innerContentDecorFromIcon(icon)
+    )
   } else if (icon.paintSession) {
     // Legacy single-plane decorations on top of Outer + Inner.
     await applyPaintDecorations(ctx, icon.paintSession, x, y, size)
@@ -1376,7 +1386,15 @@ async function renderFaviconInnerAt(
   }
   const paintInnerLayer = async () => {
     if (layeredPaint) {
-      await applyPaintLayerDecorations(ctx, config.paintSession, 0, 0, size, 'content')
+      await applyPaintLayerDecorations(
+        ctx,
+        config.paintSession,
+        0,
+        0,
+        size,
+        'content',
+        innerContentDecorFromFavicon(config.content)
+      )
     }
   }
 
@@ -1964,7 +1982,7 @@ async function drawFaviconContent(
   // Shapes use clip-and-double so the full borderWidth is visible inside the
   // shape for any geometry (hexagon, star, triangle, etc.).
   const cbw = (content.contentBorderWidth ?? 0) * (areaSize / 256)
-  if (cbw > 0) {
+  if (cbw > 0 && !(skipLiveLetters && content.type === 'letters')) {
     const cbc = (content.contentBorderColor ?? 'transparent') === 'transparent' ? '#000000' : content.contentBorderColor
     offCtx.save()
     offCtx.strokeStyle = cbc

@@ -40,6 +40,18 @@ function fillSpacedText(
   })
 }
 
+function strokeSpacedText(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  x: number,
+  y: number,
+  spacingPx = 0
+): void {
+  withLetterSpacing(ctx, spacingPx, () => {
+    ctx.strokeText(text, x, y)
+  })
+}
+
 function textFontStr(v: PaintVector): string {
   const weight = v.bold ? Math.max(700, v.weight ?? 400) : v.weight ?? 400
   return `${v.italic ? 'italic ' : 'normal '}${weight} ${v.fontSize ?? 48}px "${v.fontFamily ?? 'Inter'}", sans-serif`
@@ -95,7 +107,25 @@ function needsDisplayTransform(v: PaintVector): boolean {
   )
 }
 
-function renderPaintText(ctx: CanvasRenderingContext2D, v: PaintVector): void {
+/** Outside Inner content border/shadow applied when rendering linked paint text. */
+export interface InnerContentDecor {
+  contentBorderWidth?: number
+  contentBorderColor?: string
+  contentShadowEnabled?: boolean
+  contentShadowInset?: boolean
+  contentShadowColor?: string
+  contentShadowBlur?: number
+  contentShadowSpread?: number
+  contentShadowOffsetX?: number
+  contentShadowOffsetY?: number
+}
+
+function renderPaintText(
+  ctx: CanvasRenderingContext2D,
+  v: PaintVector,
+  decor?: InnerContentDecor,
+  sessionRes?: number
+): void {
   const rows = textRows(v)
   if (!v.text) return
   const p = v.pts[0] ?? { x: 0, y: 0 }
@@ -106,7 +136,9 @@ function renderPaintText(ctx: CanvasRenderingContext2D, v: PaintVector): void {
   ctx.font = font
   ctx.textAlign = 'left'
   ctx.textBaseline = 'top'
-  if (v.shadow) {
+  // Linked outside text uses the renderer's border/shadow pipeline — not paint vector shadow.
+  const usePaintShadow = !!v.shadow && !v.linkedOutsideText
+  if (usePaintShadow) {
     const blur = v.shadowBlur ?? 0
     const ox = v.shadowOffsetX ?? 0
     const oy = v.shadowOffsetY ?? 0
@@ -114,16 +146,41 @@ function renderPaintText(ctx: CanvasRenderingContext2D, v: PaintVector): void {
     ctx.shadowBlur = blur
     ctx.shadowOffsetX = ox
     ctx.shadowOffsetY = oy
+  } else {
+    ctx.shadowColor = 'transparent'
+    ctx.shadowBlur = 0
+    ctx.shadowOffsetX = 0
+    ctx.shadowOffsetY = 0
   }
-  const b = textBBox(v)
   ctx.fillStyle = v.color.startsWith('linear-gradient') ? firstSolidColor(v.color) : v.color
   rows.forEach((r, i) => {
     if (r) fillSpacedText(ctx, r, p.x, p.y + i * lineH, spacing)
   })
+
+  if (v.linkedOutsideText && decor && sessionRes) {
+    const cbw = (decor.contentBorderWidth ?? 0) * (sessionRes / 256)
+    if (cbw > 0) {
+      const cbc = (decor.contentBorderColor ?? 'transparent') === 'transparent'
+        ? '#000000'
+        : (decor.contentBorderColor ?? '#000000')
+      ctx.lineWidth = cbw
+      ctx.strokeStyle = cbc
+      ctx.lineJoin = 'round'
+      rows.forEach((r, i) => {
+        if (r) strokeSpacedText(ctx, r, p.x, p.y + i * lineH, spacing)
+      })
+    }
+  }
+
   ctx.restore()
 }
 
-function renderPaintTextVector(ctx: CanvasRenderingContext2D, v: PaintVector): void {
+function renderPaintTextVector(
+  ctx: CanvasRenderingContext2D,
+  v: PaintVector,
+  decor?: InnerContentDecor,
+  sessionRes?: number
+): void {
   if (v.type !== 'text') return
   const c = objCenter(v)
   const rot = v.rot ?? 0
@@ -135,11 +192,11 @@ function renderPaintTextVector(ctx: CanvasRenderingContext2D, v: PaintVector): v
     ctx.rotate(rot)
     ctx.scale(sx, sy)
     ctx.translate(-c.x, -c.y)
-    renderPaintText(ctx, v)
+    renderPaintText(ctx, v, decor, sessionRes)
     ctx.restore()
     return
   }
-  renderPaintText(ctx, v)
+  renderPaintText(ctx, v, decor, sessionRes)
 }
 
 /** True when linked letters were warped in Paint (not driven by live outside typography). */
@@ -169,9 +226,106 @@ export function contentVectorsForLiveRender(vectors: PaintVector[] | undefined):
 /** Draw content-layer paint vectors at session resolution (caller handles scaling). */
 export function renderPaintContentVectors(
   ctx: CanvasRenderingContext2D,
-  vectors: PaintVector[] | undefined
+  vectors: PaintVector[] | undefined,
+  decor?: InnerContentDecor,
+  sessionRes?: number
 ): void {
+  const res = sessionRes ?? ctx.canvas.width
   for (const v of contentVectorsForLiveRender(vectors)) {
-    if (v.type === 'text') renderPaintTextVector(ctx, v)
+    if (v.type === 'text') renderPaintTextVector(ctx, v, decor, res)
   }
+}
+
+/**
+ * Composite a session-resolution offscreen canvas onto the main ctx with the
+ * same drop-shadow / inset pipeline used for live Inner content.
+ */
+export function compositeInnerContentDecor(
+  ctx: CanvasRenderingContext2D,
+  offscreen: HTMLCanvasElement,
+  x: number,
+  y: number,
+  size: number,
+  decor: InnerContentDecor
+): void {
+  const cScale = size / 256
+  const cSpread = (decor.contentShadowSpread ?? 0) * cScale
+  const csx = (decor.contentShadowOffsetX ?? 0) * cScale
+  const csy = (decor.contentShadowOffsetY ?? 3) * cScale
+  const csb = (decor.contentShadowBlur ?? 8) * cScale
+  const csc = firstSolidColor(decor.contentShadowColor ?? '#00000080')
+  const isInset = decor.contentShadowInset ?? false
+
+  if (!decor.contentShadowEnabled) {
+    ctx.drawImage(offscreen, x, y, size, size)
+    return
+  }
+
+  if (isInset) {
+    const cW = size
+    const cH = size
+    const HUGE = 10000
+    const pad = Math.ceil(csb * 2 + Math.max(cW, cH) + Math.abs(csx) + Math.abs(csy) + 4)
+
+    const frameCanvas = document.createElement('canvas')
+    frameCanvas.width = cW + pad * 2
+    frameCanvas.height = cH + pad * 2
+    const fCtx = frameCanvas.getContext('2d')!
+    fCtx.fillStyle = '#000000'
+    fCtx.fillRect(0, 0, frameCanvas.width, frameCanvas.height)
+    fCtx.globalCompositeOperation = 'destination-out'
+    if (cSpread > 0) {
+      const hs = Math.max(1, cW - cSpread * 2)
+      const ho = pad + (cW - hs) / 2
+      fCtx.drawImage(offscreen, ho, ho, hs, hs)
+    } else {
+      fCtx.drawImage(offscreen, pad, pad, cW, cH)
+    }
+    fCtx.globalCompositeOperation = 'source-over'
+
+    const shadowCanvas = document.createElement('canvas')
+    shadowCanvas.width = cW
+    shadowCanvas.height = cH
+    const sCtx = shadowCanvas.getContext('2d')!
+    sCtx.imageSmoothingEnabled = true
+    sCtx.imageSmoothingQuality = 'high'
+    sCtx.filter = `drop-shadow(${csx + HUGE}px ${csy + HUGE}px ${csb}px ${csc})`
+    sCtx.drawImage(frameCanvas, -HUGE - pad, -HUGE - pad)
+    sCtx.filter = 'none'
+    sCtx.globalCompositeOperation = 'destination-in'
+    sCtx.drawImage(offscreen, 0, 0, cW, cH)
+    sCtx.globalCompositeOperation = 'source-over'
+
+    const insetCanvas = document.createElement('canvas')
+    insetCanvas.width = cW
+    insetCanvas.height = cH
+    const iCtx = insetCanvas.getContext('2d')!
+    iCtx.drawImage(offscreen, 0, 0, cW, cH)
+    iCtx.drawImage(shadowCanvas, 0, 0)
+
+    ctx.drawImage(insetCanvas, x, y)
+    return
+  }
+
+  if (cSpread > 0) {
+    const HUGE = 10000
+    const spreadSize = size + cSpread * 2
+    const spreadCanvas = document.createElement('canvas')
+    spreadCanvas.width = spreadSize
+    spreadCanvas.height = spreadSize
+    const sCtx = spreadCanvas.getContext('2d')!
+    sCtx.imageSmoothingEnabled = true
+    sCtx.imageSmoothingQuality = 'high'
+    sCtx.drawImage(offscreen, 0, 0, spreadSize, spreadSize)
+
+    ctx.filter = `drop-shadow(${csx + HUGE}px ${csy + HUGE}px ${csb}px ${csc})`
+    ctx.drawImage(spreadCanvas, x - cSpread - HUGE, y - cSpread - HUGE)
+    ctx.filter = 'none'
+    ctx.drawImage(offscreen, x, y, size, size)
+    return
+  }
+
+  ctx.filter = `drop-shadow(${csx}px ${csy}px ${csb}px ${csc})`
+  ctx.drawImage(offscreen, x, y, size, size)
+  ctx.filter = 'none'
 }
