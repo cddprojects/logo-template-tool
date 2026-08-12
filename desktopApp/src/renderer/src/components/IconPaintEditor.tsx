@@ -1979,13 +1979,15 @@ function textInkCenter(l: LineObj): Pt {
 
 /** Move text so its ink center lands at a target point in display (canvas) space. */
 function moveTextDisplayInkTo(l: LineObj, targetDisplay: Pt): LineObj {
+  const anchor = l.pts[0] ?? { x: 0, y: 0 }
   const ink = textInkCenter(l)
-  const targetLocal = unmapObjDisplayPt(targetDisplay, l)
+  // Ink is the scale/rotate pivot, so its display position always equals local ink coords.
+  // Never use unmap here — negative scale makes unmap diverge on repeated flips.
   return {
     ...l,
     pts: [{
-      x: l.pts[0].x + (targetLocal.x - ink.x),
-      y: l.pts[0].y + (targetLocal.y - ink.y)
+      x: anchor.x + (targetDisplay.x - ink.x),
+      y: anchor.y + (targetDisplay.y - ink.y)
     }]
   }
 }
@@ -2019,20 +2021,23 @@ function transformTextLine(l: LineObj, mode: CanvasXform, S: number, opts: Xform
   }
 
   if (mode === 'flipH' || mode === 'flipV') {
+    const targetDisplay = mapDisplayPt(displayInk)
     if (inPlace) return { ...reflectOrientation(l), ...mapReshapeFields(l, mapDisplayPt) }
+    // Mirror glyphs first (around ink center), then move ink to the flipped position.
     return {
-      ...reflectOrientation(moveTextDisplayInkTo(l, mapDisplayPt(displayInk))),
+      ...moveTextDisplayInkTo(reflectOrientation(l), targetDisplay),
       ...mapReshapeFields(l, mapDisplayPt)
     }
   }
 
   const newRot = normalizeRot(composeCanvasRot(rot, mode))
+  const targetDisplay = mapDisplayPt(displayInk)
   if (inPlace) {
     return { ...l, rot: newRot, ...mapReshapeFields(l, mapDisplayPt) }
   }
+  // Apply rotation first, then reposition so display ink lands on the rotated target.
   return {
-    ...moveTextDisplayInkTo(l, mapDisplayPt(displayInk)),
-    rot: newRot,
+    ...moveTextDisplayInkTo({ ...l, rot: newRot }, targetDisplay),
     ...mapReshapeFields(l, mapDisplayPt)
   }
 }
