@@ -1,6 +1,11 @@
 import type { OutsideTextSettings, PaintLayerId, PaintSession, PaintVector } from '../types'
 import { loadCachedImage } from './iconUtils'
 import { isContentProxyVector, stripContentProxyVectors } from './paintSettingsSync'
+import {
+  contentVectorsForLiveRender,
+  linkedTextHasPaintTransform,
+  renderPaintContentVectors
+} from './paintVectorRender'
 
 /** True when a session still carries an ephemeral Inner content proxy. */
 export function sessionHasContentProxy(
@@ -55,14 +60,20 @@ export function paintCompositeResolution(
 }
 
 /**
- * Live letters always draw outside from current settings.
- * Legacy sessions that baked linked text into decorationsPng still skip live
- * letters until outside text is edited (or Paint is re-saved).
+ * Live letters draw outside from current settings unless Paint owns the glyphs
+ * (baked in decorations, or transformed linked text vectors rendered live).
  */
 export function shouldSkipLiveLettersForPaintSession(
   session: PaintSession | null | undefined
 ): boolean {
-  return !!session?.linkedTextInDecorations && sessionHasLinkedOutsideText(session)
+  if (!session || !sessionHasLinkedOutsideText(session)) return false
+  if (session.linkedTextInDecorations) return true
+  return (session.vectors ?? []).some(linkedTextHasPaintTransform)
+}
+
+function shouldRenderContentVectorsLive(session: PaintSession): boolean {
+  if (session.linkedTextInDecorations) return false
+  return contentVectorsForLiveRender(session.vectors).length > 0
 }
 
 /**
@@ -97,18 +108,14 @@ export function syncOutsideLettersIntoPaintSession(
   })
 
   const hadLinkedInDecor = !!session.linkedTextInDecorations
-  const hasUnlinkedPaintText = (session.vectors ?? []).some(
-    (v) => v.type === 'text' && !v.linkedOutsideText
-  )
-  const clearDecor = hadLinkedInDecor && !hasUnlinkedPaintText
   return {
     ...session,
     vectors,
     linkedTextInDecorations: false,
-    // Drop flat decorations that still contain the old linked glyphs.
-    decorationsPng: clearDecor ? undefined : session.decorationsPng,
-    containerDecorationsPng: clearDecor ? undefined : session.containerDecorationsPng,
-    contentDecorationsPng: clearDecor ? undefined : session.contentDecorationsPng
+    // Drop flat decorations that still contain old linked glyphs (stale color/transform).
+    decorationsPng: hadLinkedInDecor ? undefined : session.decorationsPng,
+    containerDecorationsPng: hadLinkedInDecor ? undefined : session.containerDecorationsPng,
+    contentDecorationsPng: hadLinkedInDecor ? undefined : session.contentDecorationsPng
   }
 }
 
@@ -169,12 +176,20 @@ export async function applyPaintLayerDecorations(
     layer === 'container' ? session.containerDecorationsPng : session.contentDecorationsPng
   if (layeredPng) {
     await drawScaledPng(ctx, layeredPng, x, y, size, res)
-    return
+  } else {
+    // Pre-layered sessions: fall back to raw overlay for this layer only.
+    const overlay = layer === 'container' ? session.containerPng : session.contentPng
+    await drawScaledPng(ctx, overlay, x, y, size, res)
   }
 
-  // Pre-layered sessions: fall back to raw overlay for this layer only.
-  const overlay = layer === 'container' ? session.containerPng : session.contentPng
-  await drawScaledPng(ctx, overlay, x, y, size, res)
+  if (layer === 'content' && shouldRenderContentVectorsLive(session)) {
+    ctx.save()
+    const scale = size / res
+    ctx.translate(x, y)
+    ctx.scale(scale, scale)
+    renderPaintContentVectors(ctx, session.vectors)
+    ctx.restore()
+  }
 }
 
 /**
