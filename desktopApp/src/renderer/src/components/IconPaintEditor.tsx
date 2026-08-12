@@ -1237,7 +1237,7 @@ function applyOutsideTextToLine(
   settings: OutsideTextSettings,
   resolution: number,
   innerDrawSize = resolution,
-  opts?: { preservePosition?: boolean }
+  opts?: { preservePosition?: boolean; linkToOutside?: boolean }
 ): LineObj {
   const drawArea = Math.max(1, innerDrawSize)
   const fontSize = Math.max(4, Math.round(drawArea * (settings.fontSizeRatio ?? 0.52)))
@@ -1245,6 +1245,7 @@ function applyOutsideTextToLine(
   const weight = parseFontWeightNum(settings.fontWeight)
   const off = outsideOffsetToPaint(settings, resolution)
   const shadow = outsideShadowToPaint(settings, resolution)
+  const link = opts?.linkToOutside ?? !!l.linkedOutsideText
   const next: LineObj = {
     ...l,
     color: settings.textColor || l.color,
@@ -1255,7 +1256,7 @@ function applyOutsideTextToLine(
     bold: weight >= 700,
     italic: !!settings.fontItalic,
     letterSpacing,
-    linkedOutsideText: true,
+    linkedOutsideText: link ? true : undefined,
     ...shadow
   }
   if (!opts?.preservePosition) {
@@ -4213,8 +4214,12 @@ export function IconPaintEditor({
   }, [W, H, tool])
 
   const commitLines = useCallback((arr: LineObj[]) => {
-    linesRef.current = arr
-    setLines(arr)
+    const normalized = normalizeLinkedTextVectors(
+      arr as unknown as PaintVector[],
+      selectedIdRef.current
+    ) as unknown as LineObj[]
+    linesRef.current = normalized
+    setLines(normalized)
   }, [])
 
   // Load the active text font and redraw once it's ready (metrics change).
@@ -4287,8 +4292,19 @@ export function IconPaintEditor({
     if (!id) return
     const selected = linesRef.current.find((l) => l.id === id)
     const targetId = selected ? (checkedGroupTarget(selected)?.id ?? id) : id
+    const multiIds =
+      selectedLayerIds.size > 1
+        ? new Set(
+            [...selectedLayerIds].filter((layerId) =>
+              linesRef.current.some((l) => l.id === layerId && l.type !== 'group')
+            )
+          )
+        : null
+    const applyIds = multiIds?.size ? multiIds : new Set([targetId])
     const next = linesRef.current.map((l) =>
-      l.id === targetId ? { ...l, ...(typeof patch === 'function' ? patch(l) : patch) } : l
+      applyIds.has(l.id)
+        ? { ...l, ...(typeof patch === 'function' ? patch(l) : patch) }
+        : l
     )
     commitLines(next)
     redrawLines()
@@ -4611,7 +4627,15 @@ export function IconPaintEditor({
     // Text: place a new text object and edit it on the canvas.
     if (tool === 'text') {
       if (useOutsideText && outsideTextRef.current) {
+        const existingLinked = linesRef.current.some(
+          (l) => l.type === 'text' && l.linkedOutsideText
+        )
         const nl = lineFromOutsideText(outsideTextRef.current, W, innerDraw)
+        if (existingLinked) {
+          nl.linkedOutsideText = undefined
+          nl.pts = nl.pts.map((p) => ({ x: p.x + 16, y: p.y + 16 }))
+          nl.name = `Text ${linesRef.current.filter((l) => l.type === 'text').length + 1}`
+        }
         // Keep optical center (linked letters); click only starts edit.
         linesRef.current = [...linesRef.current, nl]
         commitLines([...linesRef.current])
@@ -5393,9 +5417,16 @@ export function IconPaintEditor({
       linesRef.current.find((item) => item.id === selectedIdRef.current)
     if (!selected || !isVectorVisible(selected)) return false
     const target = checkedGroupTarget(selected) ?? selected
-    const targetIds = target.type === 'group'
-      ? descendantIds(target.id)
-      : new Set([target.id])
+    const targetIds =
+      target.type === 'group'
+        ? descendantIds(target.id)
+        : selectedLayerIds.size > 1
+          ? new Set(
+              [...selectedLayerIds].filter((layerId) =>
+                linesRef.current.some((item) => item.id === layerId && item.type !== 'group')
+              )
+            )
+          : new Set([target.id])
     const fillColor = firstSolidColor(color)
     const imageUrls: string[] = []
     let changed = false
@@ -7670,7 +7701,10 @@ export function IconPaintEditor({
       })
       return
     }
-    const next = applyOutsideTextToLine(target, settings, W, innerDraw)
+    const next = applyOutsideTextToLine(target, settings, W, innerDraw, {
+      preservePosition: !target.linkedOutsideText,
+      linkToOutside: !!target.linkedOutsideText
+    })
     linesRef.current = linesRef.current.map((l) => (l.id === next.id ? next : l))
     commitLines(linesRef.current)
     selectedIdRef.current = next.id

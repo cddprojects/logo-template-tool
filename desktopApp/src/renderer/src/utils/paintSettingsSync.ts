@@ -149,7 +149,11 @@ export function normalizeLinkedTextVectors(
   return list.map((v) => {
     if (v.type === 'text' && v.linkedOutsideText && v.id !== keepId) {
       const { linkedOutsideText: _l, ...rest } = v
-      return rest as PaintVector
+      const demoted = rest as PaintVector
+      if (demoted.pts?.length) {
+        demoted.pts = demoted.pts.map((p) => ({ x: p.x + 16, y: p.y + 16 }))
+      }
+      return demoted
     }
     return v
   })

@@ -97,14 +97,18 @@ export function syncOutsideLettersIntoPaintSession(
   })
 
   const hadLinkedInDecor = !!session.linkedTextInDecorations
+  const hasUnlinkedPaintText = (session.vectors ?? []).some(
+    (v) => v.type === 'text' && !v.linkedOutsideText
+  )
+  const clearDecor = hadLinkedInDecor && !hasUnlinkedPaintText
   return {
     ...session,
     vectors,
     linkedTextInDecorations: false,
     // Drop flat decorations that still contain the old linked glyphs.
-    decorationsPng: hadLinkedInDecor ? undefined : session.decorationsPng,
-    containerDecorationsPng: hadLinkedInDecor ? undefined : session.containerDecorationsPng,
-    contentDecorationsPng: hadLinkedInDecor ? undefined : session.contentDecorationsPng
+    decorationsPng: clearDecor ? undefined : session.decorationsPng,
+    containerDecorationsPng: clearDecor ? undefined : session.containerDecorationsPng,
+    contentDecorationsPng: clearDecor ? undefined : session.contentDecorationsPng
   }
 }
 

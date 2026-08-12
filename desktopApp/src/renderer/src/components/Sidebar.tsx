@@ -344,13 +344,8 @@ export function Sidebar({
                 )}
 
                 <div
-                  className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold shrink-0 mr-2.5 ${
-                    isSelected ? 'bg-accent text-white' : 'bg-surface3 text-text-dim'
-                  }`}
+                  className="w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold shrink-0 mr-2.5 bg-surface3 text-white"
                   style={{
-                    background: isSelected
-                      ? (v.logos?.[0]?.config?.icon?.primaryColor ?? undefined)
-                      : undefined,
                     fontSize: v.name.length > 3 ? '9px' : '11px'
                   }}
                 >
