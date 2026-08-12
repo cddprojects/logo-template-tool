@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useState, useMemo, lazy, Suspense } from 'react'
+import React, { useRef, useEffect, useCallback, useState, useMemo, Suspense } from 'react'
 import { Download, FileImage, FileCode2, RefreshCw, CheckCircle2, Plus, X, Pencil, Upload, Link, Unlink, Eye, ClipboardCopy, ClipboardPaste, GripVertical, Paintbrush, ArrowDownToLine } from 'lucide-react'
 import type { LogoConfig, LogoLayout, AssetVariant, FaviconConfig, FaviconContent, IconConfig, ShapeType, PaintSaveResult, PaintSession, PaintVector, PaintLayerId, OuterShapeCategory, PaintSaveTargets, OutsideContentSettings, ContentType } from '../types'
 import { FONT_FAMILIES } from '../types'
@@ -45,9 +45,10 @@ import {
 } from './Controls'
 import { IconPicker } from './IconPicker'
 import { PreviewStage } from './PreviewStage'
+import { lazyWithRetry } from '../utils/lazyWithRetry'
 
 /** Paint editor is large — load only when Edit opens. */
-const IconPaintEditor = lazy(() =>
+const IconPaintEditor = lazyWithRetry(() =>
   import('./IconPaintEditor').then((m) => ({ default: m.IconPaintEditor }))
 )
 

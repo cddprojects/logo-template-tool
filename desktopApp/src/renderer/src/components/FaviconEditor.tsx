@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useState, useMemo, lazy, Suspense } from 'react'
+import React, { useRef, useEffect, useCallback, useState, useMemo, Suspense } from 'react'
 import { Download, FileImage, FileCode2, RefreshCw, CheckCircle2, Plus, X, Pencil, Upload, ClipboardCopy, ClipboardPaste, GripVertical, Paintbrush, ArrowDownToLine } from 'lucide-react'
 import type { FaviconConfig, AssetVariant, PaintSaveResult, PaintVector, PaintLayerId, PaintSession, FaviconOuterShape, OuterShapeCategory, PaintSaveTargets, LogoConfig, IconConfig, OutsideContentSettings } from '../types'
 import { FAVICON_SHAPE_OPTIONS, faviconOuterCategory } from '../types'
@@ -8,9 +8,10 @@ import type { ExportNameStyle } from '../utils/exporter'
 import { Section, ColorRow, SliderRow, ToggleRow, SelectRow, FontSelect, WeightSelect, TextRow, TextareaRow, ShapeGrid, NumberInputRow, AiImageGenPanel, RemoveBgButton, OuterCategoryTabs, ExportNameStyleToggle, ImageRecolorControls } from './Controls'
 import { IconPicker } from './IconPicker'
 import { PreviewStage } from './PreviewStage'
+import { lazyWithRetry } from '../utils/lazyWithRetry'
 
 /** Paint editor is large — load only when Edit opens. */
-const IconPaintEditor = lazy(() =>
+const IconPaintEditor = lazyWithRetry(() =>
   import('./IconPaintEditor').then((m) => ({ default: m.IconPaintEditor }))
 )
 import { hasMultipleColors } from '../utils/iconUtils'

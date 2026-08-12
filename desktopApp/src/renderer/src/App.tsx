@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef, Component, Suspense, lazy } from 'react'
+import React, { useState, useEffect, useCallback, useRef, Component, Suspense } from 'react'
 import { ImageIcon, Smile, Pencil, LayoutGrid, Settings, AlertTriangle, RefreshCw, Undo2, Redo2, FolderDown, X, History, Download } from './components/Icons'
 import { TitleBar } from './components/TitleBar'
 import { Sidebar } from './components/Sidebar'
@@ -10,10 +10,11 @@ import { useVersions } from './hooks/useVersions'
 import type { Version, AssetVariant, LogoConfig, FaviconConfig } from './types'
 import { initFontLoading } from './utils/fontLoader'
 import { isIgTemplateFile } from './utils/templateFile'
+import { isBrowserWebBuild, lazyWithRetry } from './utils/lazyWithRetry'
 
 // Lazy-load the heavy editors so they don't block the initial paint.
-const LogoEditor = lazy(() => import('./components/LogoEditor').then((m) => ({ default: m.LogoEditor })))
-const FaviconEditor = lazy(() => import('./components/FaviconEditor').then((m) => ({ default: m.FaviconEditor })))
+const LogoEditor = lazyWithRetry(() => import('./components/LogoEditor').then((m) => ({ default: m.LogoEditor })))
+const FaviconEditor = lazyWithRetry(() => import('./components/FaviconEditor').then((m) => ({ default: m.FaviconEditor })))
 
 type Tab = 'logo' | 'favicon'
 
@@ -38,18 +39,39 @@ class EditorErrorBoundary extends Component<{ children: React.ReactNode; onReset
   static getDerivedStateFromError(e: Error): EBState { return { error: e } }
   render() {
     if (this.state.error) {
+      const chunkStale =
+        isBrowserWebBuild() &&
+        /Failed to fetch dynamically imported module|Importing a module script failed|Loading chunk [\d]+ failed/i.test(
+          this.state.error.message
+        )
       return (
         <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
           <AlertTriangle size={32} className="text-yellow-400" />
           <div>
-            <p className="text-sm font-semibold text-text mb-1">Rendering error</p>
-            <p className="text-xs text-muted font-mono bg-surface3 rounded px-3 py-2 max-w-md break-all">
+            <p className="text-sm font-semibold text-text mb-1">
+              {chunkStale ? 'App update available' : 'Rendering error'}
+            </p>
+            <p className="text-xs text-muted max-w-md">
+              {chunkStale
+                ? 'A new version was deployed. Refresh the page to load the latest files.'
+                : null}
+            </p>
+            <p className="text-xs text-muted font-mono bg-surface3 rounded px-3 py-2 max-w-md break-all mt-2">
               {this.state.error.message}
             </p>
           </div>
-          <button onClick={() => { this.setState({ error: null }); this.props.onReset() }}
-            className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium bg-accent text-white hover:bg-accent-hover">
-            <RefreshCw size={12} /> Retry
+          <button
+            onClick={() => {
+              if (chunkStale) {
+                window.location.reload()
+                return
+              }
+              this.setState({ error: null })
+              this.props.onReset()
+            }}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium bg-accent text-white hover:bg-accent-hover"
+          >
+            <RefreshCw size={12} /> {chunkStale ? 'Refresh page' : 'Retry'}
           </button>
         </div>
       )
