@@ -14,7 +14,8 @@ declare global {
         filename: string
       ) => Promise<{ success: boolean; filePath?: string; error?: string }>
       loadVersions: () => Promise<unknown[]>
-      saveVersions: (data: unknown[]) => Promise<{ success: boolean; error?: string }>
+      loadUndoHistory: () => Promise<unknown>
+      saveVersions: (data: unknown[], history?: unknown) => Promise<{ success: boolean; error?: string }>
       fetchGoogleFont: (familyName: string, customCssUrl?: string) => Promise<{
         ok: boolean
         entries?: { url: string; weight: string; style: string }[]

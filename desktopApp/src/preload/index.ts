@@ -17,8 +17,11 @@ const api = {
   loadVersions: (): Promise<unknown[]> =>
     ipcRenderer.invoke('load-versions'),
 
-  saveVersions: (data: unknown[]): Promise<{ success: boolean; error?: string }> =>
-    ipcRenderer.invoke('save-versions', data),
+  loadUndoHistory: (): Promise<unknown> =>
+    ipcRenderer.invoke('load-undo-history'),
+
+  saveVersions: (data: unknown[], history?: unknown): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('save-versions', data, history),
 
   fetchGoogleFont: (
     familyName: string,

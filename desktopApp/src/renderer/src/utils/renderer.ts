@@ -7,7 +7,8 @@ import {
   sessionUsesLayeredPaint,
   shouldSkipLiveLettersForPaintSession
 } from './paintDecorations'
-import { innerContentDecorFromFavicon, innerContentDecorFromIcon } from './paintSettingsSync'
+import { innerContentDecorFromFavicon, innerContentDecorFromIcon, logoPaintOuterLayout } from './paintSettingsSync'
+import { takeCanvas, releaseCanvas, fitCanvas, reset2dState } from './canvasPool'
 
 // ── Gradient color utilities ──────────────────────────────────────────────────
 
@@ -295,6 +296,60 @@ export function roundedRect(
   ctx.closePath()
 }
 
+/** Clip to a parallel inset of the shape so fill cannot leak past the border. */
+function clipInsetShape(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapeType,
+  x: number,
+  y: number,
+  size: number,
+  radiusFraction: number,
+  inset: number
+): void {
+  const d = Math.max(0, inset)
+  const s = Math.max(1, size - d * 2)
+  buildShapePath(
+    ctx,
+    shape,
+    x + d,
+    y + d,
+    s,
+    parallelRadiusFraction(size, radiusFraction, -d)
+  )
+  ctx.clip()
+}
+
+/**
+ * Inside stroke whose outer edge is the same filled silhouette used for the
+ * drop-shadow. Clip-and-double keeps the stroke from bleeding outside.
+ */
+function strokeInsideBorder(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapeType,
+  x: number,
+  y: number,
+  size: number,
+  radiusFraction: number,
+  borderWidth: number,
+  color: string
+): void {
+  if (borderWidth <= 0 || shape === 'none') return
+  ctx.save()
+  buildShapePath(ctx, shape, x, y, size, radiusFraction)
+  ctx.clip()
+  ctx.strokeStyle = color
+  ctx.lineWidth = borderWidth * 2
+  buildShapePath(ctx, shape, x, y, size, radiusFraction)
+  ctx.stroke()
+  ctx.restore()
+}
+
+/** Punch the fill interior only so shadow stays under the full border + its AA. */
+function shadowPunchInset(size: number, borderWidth: number): number {
+  if (borderWidth > 0) return borderWidth + 1
+  return Math.min(2.5, Math.max(1.5, size * 0.008))
+}
+
 
 // ── Spaced text (letter-spacing) ──────────────────────────────────────────────
 
@@ -404,11 +459,36 @@ function drawTextUnderline(
 
 // ── Icon drawing (handles shape / lucide / svg) ───────────────────────────────
 
+/**
+ * Canvas `shadowBlur` is σ = blur/2 (HTML spec). The visible Gaussian tail is
+ * ~3σ ≈ 1.5×blur; 2× leaves a little AA room without a huge empty ring.
+ */
+export const SHADOW_BLUR_EXTENT = 2
+const SHADOW_PAD_SLACK = 2
+
+export type ShadowSidePads = { padL: number; padR: number; padT: number; padB: number }
+
+/** How far a drop-shadow extends past each edge of its source box. */
+export function outerShadowSidePads(
+  blur: number,
+  spread: number,
+  ox: number,
+  oy: number
+): ShadowSidePads {
+  const ext = Math.max(0, blur) * SHADOW_BLUR_EXTENT + Math.max(0, spread)
+  return {
+    padL: Math.max(0, Math.ceil(ext - ox + SHADOW_PAD_SLACK)),
+    padR: Math.max(0, Math.ceil(ext + ox + SHADOW_PAD_SLACK)),
+    padT: Math.max(0, Math.ceil(ext - oy + SHADOW_PAD_SLACK)),
+    padB: Math.max(0, Math.ceil(ext + oy + SHADOW_PAD_SLACK))
+  }
+}
+
 /** How far an icon outer shadow extends past each edge (render pixels). */
-function iconOuterShadowPad(
+export function iconOuterShadowPad(
   icon: IconConfig,
   size: number
-): { pad: number; blur: number; spread: number; ox: number; oy: number } {
+): ShadowSidePads & { pad: number; blur: number; spread: number; ox: number; oy: number } {
   const dprScale = size / (icon.size || size)
   const blur = (icon.shadowBlur ?? 8) * dprScale
   const spread = (icon.shadowSpread ?? 0) * dprScale
@@ -418,17 +498,12 @@ function iconOuterShadowPad(
     !!icon.shadowEnabled &&
     !!icon.containerEnabled &&
     icon.containerShape !== 'none'
-  if (!has) return { pad: 0, blur, spread, ox, oy }
-  // Gaussian blur visually spreads ~2× the blur radius at the soft fringe.
-  const blurExt = blur * 2
-  const pad = Math.ceil(
-    Math.max(
-      blurExt + spread + Math.abs(ox),
-      blurExt + spread + Math.abs(oy),
-      0
-    )
-  ) + 4
-  return { pad, blur, spread, ox, oy }
+  if (!has) {
+    return { pad: 0, padL: 0, padR: 0, padT: 0, padB: 0, blur, spread, ox, oy }
+  }
+  const sides = outerShadowSidePads(blur, spread, ox, oy)
+  const pad = Math.max(sides.padL, sides.padR, sides.padT, sides.padB)
+  return { ...sides, pad, blur, spread, ox, oy }
 }
 
 export async function drawIcon(
@@ -444,24 +519,33 @@ export async function drawIcon(
 
   // Outer container shadow — always via an isolated padded canvas so hexagon /
   // star / etc. shadows are never clipped by the icon rect or a paint offscreen.
-  const { pad: shadowPad, blur: scaledBlur, spread: iconSpread, ox: iconOx, oy: iconOy } =
+  const {
+    pad: shadowPad,
+    padL: shadowPadL,
+    padR: shadowPadR,
+    padT: shadowPadT,
+    padB: shadowPadB,
+    blur: scaledBlur,
+    spread: iconSpread,
+    ox: iconOx,
+    oy: iconOy
+  } =
     iconOuterShadowPad(icon, size)
   const dprScale = size / (icon.size || size)
 
   if (shadowPad > 0) {
     const cTypeForShadow = icon.containerType ?? 'color'
-    const tmpW = size + shadowPad * 2
-    const tmpH = size + shadowPad * 2
-    const tmp = document.createElement('canvas')
-    tmp.width = tmpW
-    tmp.height = tmpH
+    const tmpW = size + shadowPadL + shadowPadR
+    const tmpH = size + shadowPadT + shadowPadB
+    const tmp = takeCanvas(tmpW, tmpH)
+    try {
     const tCtx = tmp.getContext('2d')!
     tCtx.imageSmoothingEnabled = true
     tCtx.imageSmoothingQuality = 'high'
 
     const HUGE = 10000
-    const srcX = shadowPad - iconSpread - HUGE
-    const srcY = shadowPad - iconSpread - HUGE
+    const srcX = shadowPadL - iconSpread - HUGE
+    const srcY = shadowPadT - iconSpread - HUGE
     const srcS = size + iconSpread * 2
 
     tCtx.shadowColor = firstSolidColor(icon.shadowColor ?? '#00000073')
@@ -473,7 +557,7 @@ export async function drawIcon(
       await drawSvgOnCanvas(tCtx, icon.containerSvgMarkup, srcX, srcY, srcS, srcS)
       tCtx.shadowColor = 'transparent'
       tCtx.globalCompositeOperation = 'destination-out'
-      await drawSvgOnCanvas(tCtx, icon.containerSvgMarkup, shadowPad, shadowPad, size, size)
+      await drawSvgOnCanvas(tCtx, icon.containerSvgMarkup, shadowPadL, shadowPadT, size, size)
       tCtx.globalCompositeOperation = 'source-over'
     } else if (cTypeForShadow === 'image' && icon.containerImageDataUrl) {
       const img = await loadCachedImage(icon.containerImageDataUrl)
@@ -481,30 +565,45 @@ export async function drawIcon(
         tCtx.drawImage(img, srcX, srcY, srcS, srcS)
         tCtx.shadowColor = 'transparent'
         tCtx.globalCompositeOperation = 'destination-out'
-        tCtx.drawImage(img, shadowPad, shadowPad, size, size)
+        tCtx.drawImage(img, shadowPadL, shadowPadT, size, size)
         tCtx.globalCompositeOperation = 'source-over'
       } else {
         tCtx.shadowColor = 'transparent'
       }
     } else {
       const cRadFrac = (icon.containerBorderRadius ?? 0) / (icon.size || 112)
-      drawShape(tCtx, icon.containerShape, srcX, srcY, srcS, '#000', cRadFrac)
-      tCtx.shadowColor = 'transparent'
-      tCtx.globalCompositeOperation = 'destination-out'
-      const punch = Math.min(1.25, Math.max(0.5, size * 0.004))
+      const containerBw = (icon.containerBorderWidth ?? 0) * dprScale
+      const cover = 0.5
+      const srcFrac = parallelRadiusFraction(size, cRadFrac, iconSpread + cover)
       drawShape(
         tCtx,
         icon.containerShape,
-        shadowPad + punch,
-        shadowPad + punch,
+        srcX - cover,
+        srcY - cover,
+        srcS + cover * 2,
+        '#000',
+        srcFrac
+      )
+      tCtx.shadowColor = 'transparent'
+      tCtx.globalCompositeOperation = 'destination-out'
+      const punch = shadowPunchInset(size, containerBw)
+      const punchFrac = parallelRadiusFraction(size, cRadFrac, -punch)
+      drawShape(
+        tCtx,
+        icon.containerShape,
+        shadowPadL + punch,
+        shadowPadT + punch,
         Math.max(1, size - punch * 2),
         '#000',
-        cRadFrac
+        punchFrac
       )
       tCtx.globalCompositeOperation = 'source-over'
     }
 
-    ctx.drawImage(tmp, x - shadowPad, y - shadowPad)
+    ctx.drawImage(tmp, x - shadowPadL, y - shadowPadT)
+    } finally {
+      releaseCanvas(tmp)
+    }
   } else if (icon.shadowEnabled) {
     // Container disabled — apply shadow to whatever content is drawn next
     ctx.shadowColor = firstSolidColor(icon.shadowColor ?? '#00000073')
@@ -525,39 +624,35 @@ export async function drawIcon(
     const cType = icon.containerType ?? 'color'
     const cRadFrac = (icon.containerBorderRadius ?? 0) / (icon.size || 112)
     _borderCRadFrac = cRadFrac
+    _borderWidth = (icon.containerBorderWidth ?? 0) * dprScale
+    _borderColor = icon.containerBorderColor ?? 'transparent'
+    _borderSvgPath = icon.containerSvgBorderPath
+    // Keep 1px of fill under the stroke so fill and border meet; never reach the
+    // outer edge or the fill's AA shows as a halo between border and shadow.
+    const fillInset = _borderWidth > 0 ? Math.max(0, _borderWidth - 1) : 0
 
     if (cType === 'image' && icon.containerImageDataUrl) {
-      // Clip to container shape then draw image scaled to fill it
       ctx.save()
-      ctx.beginPath()
-      buildShapePath(ctx, icon.containerShape, x, y, size, cRadFrac)
-      ctx.clip()
+      clipInsetShape(ctx, icon.containerShape, x, y, size, cRadFrac, fillInset)
       const img = await loadCachedImage(icon.containerImageDataUrl)
       if (img) ctx.drawImage(img, x, y, size, size)
       ctx.restore()
     } else if (cType === 'svg' && icon.containerSvgMarkup) {
-      // Clip to container shape then rasterise the SVG into it
       ctx.save()
-      ctx.beginPath()
-      buildShapePath(ctx, icon.containerShape, x, y, size, cRadFrac)
-      ctx.clip()
+      clipInsetShape(ctx, icon.containerShape, x, y, size, cRadFrac, fillInset)
       await drawSvgOnCanvas(ctx, icon.containerSvgMarkup, x, y, size, size)
       ctx.restore()
     } else if (cType === 'color') {
-      // Solid colour fill — only when explicitly using color type, NOT as a
-      // fallback for image/svg containers whose data hasn't been set yet.
-      // (An image/svg container with empty data should be transparent, matching
-      //  the favicon renderer which also draws nothing in that case.)
-      drawShape(ctx, icon.containerShape, x, y, size, resolveCanvasColor(ctx, icon.containerColor, x, y, size, size), cRadFrac)
+      ctx.save()
+      if (fillInset > 0) {
+        clipInsetShape(ctx, icon.containerShape, x, y, size, cRadFrac, fillInset)
+        ctx.fillStyle = resolveCanvasColor(ctx, icon.containerColor, x, y, size, size)
+        ctx.fill()
+      } else {
+        drawShape(ctx, icon.containerShape, x, y, size, resolveCanvasColor(ctx, icon.containerColor, x, y, size, size), cRadFrac)
+      }
+      ctx.restore()
     }
-    // cType === 'image' with no URL, or 'svg' with no markup → draw nothing (transparent)
-
-    // Capture border params — drawn after content (see bottom of function).
-    // Scale by dprScale so the border proportion matches at any render DPR,
-    // consistent with how shadow blur/spread/offsets and content border are scaled.
-    _borderWidth = (icon.containerBorderWidth ?? 0) * dprScale
-    _borderColor = icon.containerBorderColor ?? 'transparent'
-    _borderSvgPath = icon.containerSvgBorderPath
 
     // Reset shadow so content doesn't double-shadow
     ctx.shadowColor = 'transparent'
@@ -567,7 +662,16 @@ export async function drawIcon(
 
     // Outer paint under Inner content (layered / overlay-only sessions).
     if (sessionUsesLayeredPaint(icon.paintSession)) {
-      await applyPaintLayerDecorations(ctx, icon.paintSession, x, y, size, 'container')
+      await applyPaintLayerDecorations(
+        ctx,
+        icon.paintSession,
+        x,
+        y,
+        size,
+        'container',
+        undefined,
+        logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size
+      )
     }
   }
 
@@ -588,9 +692,8 @@ export async function drawIcon(
   //  • ctx.filter='drop-shadow(...)' is used for content shadows so it follows the
   //    actual per-pixel alpha channel (unlike ctx.shadow* + drawImage(canvas)).
   const SUPER = superSample
-  const contentCanvas = document.createElement('canvas')
-  contentCanvas.width  = size * SUPER
-  contentCanvas.height = size * SUPER
+  const contentCanvas = takeCanvas(size * SUPER, size * SUPER)
+  try {
   const cCtx = contentCanvas.getContext('2d')!
   cCtx.imageSmoothingEnabled = true
   cCtx.imageSmoothingQuality = 'high'
@@ -763,9 +866,10 @@ export async function drawIcon(
       const fSpread = cSpread * SUPER
       const pad = Math.ceil(fBlur * 2 + Math.max(cW, cH) + Math.abs(fOx) + Math.abs(fOy) + 4)
 
-      const frameCanvas = document.createElement('canvas')
-      frameCanvas.width  = cW + pad * 2
-      frameCanvas.height = cH + pad * 2
+      const frameCanvas = takeCanvas(cW + pad * 2, cH + pad * 2)
+      const shadowCanvas = takeCanvas(cW, cH)
+      const insetCanvas = takeCanvas(cW, cH)
+      try {
       const fCtx = frameCanvas.getContext('2d')!
       fCtx.fillStyle = '#000000'
       fCtx.fillRect(0, 0, frameCanvas.width, frameCanvas.height)
@@ -780,9 +884,6 @@ export async function drawIcon(
       fCtx.globalCompositeOperation = 'source-over'
 
       // Shadow-only (frame is off-screen; only coloured drop-shadow remains)
-      const shadowCanvas = document.createElement('canvas')
-      shadowCanvas.width = cW
-      shadowCanvas.height = cH
       const sCtx = shadowCanvas.getContext('2d')!
       sCtx.imageSmoothingEnabled = true
       sCtx.imageSmoothingQuality = 'high'
@@ -794,23 +895,24 @@ export async function drawIcon(
       sCtx.globalCompositeOperation = 'source-over'
 
       // Content first, then shadow overlay
-      const insetCanvas = document.createElement('canvas')
-      insetCanvas.width = cW
-      insetCanvas.height = cH
       const iCtx = insetCanvas.getContext('2d')!
       iCtx.drawImage(contentCanvas, 0, 0)
       iCtx.drawImage(shadowCanvas, 0, 0)
 
       ctx.drawImage(insetCanvas, x, y, size, size)
+      } finally {
+        releaseCanvas(frameCanvas)
+        releaseCanvas(shadowCanvas)
+        releaseCanvas(insetCanvas)
+      }
     } else if (cSpread > 0) {
       // Spread: draw a scaled-up version of the content far off-screen so only
       // its CSS drop-shadow lands at the correct position, then draw the
       // original (non-inflated) content cleanly on top.
       const HUGE = 10000
       const spreadSize = size + cSpread * 2
-      const spreadCanvas = document.createElement('canvas')
-      spreadCanvas.width  = spreadSize * SUPER
-      spreadCanvas.height = spreadSize * SUPER
+      const spreadCanvas = takeCanvas(spreadSize * SUPER, spreadSize * SUPER)
+      try {
       const sCtx = spreadCanvas.getContext('2d')!
       sCtx.imageSmoothingEnabled = true
       sCtx.imageSmoothingQuality = 'high'
@@ -820,6 +922,9 @@ export async function drawIcon(
       ctx.drawImage(spreadCanvas, x - cSpread - HUGE, y - cSpread - HUGE, spreadSize, spreadSize)
       ctx.filter = 'none'
       ctx.drawImage(contentCanvas, x, y, size, size)   // clean content on top
+      } finally {
+        releaseCanvas(spreadCanvas)
+      }
     } else {
       // No spread: CSS drop-shadow filter — per-pixel, follows actual alpha.
       ctx.filter = `drop-shadow(${csx}px ${csy}px ${csb}px ${csc})`
@@ -832,6 +937,9 @@ export async function drawIcon(
 
   if (clipContent) {
     ctx.restore()
+  }
+  } finally {
+    releaseCanvas(contentCanvas)
   }
 
   // Draw container border AFTER content — matches favicon layer order (border on top).
@@ -854,14 +962,16 @@ export async function drawIcon(
       ctx.stroke(path2d)
       ctx.restore()
     } else {
-      ctx.save()
-      buildShapePath(ctx, icon.containerShape, x, y, size, _borderCRadFrac)
-      ctx.clip()
-      ctx.strokeStyle = _borderColor === 'transparent' ? '#000000' : _borderColor
-      ctx.lineWidth = _borderWidth * 2
-      buildShapePath(ctx, icon.containerShape, x, y, size, _borderCRadFrac)
-      ctx.stroke()
-      ctx.restore()
+      strokeInsideBorder(
+        ctx,
+        icon.containerShape,
+        x,
+        y,
+        size,
+        _borderCRadFrac,
+        _borderWidth,
+        _borderColor === 'transparent' ? '#000000' : _borderColor
+      )
     }
   }
 
@@ -874,11 +984,19 @@ export async function drawIcon(
       y,
       size,
       'content',
-      innerContentDecorFromIcon(icon)
+      innerContentDecorFromIcon(icon),
+      logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size
     )
   } else if (icon.paintSession) {
     // Legacy single-plane decorations on top of Outer + Inner.
-    await applyPaintDecorations(ctx, icon.paintSession, x, y, size)
+    await applyPaintDecorations(
+      ctx,
+      icon.paintSession,
+      x,
+      y,
+      size,
+      logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size
+    )
   }
 }
 
@@ -1089,36 +1207,31 @@ export async function renderLogo(
     ? primaryEmH + titleSubtitleGapPx + secondaryEmH
     : primaryEmH
 
-  // drawIcon paints outer shadow on a *uniform* padded layer around the icon
-  // box. Canvas margins must match that pad on every side — directional
-  // (offset-only) pads under-allocate the opposite side and clip hexagon/etc.
-  // shadows when offset X/Y pushes the fringe the other way.
-  const hasShadow =
+  // Extra canvas margin = max(user padding, how far shadows stick out of the
+  // icon+text content box). Synced favicons already include their shadow inside
+  // the icon square, so they do not add logo-level shadow margin.
+  const userPad = padding * dpr
+  const hasIconShadow =
+    !faviconIconSource &&
     icon.visible &&
     icon.shadowEnabled &&
     icon.containerEnabled &&
     icon.containerShape !== 'none'
-  let iconShadowPadL = 0, iconShadowPadR = 0, iconShadowPadT = 0, iconShadowPadB = 0
-  if (hasShadow) {
-    const { pad: uniformPad } = iconOuterShadowPad(icon, iconSize)
-    iconShadowPadL = uniformPad
-    iconShadowPadR = uniformPad
-    iconShadowPadT = uniformPad
-    iconShadowPadB = uniformPad
-  }
+  const iconShadow = hasIconShadow
+    ? iconOuterShadowPad(icon, iconSize)
+    : { padL: 0, padR: 0, padT: 0, padB: 0 }
 
-  // Text-shadow padding: expand the canvas so the text drop-shadow isn't clipped.
-  // Folded into the per-side pads (max) so it works for either text placement.
+  let textPadL = 0, textPadR = 0, textPadT = 0, textPadB = 0
   if (config.textShadowEnabled && (text || secondaryText)) {
     const b   = (config.textShadowBlur    ?? 0) * dpr
     const s   = (config.textShadowSpread  ?? 0) * dpr
     const tOx = (config.textShadowOffsetX ?? 0) * dpr
     const tOy = (config.textShadowOffsetY ?? 0) * dpr
-    const ext = b * 1.5 + s
-    iconShadowPadL = Math.max(iconShadowPadL, Math.ceil(Math.max(0, ext - tOx)) + 2)
-    iconShadowPadR = Math.max(iconShadowPadR, Math.ceil(Math.max(0, ext + tOx)) + 2)
-    iconShadowPadT = Math.max(iconShadowPadT, Math.ceil(Math.max(0, ext - tOy)) + 2)
-    iconShadowPadB = Math.max(iconShadowPadB, Math.ceil(Math.max(0, ext + tOy)) + 2)
+    const tp = outerShadowSidePads(b, s, tOx, tOy)
+    textPadL = tp.padL
+    textPadR = tp.padR
+    textPadT = tp.padT
+    textPadB = tp.padB
   }
 
   // ── Layout-dependent canvas sizing and element positions ──────────────────
@@ -1126,47 +1239,85 @@ export async function renderLogo(
   const hasText = !!(text || secondaryText)
   const gapPx  = icon.visible && hasText ? gap * dpr : 0
 
-  let totalW: number, totalH: number
-  let iconX: number, iconY: number
-  let textX: number, textCenterY: number
+  let contentW: number
+  let contentH: number
+  let iconInX = 0
+  let iconInY = 0
+  let textInX = 0
+  let textInY = 0
   let textAlign: CanvasTextAlign = 'left'
 
   if (layout === 'icon-top') {
-    // Vertical: icon centered above, text centered below
-    const contentW = Math.max(iconSize, textBlockW)
-    totalW = Math.ceil(padding * 2 * dpr + contentW + iconShadowPadL + iconShadowPadR)
-    totalH = Math.ceil(padding * 2 * dpr + iconSize + gapPx + textBlockH + iconShadowPadT + iconShadowPadB)
-    const ox = padding * dpr + iconShadowPadL
-    const oy = padding * dpr + iconShadowPadT
-    iconX  = ox + (contentW - iconSize) / 2
-    iconY  = oy
-    textX  = ox + contentW / 2
-    textAlign    = 'center'
-    textCenterY  = oy + iconSize + gapPx + textBlockH / 2
+    contentW = Math.max(iconSize, textBlockW)
+    contentH = iconSize + gapPx + textBlockH
+    iconInX = (contentW - iconSize) / 2
+    iconInY = 0
+    textInX = (contentW - textBlockW) / 2
+    textInY = iconSize + gapPx
+    textAlign = 'center'
+  } else if (layout === 'icon-right' && icon.visible && hasText) {
+    contentW = textBlockW + gapPx + iconSize
+    contentH = Math.max(iconSize, textBlockH)
+    textInX = 0
+    textInY = (contentH - textBlockH) / 2
+    iconInX = textBlockW + gapPx
+    iconInY = (contentH - iconSize) / 2
   } else {
-    // Horizontal: icon-left (default) or icon-right
-    const contentH = Math.max(iconSize, textBlockH)
-    totalW = Math.ceil(
-      padding * 2 * dpr + iconSize + gapPx + textBlockW + iconShadowPadL + iconShadowPadR
-    )
-    totalH = Math.ceil(padding * 2 * dpr + contentH + iconShadowPadT + iconShadowPadB)
-    const ox = padding * dpr + iconShadowPadL
-    const oy = padding * dpr + iconShadowPadT
-    if (layout === 'icon-right' && icon.visible && hasText) {
-      // Text left, icon right
-      textX  = ox
-      iconX  = ox + textBlockW + gapPx
-    } else {
-      // Icon left, text right (default)
-      iconX  = ox
-      textX  = ox + iconSize + gapPx
-    }
-    iconY       = oy + (contentH - iconSize) / 2
-    textCenterY = oy + contentH / 2
+    contentW = iconSize + gapPx + textBlockW
+    contentH = Math.max(iconSize, textBlockH)
+    iconInX = 0
+    iconInY = (contentH - iconSize) / 2
+    textInX = iconSize + gapPx
+    textInY = (contentH - textBlockH) / 2
   }
 
-  canvas.width  = totalW
-  canvas.height = totalH
+  const overflowPast = (
+    x: number, y: number, w: number, h: number,
+    pl: number, pr: number, pt: number, pb: number
+  ) => ({
+    l: Math.max(0, pl - x),
+    r: Math.max(0, pr - (contentW - x - w)),
+    t: Math.max(0, pt - y),
+    b: Math.max(0, pb - (contentH - y - h))
+  })
+  let ovL = 0, ovR = 0, ovT = 0, ovB = 0
+  if (icon.visible && iconSize > 0) {
+    const o = overflowPast(
+      iconInX, iconInY, iconSize, iconSize,
+      iconShadow.padL, iconShadow.padR, iconShadow.padT, iconShadow.padB
+    )
+    ovL = Math.max(ovL, o.l)
+    ovR = Math.max(ovR, o.r)
+    ovT = Math.max(ovT, o.t)
+    ovB = Math.max(ovB, o.b)
+  }
+  if (hasText && textBlockW > 0) {
+    const o = overflowPast(
+      textInX, textInY, textBlockW, textBlockH,
+      textPadL, textPadR, textPadT, textPadB
+    )
+    ovL = Math.max(ovL, o.l)
+    ovR = Math.max(ovR, o.r)
+    ovT = Math.max(ovT, o.t)
+    ovB = Math.max(ovB, o.b)
+  }
+
+  const marginL = Math.max(userPad, ovL)
+  const marginR = Math.max(userPad, ovR)
+  const marginT = Math.max(userPad, ovT)
+  const marginB = Math.max(userPad, ovB)
+
+  const totalW = Math.ceil(contentW + marginL + marginR)
+  const totalH = Math.ceil(contentH + marginT + marginB)
+  const iconX = marginL + iconInX
+  const iconY = marginT + iconInY
+  const textX = layout === 'icon-top'
+    ? marginL + contentW / 2
+    : marginL + textInX
+  const textCenterY = marginT + textInY + textBlockH / 2
+
+  fitCanvas(canvas, totalW, totalH)
+  reset2dState(ctx)
 
   if (config.transparentBg) {
     ctx.clearRect(0, 0, totalW, totalH)
@@ -1224,9 +1375,8 @@ export async function renderLogo(
   // use the native canvas shadow directly while filling.
   if (tShadow && tSpread > 0) {
     const HUGE = 10000
-    const shadowCanvas = document.createElement('canvas')
-    shadowCanvas.width = totalW
-    shadowCanvas.height = totalH
+    const shadowCanvas = takeCanvas(totalW, totalH)
+    try {
     const sc = shadowCanvas.getContext('2d')!
     sc.textAlign = textAlign
     sc.textBaseline = 'alphabetic'
@@ -1244,6 +1394,9 @@ export async function renderLogo(
     ctx.filter = `drop-shadow(${tOx + HUGE}px ${tOy + HUGE}px ${tBlur}px ${tColor})`
     ctx.drawImage(shadowCanvas, -HUGE, -HUGE)
     ctx.restore()
+    } finally {
+      releaseCanvas(shadowCanvas)
+    }
   } else if (tShadow) {
     ctx.shadowColor   = tColor
     ctx.shadowBlur    = tBlur
@@ -1303,25 +1456,16 @@ function clipSimpleShape(
 }
 
 /**
- * Corner-radius fraction for the *outer* edge of a favicon shape that uses a
- * centered border stroke (square / rounded). Fill+stroke are drawn on a path
- * inset by borderWidth/2 with radius based on the inset size, so the outer
- * parallel curve has radius ≈ insetRadius + borderWidth/2. The shadow
- * silhouette must use that outer radius or a gap appears between a light
- * border and a light shadow at the curves.
+ * Corner-radius fraction after growing (positive) or shrinking (negative) a
+ * rounded rect by `delta` px on each side, following a parallel curve.
+ * Uniformly scaling the box keeps radius/size and opens a hairline at corners
+ * between a same-colour border and shadow.
  */
-function faviconOuterEdgeRadiusFraction(config: FaviconConfig, size: number): number {
-  const frac = Math.min(0.5, Math.max(0, (config.borderRadius ?? 0) / 256))
-  const bw = Math.max(0, config.borderWidth ?? 0)
-  if (
-    bw <= 0 ||
-    size <= 0 ||
-    (config.outerShape !== 'square' && config.outerShape !== 'rounded')
-  ) {
-    return frac
-  }
-  const insetR = Math.max(0, size - bw) * frac
-  return Math.min(0.5, (insetR + bw / 2) / size)
+function parallelRadiusFraction(size: number, radiusFraction: number, delta: number): number {
+  const newSize = Math.max(1, size + delta * 2)
+  const r = Math.min(0.5, Math.max(0, radiusFraction)) * Math.max(0, size)
+  const r2 = Math.max(0, r + delta)
+  return Math.min(0.5, r2 / newSize)
 }
 
 /**
@@ -1350,7 +1494,7 @@ async function renderFaviconOuterShapeOnly(
     await drawSvgOnCanvas(ctx, coloredSvg, 0, 0, size, size)
   } else {
     // Match the outer edge of fill + centered border (not the fill-only radius).
-    const radFrac = faviconOuterEdgeRadiusFraction(config, size)
+    const radFrac = (config.borderRadius ?? 0) / 256
     drawShape(ctx, config.outerShape as ShapeType, 0, 0, size, solidColor, radFrac)
   }
 }
@@ -1379,9 +1523,21 @@ async function renderFaviconInnerAt(
   // Linked Paint text is composited via decorationsPng — skip live letters.
   const skipLiveLetters = shouldSkipLiveLettersForPaintSession(config.paintSession)
   const layeredPaint = sessionUsesLayeredPaint(config.paintSession)
+  const paintShapeFallback = config.paintSession
+    ? faviconInnerDrawSize(config, config.paintSession.resolution || 512)
+    : undefined
   const paintOuterLayer = async () => {
     if (layeredPaint) {
-      await applyPaintLayerDecorations(ctx, config.paintSession, 0, 0, size, 'container')
+      await applyPaintLayerDecorations(
+        ctx,
+        config.paintSession,
+        0,
+        0,
+        size,
+        'container',
+        undefined,
+        paintShapeFallback
+      )
     }
   }
   const paintInnerLayer = async () => {
@@ -1393,7 +1549,8 @@ async function renderFaviconInnerAt(
         0,
         size,
         'content',
-        innerContentDecorFromFavicon(config.content)
+        innerContentDecorFromFavicon(config.content),
+        paintShapeFallback
       )
     }
   }
@@ -1512,21 +1669,29 @@ async function renderFaviconInnerAt(
       config.outerShape === 'circle' ||
       config.outerShape === 'square' ||
       config.outerShape === 'rounded'
+    const fillInset = bw > 0 ? Math.max(0, bw - 1) : 0
 
-    // Build clip path inset by half the border so the fill + content stay inside
-    // the visible edge of the border stroke.
+    if (!config.transparentBg) {
+      ctx.save()
+      if (fillInset > 0) {
+        clipInsetShape(ctx, config.outerShape as ShapeType, 0, 0, size, fRadFrac, fillInset)
+      } else if (isSimple) {
+        clipSimpleShape(ctx, config.outerShape, size, 0, fRadFrac)
+      } else {
+        buildShapePath(ctx, config.outerShape as ShapeType, 0, 0, size, fRadFrac)
+        ctx.clip()
+      }
+      ctx.fillStyle = resolveCanvasColor(ctx, config.backgroundColor, 0, 0, size, size)
+      ctx.fill()
+      ctx.restore()
+    }
+
     ctx.save()
     if (isSimple) {
       clipSimpleShape(ctx, config.outerShape, size, bw, fRadFrac)
     } else {
-      // hexagon / star: shrink the bounding box uniformly by halfBorder so that
-      // when the full-size border is stroked later the fill region sits inside it.
       buildShapePath(ctx, config.outerShape as ShapeType, halfBorder, halfBorder, size - bw, fRadFrac)
-    }
-    ctx.clip()
-    if (!config.transparentBg) {
-      ctx.fillStyle = resolveCanvasColor(ctx, config.backgroundColor, 0, 0, size, size)
-      ctx.fill()
+      ctx.clip()
     }
     await paintOuterLayer()
     await drawFaviconContent(ctx, config.content, 0, 0, size, size / 2, skipLiveLetters)
@@ -1534,24 +1699,16 @@ async function renderFaviconInnerAt(
     ctx.restore()
 
     if (bw > 0) {
-      ctx.save()
-      if (isSimple) {
-        // clipSimpleShape already insets by borderWidth/2; stroke at full lineWidth
-        clipSimpleShape(ctx, config.outerShape, size, bw, fRadFrac)
-        ctx.strokeStyle = config.borderColor === 'transparent' ? '#000000' : config.borderColor
-        ctx.lineWidth = bw
-        ctx.stroke()
-      } else {
-        // clip-and-double: clip to the shape then use lineWidth×2 so only the
-        // inner half is visible — the full border width shows, none bleeds outside.
-        buildShapePath(ctx, config.outerShape as ShapeType, 0, 0, size, fRadFrac)
-        ctx.clip()
-        ctx.strokeStyle = config.borderColor === 'transparent' ? '#000000' : config.borderColor
-        ctx.lineWidth = bw * 2
-        buildShapePath(ctx, config.outerShape as ShapeType, 0, 0, size, fRadFrac)
-        ctx.stroke()
-      }
-      ctx.restore()
+      strokeInsideBorder(
+        ctx,
+        config.outerShape as ShapeType,
+        0,
+        0,
+        size,
+        fRadFrac,
+        bw,
+        config.borderColor === 'transparent' ? '#000000' : config.borderColor
+      )
     }
   }
 }
@@ -1670,12 +1827,8 @@ function faviconOuterShadowPad(config: FaviconConfig, canvasSize: number): numbe
   const sBlur = (config.shadowBlur ?? 12) * shadowScale
   const sOx = (config.shadowOffsetX ?? 0) * shadowScale
   const sOy = (config.shadowOffsetY ?? 4) * shadowScale
-  const blurExtent = sBlur * 1.5
-  const padL = Math.max(0, spread + blurExtent - sOx)
-  const padR = Math.max(0, spread + blurExtent + sOx)
-  const padT = Math.max(0, spread + blurExtent - sOy)
-  const padB = Math.max(0, spread + blurExtent + sOy)
-  return Math.ceil(Math.max(padL, padR, padT, padB)) + 2
+  const sides = outerShadowSidePads(sBlur, spread, sOx, sOy)
+  return Math.max(sides.padL, sides.padR, sides.padT, sides.padB)
 }
 
 /** Inner drawable size for favicon content (matches renderFavicon outer-shadow inset). */
@@ -1738,11 +1891,9 @@ export async function renderFavicon(canvas: HTMLCanvasElement, config: FaviconCo
   const sOx    = (config.shadowOffsetX ?? 0)  * shadowScale
   const sOy    = (config.shadowOffsetY ?? 4)  * shadowScale
 
-  canvas.width  = size
-  canvas.height = size
+  fitCanvas(canvas, size, size)
   const ctx = canvas.getContext('2d')!
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
+  reset2dState(ctx)
   ctx.clearRect(0, 0, size, size)
 
   let decorX = 0
@@ -1753,9 +1904,8 @@ export async function renderFavicon(canvas: HTMLCanvasElement, config: FaviconCo
     // ── INSET shadow ──────────────────────────────────────────────────────────
     // Canvas stays full-size. Favicon is drawn at full size, then the inset
     // shadow overlay is composited on top clipped to the shape interior.
-    const offscreen = document.createElement('canvas')
-    offscreen.width  = size
-    offscreen.height = size
+    const offscreen = takeCanvas(size, size)
+    try {
     const offCtxInset = offscreen.getContext('2d')!
     offCtxInset.imageSmoothingEnabled = true
     offCtxInset.imageSmoothingQuality = 'high'
@@ -1764,6 +1914,9 @@ export async function renderFavicon(canvas: HTMLCanvasElement, config: FaviconCo
 
     if (drawOuterShadow) {
       await applyFaviconInsetShadow(ctx, config, 0, 0, size, shadowScale)
+    }
+    } finally {
+      releaseCanvas(offscreen)
     }
   } else {
     // ── OUTER shadow ─────────────────────────────────────────────────────────
@@ -1780,9 +1933,8 @@ export async function renderFavicon(canvas: HTMLCanvasElement, config: FaviconCo
     decorSize = innerSize
 
     // Render favicon at innerSize into an offscreen canvas
-    const offscreen = document.createElement('canvas')
-    offscreen.width  = innerSize
-    offscreen.height = innerSize
+    const offscreen = takeCanvas(innerSize, innerSize)
+    try {
     const offCtxOuter = offscreen.getContext('2d')!
     offCtxOuter.imageSmoothingEnabled = true
     offCtxOuter.imageSmoothingQuality = 'high'
@@ -1791,9 +1943,17 @@ export async function renderFavicon(canvas: HTMLCanvasElement, config: FaviconCo
     if (drawOuterShadow) {
       // Shadow source: outer shape silhouette only (no inner content) so the
       // shadow behaves like CSS box-shadow, not a duplicate of the whole favicon.
-      const shadowSrc = document.createElement('canvas')
-      shadowSrc.width  = innerSize
-      shadowSrc.height = innerSize
+      const shadowSrc = takeCanvas(innerSize, innerSize)
+      const HUGE = 10000
+      const shadowColor = firstSolidColor(config.shadowColor ?? '#00000073')
+      const shadowLayer = takeCanvas(size, size)
+      const outerFrac = (config.borderRadius ?? 0) / 256
+      const cover = 0.5
+      const glow = spread + cover
+      const glowSize = innerSize + glow * 2
+      const glowFrac = parallelRadiusFraction(innerSize, outerFrac, glow)
+      const glowSrc = takeCanvas(glowSize, glowSize)
+      try {
       const shadowSrcCtx = shadowSrc.getContext('2d')!
       shadowSrcCtx.imageSmoothingEnabled = true
       shadowSrcCtx.imageSmoothingQuality = 'high'
@@ -1803,48 +1963,79 @@ export async function renderFavicon(canvas: HTMLCanvasElement, config: FaviconCo
       // badge). Canvas ctx.shadow* on drawImage(canvas) often shadows the
       // bounding box instead — which looks wrong for irregular outer shapes.
       // Off-canvas + HUGE offset keeps only the coloured shadow visible.
-      const HUGE = 10000
-      const shadowColor = firstSolidColor(config.shadowColor ?? '#00000073')
-      const shadowLayer = document.createElement('canvas')
-      shadowLayer.width = size
-      shadowLayer.height = size
       const sCtx = shadowLayer.getContext('2d')!
       sCtx.imageSmoothingEnabled = true
       sCtx.imageSmoothingQuality = 'high'
       sCtx.filter = `drop-shadow(${sOx + HUGE}px ${sOy + HUGE}px ${sBlur}px ${shadowColor})`
-      sCtx.drawImage(
-        shadowSrc,
-        innerX - spread - HUGE,
-        innerY - spread - HUGE,
-        innerSize + spread * 2,
-        innerSize + spread * 2
-      )
+      const gCtx = glowSrc.getContext('2d')!
+      gCtx.fillStyle = '#000000'
+      if (
+        fillOuterShapeSilhouette(
+          gCtx,
+          config.outerShape,
+          0,
+          0,
+          glowSize,
+          glowFrac
+        )
+      ) {
+        sCtx.drawImage(glowSrc, innerX - glow - HUGE, innerY - glow - HUGE)
+      } else {
+        sCtx.drawImage(shadowSrc, innerX - HUGE, innerY - HUGE)
+      }
       sCtx.filter = 'none'
 
-      // Erase shadow from INSIDE the favicon shape so it sits behind, not on top.
-      // Shrink the punch slightly so the shadow tucks under the border's AA edge —
-      // prevents a hairline gap between a light border and a light shadow.
-      const punchInset = Math.min(1.25 * shadowScale, Math.max(0.5, innerSize * 0.004))
+      const bw = config.borderWidth ?? 0
+      const punchInset = shadowPunchInset(innerSize, bw)
+      const punchSize = Math.max(1, innerSize - punchInset * 2)
+      const punchFrac = parallelRadiusFraction(innerSize, outerFrac, -punchInset)
       sCtx.globalCompositeOperation = 'destination-out'
-      sCtx.drawImage(
-        shadowSrc,
-        innerX + punchInset,
-        innerY + punchInset,
-        Math.max(1, innerSize - punchInset * 2),
-        Math.max(1, innerSize - punchInset * 2)
-      )
+      sCtx.fillStyle = '#000000'
+      if (
+        !fillOuterShapeSilhouette(
+          sCtx,
+          config.outerShape,
+          innerX + punchInset,
+          innerY + punchInset,
+          punchSize,
+          punchFrac
+        )
+      ) {
+        sCtx.drawImage(
+          shadowSrc,
+          innerX + punchInset,
+          innerY + punchInset,
+          punchSize,
+          punchSize
+        )
+      }
       sCtx.globalCompositeOperation = 'source-over'
       ctx.drawImage(shadowLayer, 0, 0)
+      } finally {
+        releaseCanvas(shadowSrc)
+        releaseCanvas(shadowLayer)
+        releaseCanvas(glowSrc)
+      }
     }
 
     // STEP 3 — draw the full favicon ON TOP of the (now clipped) shadow
     ctx.drawImage(offscreen, innerX, innerY)
+    } finally {
+      releaseCanvas(offscreen)
+    }
   }
 
   // Legacy single-plane decorations only. Layered / overlay sessions are applied
   // inside renderFaviconInner (Outer under Inner).
   if (config.paintSession && !sessionUsesLayeredPaint(config.paintSession)) {
-    await applyPaintDecorations(ctx, config.paintSession, decorX, decorY, decorSize)
+    await applyPaintDecorations(
+      ctx,
+      config.paintSession,
+      decorX,
+      decorY,
+      decorSize,
+      faviconInnerDrawSize(config, config.paintSession.resolution || 512)
+    )
   }
 }
 
@@ -1887,9 +2078,8 @@ async function drawFaviconContent(
   const localCx = areaSize / 2 + (content.offsetX ?? 0)
   const localCy = areaSize / 2 + (content.offsetY ?? 0)
 
-  const offscreen = document.createElement('canvas')
-  offscreen.width  = areaSize
-  offscreen.height = areaSize
+  const offscreen = takeCanvas(areaSize, areaSize)
+  try {
   const offCtx = offscreen.getContext('2d')!
   offCtx.imageSmoothingEnabled = true
   offCtx.imageSmoothingQuality = 'high'
@@ -2037,9 +2227,10 @@ async function drawFaviconContent(
       const HUGE = 10000
       const pad = Math.ceil(csb * 2 + Math.max(cW, cH) + Math.abs(csx) + Math.abs(csy) + 4)
 
-      const frameCanvas = document.createElement('canvas')
-      frameCanvas.width  = cW + pad * 2
-      frameCanvas.height = cH + pad * 2
+      const frameCanvas = takeCanvas(cW + pad * 2, cH + pad * 2)
+      const shadowCanvas = takeCanvas(cW, cH)
+      const insetCanvas = takeCanvas(cW, cH)
+      try {
       const fCtx = frameCanvas.getContext('2d')!
       fCtx.fillStyle = '#000000'
       fCtx.fillRect(0, 0, frameCanvas.width, frameCanvas.height)
@@ -2053,9 +2244,6 @@ async function drawFaviconContent(
       }
       fCtx.globalCompositeOperation = 'source-over'
 
-      const shadowCanvas = document.createElement('canvas')
-      shadowCanvas.width = cW
-      shadowCanvas.height = cH
       const sCtx = shadowCanvas.getContext('2d')!
       sCtx.imageSmoothingEnabled = true
       sCtx.imageSmoothingQuality = 'high'
@@ -2066,22 +2254,23 @@ async function drawFaviconContent(
       sCtx.drawImage(offscreen, 0, 0)
       sCtx.globalCompositeOperation = 'source-over'
 
-      const insetCanvas = document.createElement('canvas')
-      insetCanvas.width = cW
-      insetCanvas.height = cH
       const iCtx = insetCanvas.getContext('2d')!
       iCtx.drawImage(offscreen, 0, 0)
       iCtx.drawImage(shadowCanvas, 0, 0)
 
       ctx.drawImage(insetCanvas, areaX, areaY)
+      } finally {
+        releaseCanvas(frameCanvas)
+        releaseCanvas(shadowCanvas)
+        releaseCanvas(insetCanvas)
+      }
     } else if (cSpread > 0) {
       // Spread: inflate source off-screen so only the CSS drop-shadow lands,
       // then draw clean original on top.
       const HUGE = 10000
       const spreadSize = areaSize + cSpread * 2
-      const spreadCanvas = document.createElement('canvas')
-      spreadCanvas.width  = spreadSize
-      spreadCanvas.height = spreadSize
+      const spreadCanvas = takeCanvas(spreadSize, spreadSize)
+      try {
       const sCtx = spreadCanvas.getContext('2d')!
       sCtx.imageSmoothingEnabled = true
       sCtx.imageSmoothingQuality = 'high'
@@ -2091,6 +2280,9 @@ async function drawFaviconContent(
       ctx.drawImage(spreadCanvas, areaX - cSpread - HUGE, areaY - cSpread - HUGE)
       ctx.filter = 'none'
       ctx.drawImage(offscreen, areaX, areaY)   // clean content on top
+      } finally {
+        releaseCanvas(spreadCanvas)
+      }
     } else {
       // No spread — per-pixel CSS drop-shadow.
       ctx.filter = `drop-shadow(${csx}px ${csy}px ${csb}px ${csc})`
@@ -2099,6 +2291,9 @@ async function drawFaviconContent(
     }
   } else {
     ctx.drawImage(offscreen, areaX, areaY)
+  }
+  } finally {
+    releaseCanvas(offscreen)
   }
 }
 

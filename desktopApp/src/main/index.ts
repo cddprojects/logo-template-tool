@@ -41,6 +41,7 @@ function migrateOldPackagedData(): void {
 }
 
 const versionsFile = join(dataDir, 'versions.json')
+const undoHistoryFile = join(dataDir, 'undo-history.json')
 const templatesDir = join(dataDir, 'templates')
 const registryFile = join(dataDir, '.template-registry.json')
 
@@ -757,6 +758,16 @@ ipcMain.handle('load-versions', () => {
   }
 })
 
+ipcMain.handle('load-undo-history', () => {
+  try {
+    ensureDataDir()
+    if (!existsSync(undoHistoryFile)) return null
+    return JSON.parse(readFileSync(undoHistoryFile, 'utf-8'))
+  } catch {
+    return null
+  }
+})
+
 // IPC: Image generation via Pollinations.ai — completely free, no API key needed.
 // Uses FLUX model. GET request returns JPEG binary directly.
 ipcMain.handle('gemini-generate-image', async (_, prompt: string, _token: string, _imageData?: string) => {
@@ -1185,10 +1196,13 @@ ipcMain.handle('iconify-fetch', async (_, id: string) => {
 })
 
 // IPC: Save versions to file
-ipcMain.handle('save-versions', (_, data: unknown) => {
+ipcMain.handle('save-versions', (_, data: unknown, history?: unknown) => {
   try {
     ensureDataDir()
     writeFileSync(versionsFile, JSON.stringify(data, null, 2), 'utf-8')
+    if (history !== undefined) {
+      writeFileSync(undoHistoryFile, JSON.stringify(history), 'utf-8')
+    }
     return { success: true }
   } catch (err) {
     return { success: false, error: String(err) }

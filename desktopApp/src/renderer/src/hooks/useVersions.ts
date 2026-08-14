@@ -16,6 +16,15 @@ interface Snap { state: Version[]; label: string; time: number }
 /** Lightweight timeline entry surfaced to the History panel UI. */
 export interface HistoryEntry { label: string; time: number }
 
+/** Disk / workspace payload so undo survives app restarts. */
+export interface PersistedUndoHistory {
+  v: 1
+  past: Snap[]
+  future: Snap[]
+  currentLabel: string
+  currentTime: number
+}
+
 // ── History label helpers ─────────────────────────────────────────────────────
 
 function sameJson(a: unknown, b: unknown): boolean {
@@ -320,6 +329,39 @@ function migrateVersion(raw: Record<string, unknown>): Version {
   }
 }
 
+function migrateSnap(raw: unknown): Snap | null {
+  if (!raw || typeof raw !== 'object') return null
+  const snap = raw as { state?: unknown; label?: unknown; time?: unknown }
+  if (!Array.isArray(snap.state)) return null
+  return {
+    state: (snap.state as Record<string, unknown>[]).map(migrateVersion),
+    label: typeof snap.label === 'string' && snap.label.trim() ? snap.label : 'Edit',
+    time: typeof snap.time === 'number' && Number.isFinite(snap.time) ? snap.time : Date.now()
+  }
+}
+
+function parsePersistedHistory(raw: unknown): PersistedUndoHistory | null {
+  if (!raw || typeof raw !== 'object') return null
+  const data = raw as Partial<PersistedUndoHistory>
+  if (data.v !== 1) return null
+  if (!Array.isArray(data.past) || !Array.isArray(data.future)) return null
+  const past = data.past.map(migrateSnap).filter((s): s is Snap => !!s)
+  const future = data.future.map(migrateSnap).filter((s): s is Snap => !!s)
+  return {
+    v: 1,
+    past: past.slice(-MAX_HISTORY),
+    future: future.slice(0, MAX_HISTORY),
+    currentLabel:
+      typeof data.currentLabel === 'string' && data.currentLabel.trim()
+        ? data.currentLabel
+        : 'Opened project',
+    currentTime:
+      typeof data.currentTime === 'number' && Number.isFinite(data.currentTime)
+        ? data.currentTime
+        : Date.now()
+  }
+}
+
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
 export function useVersions() {
@@ -358,17 +400,41 @@ export function useVersions() {
     setHistoryMeta({ entries, index: past.length })
   }, [])
 
+  const serializeHistory = useCallback((): PersistedUndoHistory => ({
+    v: 1,
+    past: pastRef.current,
+    future: futureRef.current,
+    currentLabel: curLabelRef.current,
+    currentTime: curTimeRef.current
+  }), [])
+
+  const applyHistory = useCallback((raw: unknown) => {
+    const restored = parsePersistedHistory(raw)
+    if (restored) {
+      pastRef.current = restored.past
+      futureRef.current = restored.future
+      curLabelRef.current = restored.currentLabel
+      curTimeRef.current = restored.currentTime
+    } else {
+      pastRef.current = []
+      futureRef.current = []
+      curLabelRef.current = 'Opened project'
+      curTimeRef.current = Date.now()
+    }
+    refreshMeta()
+  }, [refreshMeta])
+
   // Load from file on mount + listen for template imports from main process
   useEffect(() => {
     loadedRef.current = false
-    window.api.loadVersions().then((raw) => {
+    window.api.loadVersions().then(async (raw) => {
       const migrated = (raw as Record<string, unknown>[]).map(migrateVersion)
       setVersionsState(migrated)
+      versionsRef.current = migrated
+      const history = await window.api.loadUndoHistory()
+      applyHistory(history)
       loadedRef.current = true
       setLoaded(true)
-      curLabelRef.current = 'Opened project'
-      curTimeRef.current = Date.now()
-      setHistoryMeta({ entries: [{ label: 'Opened project', time: curTimeRef.current }], index: 0 })
     })
 
     window.api.onTemplateImported((raw) => {
@@ -386,7 +452,9 @@ export function useVersions() {
       const migrated = (raw as Record<string, unknown>[]).map(migrateVersion)
       loadedRef.current = true
       setVersionsState(migrated)
+      versionsRef.current = migrated
       setLoaded(true)
+      void window.api.loadUndoHistory().then(applyHistory)
     })
 
     return () => {
@@ -395,7 +463,7 @@ export function useVersions() {
         saveTimer.current = null
       }
       if (loadedRef.current) {
-        void window.api.saveVersions(versionsRef.current)
+        void window.api.saveVersions(versionsRef.current, serializeHistory())
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -406,13 +474,13 @@ export function useVersions() {
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => {
       saveTimer.current = null
-      void window.api.saveVersions(next).then((result) => {
+      void window.api.saveVersions(next, serializeHistory()).then((result) => {
         if (result && result.success === false) {
           console.error('[versions] save failed:', result.error)
         }
       })
     }, 400)
-  }, [])
+  }, [serializeHistory])
 
   const save = useCallback(
     (next: Version[]) => {

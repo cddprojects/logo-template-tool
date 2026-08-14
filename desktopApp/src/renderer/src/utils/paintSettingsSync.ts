@@ -3,6 +3,7 @@ import type {
   ContentTypeStashEntry,
   FaviconContent,
   FaviconConfig,
+  FaviconOuterShape,
   IconConfig,
   IconSourceType,
   OutsideContentSettings,
@@ -11,12 +12,14 @@ import type {
   PaintSession,
   PaintVector
 } from '../types'
+import { DEFAULT_FAVICON_CONFIG } from '../types'
+import { contentTypeFromIcon } from './contentTypeSync'
 import type { InnerContentDecor } from './paintVectorRender'
-import { measureSpacedText } from './renderer'
+import { iconOuterShadowPad, measureSpacedText } from './renderer'
 
 const DESIGN_SIZE = 256
 
-/** Map outside Inner content shadow → paint vector shadow (design 256 → paint px). */
+/** Map outside Inner content shadow → paint vector shadow (design 256 → inner-draw px). */
 export function outsideShadowToPaintVector(
   settings: Pick<
     OutsideContentSettings,
@@ -27,12 +30,13 @@ export function outsideShadowToPaintVector(
     | 'contentShadowOffsetX'
     | 'contentShadowOffsetY'
   >,
-  resolution: number
+  resolution: number,
+  innerDrawSize?: number
 ): Pick<
   PaintVector,
   'shadow' | 'shadowColor' | 'shadowBlur' | 'shadowSpread' | 'shadowOffsetX' | 'shadowOffsetY'
 > {
-  const scale = resolution / DESIGN_SIZE
+  const scale = Math.max(1, innerDrawSize ?? resolution) / DESIGN_SIZE
   const enabled = !!settings.contentShadowEnabled
   return {
     shadow: enabled,
@@ -199,32 +203,40 @@ export function clampSizeRatio(n: number): number {
 }
 
 /**
+ * Where to draw the logo outer shape on a paint canvas so the full drop-shadow
+ * stays inside the square (drawIcon's pad is relative to draw size / icon.size).
+ */
+export function logoPaintOuterLayout(
+  icon: IconConfig,
+  canvasSize = 512
+): { x: number; y: number; size: number } {
+  const has =
+    !!icon.shadowEnabled &&
+    !!icon.containerEnabled &&
+    icon.containerShape !== 'none'
+  if (!has) return { x: 0, y: 0, size: canvasSize }
+  const slack = 4
+  let lo = 16
+  let hi = canvasSize
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi + 1) / 2)
+    const sides = iconOuterShadowPad(icon, mid)
+    const extraW = 2 * Math.max(sides.padL, sides.padR)
+    const extraH = 2 * Math.max(sides.padT, sides.padB)
+    if (mid + extraW + slack <= canvasSize && mid + extraH + slack <= canvasSize) lo = mid
+    else hi = mid - 1
+  }
+  const size = lo
+  const x = Math.floor((canvasSize - size) / 2)
+  return { x, y: x, size }
+}
+
+/**
  * Logo icon inner drawable size at paint resolution (outer shadow inset).
  * Matches LogoEditor paint bakes where the content layer disables the container.
  */
 export function logoPaintInnerDrawSize(icon: IconConfig, canvasSize = 512): number {
-  let outerSize = canvasSize
-  const hasOuterShadow =
-    !!icon.shadowEnabled &&
-    !!icon.containerEnabled &&
-    icon.containerShape !== 'none'
-  if (hasOuterShadow) {
-    const scaledBlur = icon.shadowBlur ?? 8
-    const iconSpread = icon.shadowSpread ?? 0
-    const iconOx = icon.shadowOffsetX ?? 0
-    const iconOy = icon.shadowOffsetY ?? 4
-    const blurExtent = scaledBlur * 2
-    const shadowPad =
-      Math.ceil(
-        Math.max(
-          blurExtent + iconSpread + Math.abs(iconOx),
-          blurExtent + iconSpread + Math.abs(iconOy),
-          0
-        )
-      ) + 4
-    outerSize = Math.max(16, canvasSize - shadowPad * 2)
-  }
-  return Math.max(16, outerSize)
+  return logoPaintOuterLayout(icon, canvasSize).size
 }
 
 /**
@@ -265,6 +277,18 @@ export function canvasHasOpaquePaint(canvas: HTMLCanvasElement, minAlpha = 24): 
     if (data[i] >= minAlpha) return true
   }
   return false
+}
+
+/**
+ * Dominant RGB from pixels that are already nearly opaque (solid fill / border).
+ * Soft outer-shadow fringes are ignored so a shadow recolor cannot become the
+ * live background colour.
+ */
+export function sampleDominantSolidColor(
+  canvas: HTMLCanvasElement,
+  minAlpha = 210
+): string | null {
+  return sampleDominantOpaqueColor(canvas, minAlpha)
 }
 
 /**
@@ -510,7 +534,8 @@ export function innerContentDecorFromIcon(icon: IconConfig): InnerContentDecor {
 
 function shadowSyncFromVector(
   v: PaintVector,
-  resolution: number
+  resolution: number,
+  innerDrawSize?: number
 ): Pick<
   PaintContentSync,
   | 'contentShadowEnabled'
@@ -520,13 +545,14 @@ function shadowSyncFromVector(
   | 'contentShadowOffsetX'
   | 'contentShadowOffsetY'
 > {
+  const space = Math.max(1, innerDrawSize ?? resolution)
   return {
     contentShadowEnabled: !!v.shadow,
     contentShadowColor: v.shadowColor ?? '#00000080',
-    contentShadowBlur: paintPxToDesign(v.shadowBlur ?? 0, resolution),
-    contentShadowSpread: paintPxToDesign(v.shadowSpread ?? 0, resolution),
-    contentShadowOffsetX: paintPxToDesign(v.shadowOffsetX ?? 0, resolution),
-    contentShadowOffsetY: paintPxToDesign(v.shadowOffsetY ?? 0, resolution)
+    contentShadowBlur: paintPxToDesign(v.shadowBlur ?? 0, space),
+    contentShadowSpread: paintPxToDesign(v.shadowSpread ?? 0, space),
+    contentShadowOffsetX: paintPxToDesign(v.shadowOffsetX ?? 0, space),
+    contentShadowOffsetY: paintPxToDesign(v.shadowOffsetY ?? 0, space)
   }
 }
 
@@ -651,6 +677,14 @@ export function buildPaintContentSync(opts: {
    * outers). Do not push a sampled colour into backgroundColor / containerColor.
    */
   syncOuterFillColor?: boolean
+  /** Where the last Outer Fill click landed (fill / border / shadow). */
+  outerFillTarget?: 'fill' | 'border' | 'shadow'
+  /** Paint-bucket colour used for that Outer fill (preferred over overlay sampling). */
+  outerFillPaintColor?: string
+  /** Every Outer fill this session so border + shadow both sync, not only the last click. */
+  outerFillColors?: { fill?: string; border?: string; shadow?: string }
+  /** Fill-all on Outer: push the colour onto fill, border, and shadow together. */
+  outerFillAll?: boolean
   /**
    * Inner drawable area at paint resolution (smaller than canvas when outer
    * shadow insets the shape). sizeRatio is stored relative to this, not the
@@ -662,27 +696,42 @@ export function buildPaintContentSync(opts: {
   const drawArea = Math.max(1, opts.innerDrawSize ?? res)
   const sync: PaintContentSync = {}
 
-  // Outer Fill → live backgroundColor / containerColor (and clear overlay if full recolor).
-  // Skip for image/SVG-markup outers — those have no live fill colour to sync.
-  if (
-    opts.syncOuterFillColor !== false &&
-    opts.containerOverlay &&
-    canvasHasOpaquePaint(opts.containerOverlay)
-  ) {
-    const outerComposite = document.createElement('canvas')
-    outerComposite.width = res
-    outerComposite.height = res
-    const ox = outerComposite.getContext('2d')
-    if (ox) {
-      if (opts.containerBase) ox.drawImage(opts.containerBase, 0, 0)
-      ox.drawImage(opts.containerOverlay, 0, 0)
-      const color = sampleDominantOpaqueColor(outerComposite)
-      if (color) {
-        sync.outerFillColor = color
-        if (opts.containerBase) {
-          const cover = overlayCoverRatio(opts.containerBase, opts.containerOverlay)
-          if (cover >= 0.35) sync.clearOuterOverlay = true
-        } else {
+  // Outer Fill → live fill / border / shadow. Only when the user actually used
+  // Fill on Outer this session. Sampling leftover overlay paint would rewrite
+  // the live shape colour after Inner-only fills.
+  if (opts.syncOuterFillColor !== false) {
+    const colors = opts.outerFillColors ?? {}
+    const target = opts.outerFillTarget
+    const hasExplicitOuterFill =
+      !!opts.outerFillAll ||
+      !!target ||
+      !!colors.fill ||
+      !!colors.border ||
+      !!colors.shadow
+    if (hasExplicitOuterFill) {
+      const sampled = opts.containerOverlay && canvasHasOpaquePaint(opts.containerOverlay)
+        ? sampleDominantOpaqueColor(
+            opts.containerOverlay,
+            target === 'shadow' ? 8 : 24
+          )
+        : null
+      const fallback = opts.outerFillPaintColor || sampled
+      const fillColor = colors.fill || (target === 'fill' || opts.outerFillAll ? fallback : undefined)
+      const borderColor = colors.border || (target === 'border' || opts.outerFillAll ? fallback : undefined)
+      const shadowColor = colors.shadow || (target === 'shadow' || opts.outerFillAll ? fallback : undefined)
+      if (opts.outerFillAll && fallback) {
+        sync.outerFillColor = fallback
+        sync.outerBorderColor = fallback
+        sync.outerShadowColor = fallback
+        sync.clearOuterOverlay = true
+      } else {
+        if (fillColor) sync.outerFillColor = fillColor
+        if (borderColor) sync.outerBorderColor = borderColor
+        if (shadowColor) sync.outerShadowColor = shadowColor
+        // Fill punches the bake, so overlay-cover of the leftover base is always
+        // low. Keep the overlay and the live renderer fights: white fill/border
+        // AA shows through. Hand colour back to live and drop the overlay.
+        if (fillColor || borderColor || shadowColor) {
           sync.clearOuterOverlay = true
         }
       }
@@ -737,7 +786,7 @@ export function buildPaintContentSync(opts: {
     }
     sync.fillColor = sync.letters.textColor
     sync.sizeRatio = sync.letters.fontSizeRatio
-    Object.assign(sync, shadowSyncFromVector(linked, res))
+    Object.assign(sync, shadowSyncFromVector(linked, res, drawArea))
     return sync
   }
 
@@ -751,7 +800,7 @@ export function buildPaintContentSync(opts: {
     sync.offsetY = paintPxToDesign(cy - res / 2, res)
     sync.sizeRatio = clampSizeRatio(Math.max(w, h) / drawArea)
     if (proxy.color) sync.fillColor = proxy.color
-    Object.assign(sync, shadowSyncFromVector(proxy, res))
+    Object.assign(sync, shadowSyncFromVector(proxy, res, drawArea))
     return sync
   }
 
@@ -771,16 +820,24 @@ export function applyPaintOuterSyncToFavicon(
   config: FaviconConfig,
   sync: PaintContentSync | undefined
 ): FaviconConfig {
-  if (!sync?.outerFillColor) return config
-  // Image outers have no live fill — keep paint on the overlay only.
+  if (!sync) return config
   if (config.outerShape === 'image') return config
-  const color = sync.outerFillColor
-  return {
-    ...config,
-    backgroundColor: color,
-    transparentBg: false,
-    ...(config.outerShape === 'svg-markup' ? { outerShapeSvgColor: color } : {})
+  let next = { ...config }
+  if (sync.outerFillColor) {
+    next = {
+      ...next,
+      backgroundColor: sync.outerFillColor,
+      transparentBg: false,
+      ...(next.outerShape === 'svg-markup' ? { outerShapeSvgColor: sync.outerFillColor } : {})
+    }
   }
+  if (sync.outerBorderColor) {
+    next = { ...next, borderColor: sync.outerBorderColor }
+  }
+  if (sync.outerShadowColor) {
+    next = { ...next, shadowEnabled: true, shadowColor: sync.outerShadowColor }
+  }
+  return next
 }
 
 export function applyPaintContentSyncToFaviconContent(
@@ -897,6 +954,13 @@ export function applyPaintContentSyncToIcon(
   if (sync.outerFillColor && (next.containerType ?? 'color') === 'color') {
     next.containerColor = sync.outerFillColor
     next.containerEnabled = true
+  }
+  if (sync.outerBorderColor) {
+    next.containerBorderColor = sync.outerBorderColor
+  }
+  if (sync.outerShadowColor) {
+    next.shadowEnabled = true
+    next.shadowColor = sync.outerShadowColor
   }
 
   if (sync.sizeRatio !== undefined && !sync.letters) {
@@ -1083,4 +1147,212 @@ export function updateIconStashAfterSave(
   const stash = { ...(icon.contentTypeStash ?? {}) }
   stash[type] = buildIconTypeStash(icon, session)
   return { ...icon, contentTypeStash: stash }
+}
+
+function remapFaviconStashFieldsToIcon(
+  type: ContentType,
+  fields: Record<string, unknown>
+): Record<string, unknown> {
+  const next = { ...fields }
+  if (type === 'shape' && 'shapeColor' in next) {
+    next.primaryColor = next.shapeColor
+    delete next.shapeColor
+  }
+  if ((type === 'lucide' || type === 'svg-markup') && 'lucideColor' in next) {
+    next.primaryColor = next.lucideColor
+    delete next.lucideColor
+  }
+  if (type === 'svg' && 'svgColor' in next) {
+    next.primaryColor = next.svgColor
+    delete next.svgColor
+  }
+  return next
+}
+
+function remapIconStashFieldsToFavicon(
+  type: IconSourceType,
+  fields: Record<string, unknown>
+): Record<string, unknown> {
+  const next = { ...fields }
+  if (type === 'shape' && 'primaryColor' in next) {
+    next.shapeColor = next.primaryColor
+  }
+  if (type === 'lucide' && 'primaryColor' in next) {
+    next.lucideColor = next.primaryColor
+  }
+  if (type === 'svg' && 'primaryColor' in next) {
+    next.lucideColor = next.primaryColor
+    next.svgColor = next.primaryColor
+  }
+  return next
+}
+
+/** Hidden per-type stash: favicon content types → logo icon source types. */
+export function mapFaviconStashToIconStash(
+  stash: FaviconConfig['contentTypeStash']
+): IconConfig['contentTypeStash'] {
+  if (!stash) return undefined
+  const out: NonNullable<IconConfig['contentTypeStash']> = {}
+  const add = (iconType: IconSourceType, favType: ContentType) => {
+    const entry = stash[favType]
+    if (!entry) return
+    out[iconType] = {
+      fields: remapFaviconStashFieldsToIcon(favType, entry.fields ?? {}),
+      contentOverlayPng: entry.contentOverlayPng,
+      contentVectors: entry.contentVectors
+    }
+  }
+  add('letters', 'letters')
+  add('shape', 'shape')
+  add('lucide', 'lucide')
+  add('image', 'image')
+  add('svg', 'svg')
+  add('svg', 'svg-markup')
+  return out
+}
+
+/** Hidden per-type stash: logo icon source types → favicon content types. */
+export function mapIconStashToFaviconStash(
+  stash: IconConfig['contentTypeStash']
+): FaviconConfig['contentTypeStash'] {
+  if (!stash) return undefined
+  const out: NonNullable<FaviconConfig['contentTypeStash']> = {}
+  const add = (favType: ContentType, iconType: IconSourceType) => {
+    const entry = stash[iconType]
+    if (!entry) return
+    out[favType] = {
+      fields: remapIconStashFieldsToFavicon(iconType, entry.fields ?? {}),
+      contentOverlayPng: entry.contentOverlayPng,
+      contentVectors: entry.contentVectors
+    }
+  }
+  add('letters', 'letters')
+  add('shape', 'shape')
+  add('lucide', 'lucide')
+  add('image', 'image')
+  add('svg-markup', 'svg')
+  return out
+}
+
+/** Apply this Paint Save onto a favicon (live settings + overlay + hidden type stash). */
+export function applyPaintSaveToFavicon(
+  source: FaviconConfig,
+  session: PaintSession,
+  sync: PaintContentSync | undefined
+): FaviconConfig {
+  return updateFaviconStashAfterSave(
+    applyPaintOuterSyncToFavicon(
+      {
+        ...source,
+        paintSession: session,
+        content: applyPaintContentSyncToFaviconContent(source.content, sync)
+      },
+      sync
+    ),
+    session
+  )
+}
+
+/** Apply this Paint Save onto a logo icon (live settings + overlay + hidden type stash). */
+export function applyPaintSaveToIcon(
+  source: IconConfig,
+  session: PaintSession,
+  sync: PaintContentSync | undefined
+): IconConfig {
+  return updateIconStashAfterSave(
+    applyPaintContentSyncToIcon({ ...source, paintSession: session }, sync),
+    session
+  )
+}
+
+function iconContainerToOuterShape(icon: IconConfig): FaviconOuterShape {
+  if (!icon.containerEnabled || icon.containerShape === 'none') return 'none'
+  if (icon.containerType === 'image') return 'image'
+  if (icon.containerType === 'svg') return 'svg-markup'
+  const shape = icon.containerShape
+  if (
+    shape === 'circle' || shape === 'square' || shape === 'rounded' ||
+    shape === 'triangle' || shape === 'diamond' || shape === 'pentagon' ||
+    shape === 'hexagon' || shape === 'star'
+  ) return shape
+  return 'square'
+}
+
+/** Full favicon design from a logo icon (for Paint Save onto favicon variants). */
+export function iconConfigToFaviconConfig(
+  icon: IconConfig,
+  base?: FaviconConfig
+): FaviconConfig {
+  const shell = structuredClone(base ?? DEFAULT_FAVICON_CONFIG)
+  const iconSize = Math.max(1, icon.size || 112)
+  const toFav = (n: number) => n * (DESIGN_SIZE / iconSize)
+  const type = contentTypeFromIcon(icon)
+  const fill = icon.primaryColor || icon.textColor || '#ffffff'
+  return {
+    ...shell,
+    outerShape: iconContainerToOuterShape(icon),
+    outerShapeImageDataUrl: icon.containerImageDataUrl || shell.outerShapeImageDataUrl,
+    outerShapeSvgMarkup: icon.containerSvgMarkup || shell.outerShapeSvgMarkup,
+    backgroundColor: icon.containerColor || shell.backgroundColor,
+    borderColor: icon.containerBorderColor || shell.borderColor,
+    borderWidth: toFav(icon.containerBorderWidth ?? 0),
+    borderRadius: toFav(icon.containerBorderRadius ?? 0),
+    transparentBg: !icon.containerEnabled,
+    shadowEnabled: !!icon.shadowEnabled,
+    shadowColor: icon.shadowColor || shell.shadowColor,
+    shadowBlur: toFav(icon.shadowBlur ?? 8),
+    shadowSpread: toFav(icon.shadowSpread ?? 0),
+    shadowOffsetX: toFav(icon.shadowOffsetX ?? 0),
+    shadowOffsetY: toFav(icon.shadowOffsetY ?? 4),
+    paintSession: icon.paintSession ?? null,
+    contentTypeStash: mapIconStashToFaviconStash(icon.contentTypeStash),
+    content: {
+      ...shell.content,
+      type,
+      text: icon.text ?? '',
+      textColor: icon.textColor || fill,
+      fontFamily: icon.fontFamily ?? 'Inter',
+      fontWeight: icon.fontWeight ?? '700',
+      fontItalic: !!icon.fontItalic,
+      fontUnderline: !!icon.fontUnderline,
+      fontSizeRatio: icon.fontSizeRatio ?? 0.52,
+      letterSpacing: icon.letterSpacing ?? 0,
+      shape: icon.shape === 'none' ? 'circle' : icon.shape,
+      shapeColor: fill,
+      shapeSizeRatio: icon.shapeSizeRatio ?? 0.5,
+      shapeBorderRadius: toFav(icon.shapeBorderRadius ?? 0),
+      lucideIconName: icon.lucideIconName ?? 'Layers',
+      lucideColor: fill,
+      lucideSizeRatio: icon.lucideSizeRatio ?? 0.6,
+      lucideStrokeWidth: icon.lucideStrokeWidth ?? 2,
+      svgMarkup: icon.svgMarkup ?? '',
+      svgMarkupSizeRatio: icon.svgMarkupSizeRatio ?? 0.7,
+      svgMarkupUseOriginalColors: !!icon.svgMarkupUseOriginalColors,
+      svgMarkupSecondaryColor: icon.svgMarkupSecondaryColor ?? '',
+      svgMarkupTertiaryColor: icon.svgMarkupTertiaryColor ?? '',
+      svgMarkupColor4: icon.svgMarkupColor4 ?? '',
+      svgMarkupColor5: icon.svgMarkupColor5 ?? '',
+      svgColor: fill,
+      imageDataUrl: icon.imageDataUrl ?? '',
+      imageSizeRatio: icon.imageSizeRatio ?? 0.8,
+      imageUseOriginalColors: icon.imageUseOriginalColors ?? true,
+      imagePalette: icon.imagePalette ?? [],
+      imageColor1: icon.imageColor1 ?? '',
+      imageColor2: icon.imageColor2 ?? '',
+      imageColor3: icon.imageColor3 ?? '',
+      imageColor4: icon.imageColor4 ?? '',
+      imageColor5: icon.imageColor5 ?? '',
+      offsetX: toFav(icon.offsetX ?? 0),
+      offsetY: toFav(icon.offsetY ?? 0),
+      contentShadowEnabled: !!icon.contentShadowEnabled,
+      contentShadowInset: !!icon.contentShadowInset,
+      contentShadowColor: icon.contentShadowColor ?? '#00000080',
+      contentShadowBlur: toFav(icon.contentShadowBlur ?? 8),
+      contentShadowSpread: toFav(icon.contentShadowSpread ?? 0),
+      contentShadowOffsetX: toFav(icon.contentShadowOffsetX ?? 0),
+      contentShadowOffsetY: toFav(icon.contentShadowOffsetY ?? 3),
+      contentBorderColor: icon.contentBorderColor ?? 'transparent',
+      contentBorderWidth: toFav(icon.contentBorderWidth ?? 0)
+    }
+  }
 }

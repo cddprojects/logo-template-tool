@@ -9,14 +9,15 @@ import type { ExportNameStyle } from '../utils/exporter'
 import { hasMultipleColors } from '../utils/iconUtils'
 import { emptyImageRecolorFields, recolorFieldsAfterImageChange } from '../utils/imageRecolor'
 import {
-  applyPaintContentSyncToFaviconContent,
-  applyPaintContentSyncToIcon,
-  applyPaintOuterSyncToFavicon,
+  applyPaintSaveToFavicon,
+  applyPaintSaveToIcon,
+  iconConfigToFaviconConfig,
+  mapFaviconStashToIconStash,
+  updateIconStashAfterSave,
   logoPaintInnerDrawSize,
+  logoPaintOuterLayout,
   outsideContentFromIcon,
-  switchIconSourceType,
-  updateFaviconStashAfterSave,
-  updateIconStashAfterSave
+  switchIconSourceType
 } from '../utils/paintSettingsSync'
 import {
   contentTypeFromIcon,
@@ -186,7 +187,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
         imageColor5: '',
         offsetX: 0,
         offsetY: 0,
-        size: 112,
+        size: 64,
         shadowEnabled: false,
         shadowColor: '#00000073',
         shadowBlur: 8,
@@ -395,33 +396,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
     const session = sanitizePaintSessionProxies(rawSession) ?? null
 
     const SIZE = 512
-    const hasOuterShadow =
-      !!effectiveIcon.shadowEnabled &&
-      !!effectiveIcon.containerEnabled &&
-      effectiveIcon.containerShape !== 'none'
-
-    let drawSize = SIZE
-    let drawX = 0
-    let drawY = 0
-    if (hasOuterShadow) {
-      // Match drawIcon / renderLogo: blur fringe ≈ 2× blur + spread + |offset|.
-      const scaledBlur = effectiveIcon.shadowBlur ?? 8
-      const iconSpread = effectiveIcon.shadowSpread ?? 0
-      const iconOx = effectiveIcon.shadowOffsetX ?? 0
-      const iconOy = effectiveIcon.shadowOffsetY ?? 4
-      const blurExtent = scaledBlur * 2
-      const shadowPad =
-        Math.ceil(
-          Math.max(
-            blurExtent + iconSpread + Math.abs(iconOx),
-            blurExtent + iconSpread + Math.abs(iconOy),
-            0
-          )
-        ) + 4
-      drawSize = Math.max(16, SIZE - shadowPad * 2)
-      drawX = Math.floor((SIZE - drawSize) / 2)
-      drawY = Math.floor((SIZE - drawSize) / 2)
-    }
+    const { x: drawX, y: drawY, size: drawSize } = logoPaintOuterLayout(effectiveIcon, SIZE)
 
     const baseIcon: IconConfig = {
       ...effectiveIcon,
@@ -442,7 +417,9 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
         ...baseIcon,
         offsetX: 0,
         offsetY: 0,
-        shadowEnabled: hasOuterShadow,
+        shadowEnabled: !!effectiveIcon.shadowEnabled &&
+          !!effectiveIcon.containerEnabled &&
+          effectiveIcon.containerShape !== 'none',
         contentShadowEnabled: false,
         sourceType: 'letters',
         text: ' ',
@@ -511,78 +488,46 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       containerDecorationsPng: result.containerDecorationsPng,
       contentDecorationsPng: result.contentDecorationsPng,
       // Linked letters stay as live outside settings (not baked into decorations).
-      linkedTextInDecorations: result.linkedTextInDecorations ?? false
+      linkedTextInDecorations: result.linkedTextInDecorations ?? false,
+      paintShapeSize: result.paintShapeSize
     })!
     const logoIds = new Set(targets.logoIds)
     const favIds = new Set(targets.faviconIds)
-    if (isSyncedWithFavicon && matchingFaviconVariant) {
-      favIds.add(matchingFaviconVariant.id)
-    }
-    for (const logoId of logoIds) {
-      const logo = variantsRef.current.find((v) => v.id === logoId)
-      if (!logo || !(logo.config.iconLinked ?? true)) continue
-      const favicon = faviconVariantsRef.current.find((v) => v.label === logo.label)
-      if (favicon) favIds.add(favicon.id)
-    }
     const sync = result.contentSync
+    if (!safeConfig || !effectiveIcon) return
 
-    // Favicon first so linked logos can mirror the updated twin into syncedIcon.
-    let nextFavicons = faviconVariantsRef.current
+    let savedIcon = applyPaintSaveToIcon(effectiveIcon, session, sync)
+    const savedFavicon = isSyncedWithFavicon && matchingFaviconVariant
+      ? applyPaintSaveToFavicon(matchingFaviconVariant.config, session, sync)
+      : iconConfigToFaviconConfig(savedIcon)
+    if (isSyncedWithFavicon) {
+      // Synced live icon is derived from the favicon; use that stash so pasted
+      // variants get hidden letter/shape/lucide/image/svg settings, not the
+      // unused custom `icon` stash kept while linked.
+      savedIcon = updateIconStashAfterSave(
+        {
+          ...savedIcon,
+          contentTypeStash: mapFaviconStashToIconStash(savedFavicon.contentTypeStash)
+        },
+        session
+      )
+    }
+
     if (favIds.size > 0 && onFaviconChange) {
-      nextFavicons = faviconVariantsRef.current.map((v) => {
-        if (!favIds.has(v.id)) return v
-        const content = applyPaintContentSyncToFaviconContent(v.config.content, sync)
-        const withSession: FaviconConfig = applyPaintOuterSyncToFavicon(
-          {
-            ...v.config,
-            paintSession: session,
-            content
-          },
-          sync
-        )
-        return {
-          ...v,
-          config: updateFaviconStashAfterSave(withSession, session)
-        }
-      })
-      onFaviconChange(nextFavicons)
+      onFaviconChange(
+        faviconVariantsRef.current.map((v) => {
+          if (!favIds.has(v.id)) return v
+          return { ...v, config: structuredClone(savedFavicon) }
+        })
+      )
     }
 
     if (logoIds.size > 0) {
       onChange(
         variantsRef.current.map((v) => {
           if (!logoIds.has(v.id)) return v
-          const twin = nextFavicons.find((f) => f.label === v.label)
-          const isLinked = (v.config.iconLinked ?? true) && !!twin
-          if (isLinked && twin) {
-            // Synced path: refresh syncedIcon only — keep custom `icon` intact.
-            const syncedIcon = faviconContentToIconConfig(
-              twin.config.content,
-              v.config.icon,
-              twin.config
-            )
-            return {
-              ...v,
-              config: {
-                ...v.config,
-                syncedIcon,
-                iconSyncBroken: false,
-                syncedIconSnapshot: null
-              }
-            }
-          }
-          // Unsynced / frozen: persist onto what the logo actually shows, not a
-          // stale custom `icon` left behind while synced (see resolveLogoEffectiveIcon).
-          const baseIcon = resolveLogoEffectiveIcon(
-            v.config,
-            twin?.config.content,
-            twin?.config,
-            !!twin
-          )
-          const icon = applyPaintContentSyncToIcon(
-            { ...baseIcon, paintSession: session },
-            sync
-          )
+          // Paint Save is a one-time copy: unlink and replace the stored original
+          // icon (the custom `icon` kept while synced) with the painted result.
           return {
             ...v,
             config: {
@@ -591,14 +536,14 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
               iconSyncBroken: false,
               syncedIconSnapshot: null,
               syncedIcon: null,
-              icon: updateIconStashAfterSave(icon, session)
+              icon: structuredClone(savedIcon)
             }
           }
         })
       )
     }
     setShowPaint(false)
-  }, [onChange, onFaviconChange, isSyncedWithFavicon, matchingFaviconVariant])
+  }, [onChange, onFaviconChange, isSyncedWithFavicon, matchingFaviconVariant, safeConfig, effectiveIcon])
 
   const copyIconFromFavicon = useCallback(() => {
     if (!safeConfig || !matchingFaviconVariant?.config) return
@@ -696,7 +641,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
 
     const doRender = () => {
       if (renderId !== renderIdRef.current) return
-      renderLogo(canvasRef.current!, renderConfig, 2, true, faviconForIconRender).catch(() => {})
+      renderLogo(canvasRef.current!, renderConfig, 2, false, faviconForIconRender).catch(() => {})
     }
 
     const rafId = requestAnimationFrame(doRender)
@@ -957,6 +902,14 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             contentOverlayImage={paintContentOverlay}
             hasContainer={paintHasContainer || hasIconContainer}
             innerDrawSize={logoPaintInnerDrawSize(effectiveIcon, 512)}
+            outerBorderWidthPx={
+              (effectiveIcon.containerBorderWidth ?? 0) *
+              (logoPaintInnerDrawSize(effectiveIcon, 512) /
+                Math.max(1, effectiveIcon.size || 1))
+            }
+            outerBorderColor={effectiveIcon.containerBorderColor}
+            outerShadowColor={effectiveIcon.shadowColor}
+            outerFillColor={effectiveIcon.containerColor}
             initialVectors={paintVectors}
             initialLayerOrder={paintLayerOrder}
             outsideContentSettings={paintOutsideContent}

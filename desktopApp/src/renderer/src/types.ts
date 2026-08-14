@@ -524,6 +524,13 @@ export interface PaintSession {
    * then skips live letters to avoid doubling. Older sessions omit this flag.
    */
   linkedTextInDecorations?: boolean
+  /**
+   * Outer-shape size in paint pixels, centered on `resolution`.
+   * Logo/favicon paint insets the shape so the drop-shadow fits inside 512;
+   * live render crops this square onto the icon rect so Save does not shrink
+   * the logo. Omit (or equal resolution) when the shape already fills the canvas.
+   */
+  paintShapeSize?: number
 }
 
 /**
@@ -560,9 +567,13 @@ export interface PaintContentSync {
    * Favicon → backgroundColor; logo icon → containerColor.
    */
   outerFillColor?: string
+  /** Outer border color from Paint Fill on the border ring. */
+  outerBorderColor?: string
+  /** Outer drop-shadow color from Paint Fill on the shadow fringe. */
+  outerShadowColor?: string
   /**
-   * True when Outer paint overlay should be cleared after syncing outerFillColor
-   * (full-ish recolor via Fill), so live settings own the color for logo sync.
+   * True when Outer paint overlay should be cleared after syncing live Outer
+   * colours (fill / border / shadow), so settings own the colour for logo sync.
    */
   clearOuterOverlay?: boolean
   /**
@@ -592,6 +603,8 @@ export interface PaintSaveResult {
   contentSync?: PaintContentSync
   /** When true, linked Inner letters were baked into decorations (e.g. rotation). */
   linkedTextInDecorations?: boolean
+  /** Outer-shape size in paint pixels (see PaintSession.paintShapeSize). */
+  paintShapeSize?: number
 }
 
 /** Which logo / favicon variants receive a paint Save. */
@@ -664,7 +677,7 @@ export const DEFAULT_ICON_CONFIG: IconConfig = {
   imageColor5: '',
   offsetX: 0,
   offsetY: 0,
-  size: 112,
+  size: 64,
   visible: true,
   containerEnabled: false,
   containerShape: 'square',
@@ -697,7 +710,7 @@ export const DEFAULT_LOGO_CONFIG: LogoConfig = {
   text: 'MyApp',
   textShared: false,
   fontFamily: 'Inter',
-  fontSize: 36,
+  fontSize: 48,
   fontWeight: '700',
   fontItalic: false,
   fontUnderline: false,
@@ -721,7 +734,7 @@ export const DEFAULT_LOGO_CONFIG: LogoConfig = {
   iconSyncBroken: false,
   layout: 'icon-left',
   titleSubtitleGap: 4,
-  gap: 16,
+  gap: 10,
   padding: 0,
   textShadowEnabled: false,
   textShadowColor: '#00000073',

@@ -25,6 +25,7 @@ type Listener<T> = (payload: T) => void
 
 const templateImportedListeners: Listener<unknown>[] = []
 const versionsReloadedListeners: Listener<unknown[]>[] = []
+let lastWorkspaceHistory: unknown = null
 
 function clearLegacyBrowserVersions(): void {
   try {
@@ -37,6 +38,7 @@ function clearLegacyBrowserVersions(): void {
 async function reloadWorkspaceForListeners(): Promise<void> {
   const result = await loadWorkspace()
   if (!result.ok) return
+  lastWorkspaceHistory = result.history
   clearLegacyBrowserVersions()
   versionsReloadedListeners.forEach((cb) => cb(result.versions))
 }
@@ -187,6 +189,7 @@ export function installWebApi(): void {
     if (user) {
       void reloadWorkspaceForListeners()
     } else {
+      lastWorkspaceHistory = null
       versionsReloadedListeners.forEach((cb) => cb([]))
     }
   })
@@ -245,14 +248,19 @@ export function installWebApi(): void {
       const result = await loadWorkspace()
       if (!result.ok) {
         console.error('[web] failed to load workspace from server:', result.error)
+        lastWorkspaceHistory = null
         return []
       }
+      lastWorkspaceHistory = result.history
       clearLegacyBrowserVersions()
       return result.versions
     },
 
-    saveVersions: async (data: unknown[]): Promise<{ success: boolean; error?: string }> => {
-      const result = await saveWorkspace(data)
+    loadUndoHistory: async (): Promise<unknown> => lastWorkspaceHistory,
+
+    saveVersions: async (data: unknown[], history?: unknown): Promise<{ success: boolean; error?: string }> => {
+      if (history !== undefined) lastWorkspaceHistory = history
+      const result = await saveWorkspace(data, history)
       if (!result.ok) {
         console.error('[web] failed to save workspace to server:', result.error)
         return { success: false, error: result.error }

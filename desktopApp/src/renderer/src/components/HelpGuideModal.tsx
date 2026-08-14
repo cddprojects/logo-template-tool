@@ -48,7 +48,7 @@ function UseGuide(): JSX.Element {
           <li><span className="text-text">+</span> — create a new version</li>
           <li><span className="text-text">Upload</span> — import an existing image as a new editable version</li>
           <li>Hover a version for duplicate, save template, delete; drag the grip to reorder</li>
-          <li>Use the top bar to export the selected version, open history, or undo/redo global edits</li>
+          <li>Use the top bar to export the selected version, open history, or undo/redo global edits. Undo history is kept when you close and reopen the app</li>
         </ul>
       </Section>
 
@@ -85,7 +85,8 @@ function UseGuide(): JSX.Element {
           <li>
             <span className="text-text">Paint</span> opens the icon editor. The right panel’s
             <span className="text-text"> Save to variants</span> list chooses which Logo / Favicon variants receive Save
-            (a one-time copy, not continuous sync between variants)
+            (a one-time copy, not continuous sync between variants). Saving onto a synced pair
+            unlinks them and replaces the logo’s stored original icon with the painted result
           </li>
           <li>
             Preview canvas: stage colour swatch (preview only), <span className="text-text">Default</span> (fit),

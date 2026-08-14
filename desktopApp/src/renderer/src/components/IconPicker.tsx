@@ -213,6 +213,7 @@ function LibraryTab({
 }: LibraryTabProps): JSX.Element {
   const [query, setQuery] = useState('')
   const [category, setCategory] = useState('All')
+  const skipClickAfterDragRef = useRef(false)
   const gridRef = useRef<HTMLDivElement>(null)
   const LucideIcons = useLucideIcons()
 
@@ -302,10 +303,14 @@ function LibraryTab({
                 <button
                   key={entry.name + '_' + entry.category + '_' + absIdx}
                   title={enableDrag ? `${entry.name} — drag onto canvas or click` : entry.name}
-                  onClick={() => onSelect(entry)}
+                  onClick={() => {
+                    if (skipClickAfterDragRef.current) return
+                    onSelect(entry)
+                  }}
                   draggable={enableDrag && !!(entry.svg || entry.lucide)}
                   onDragStart={(e) => {
                     if (!enableDrag) return
+                    skipClickAfterDragRef.current = true
                     if (fullSvg) {
                       e.dataTransfer.setData(PAINT_SVG_MIME, fullSvg)
                       e.dataTransfer.setData('text/plain', fullSvg)
@@ -316,6 +321,9 @@ function LibraryTab({
                       )
                     }
                     e.dataTransfer.effectAllowed = 'copy'
+                  }}
+                  onDragEnd={() => {
+                    requestAnimationFrame(() => { skipClickAfterDragRef.current = false })
                   }}
                   className={`flex items-center justify-center rounded-lg h-9 transition-colors ${
                     isSelected

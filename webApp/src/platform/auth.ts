@@ -183,19 +183,24 @@ export async function copyTemplate(
 }
 
 export async function loadWorkspace(): Promise<
-  { ok: true; versions: unknown[] } | { ok: false; error: string }
+  { ok: true; versions: unknown[]; history: unknown } | { ok: false; error: string }
 > {
-  const result = await api<{ versions: unknown[] }>('/api/workspace')
+  const result = await api<{ versions: unknown[]; history?: unknown }>('/api/workspace')
   if (!result.ok) return { ok: false, error: result.error }
-  return { ok: true, versions: Array.isArray(result.data.versions) ? result.data.versions : [] }
+  return {
+    ok: true,
+    versions: Array.isArray(result.data.versions) ? result.data.versions : [],
+    history: result.data.history ?? null
+  }
 }
 
 export async function saveWorkspace(
-  versions: unknown[]
+  versions: unknown[],
+  history?: unknown
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const result = await api<{ ok: boolean }>('/api/workspace', {
     method: 'PUT',
-    body: JSON.stringify({ versions })
+    body: JSON.stringify({ versions, history: history ?? null })
   })
   if (!result.ok) return { ok: false, error: result.error }
   return { ok: true }

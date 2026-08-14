@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useCallback, useState, useMemo, Suspense } from 'react'
 import { Download, FileImage, FileCode2, RefreshCw, CheckCircle2, Plus, X, Pencil, Upload, ClipboardCopy, ClipboardPaste, GripVertical, Paintbrush, ArrowDownToLine } from 'lucide-react'
 import type { FaviconConfig, AssetVariant, PaintSaveResult, PaintVector, PaintLayerId, PaintSession, FaviconOuterShape, OuterShapeCategory, PaintSaveTargets, LogoConfig, IconConfig, OutsideContentSettings } from '../types'
-import { FAVICON_SHAPE_OPTIONS, faviconOuterCategory } from '../types'
+import { FAVICON_SHAPE_OPTIONS, faviconOuterCategory, DEFAULT_ICON_CONFIG } from '../types'
 import { bakeFaviconPaintContentLayer, renderFavicon, faviconInnerDrawSize } from '../utils/renderer'
 import { exportFaviconPng, exportFaviconSvg, exportFaviconIco, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
@@ -17,12 +17,10 @@ const IconPaintEditor = lazyWithRetry(() =>
 import { hasMultipleColors } from '../utils/iconUtils'
 import { emptyImageRecolorFields, recolorFieldsAfterImageChange } from '../utils/imageRecolor'
 import {
-  applyPaintContentSyncToFaviconContent,
-  applyPaintContentSyncToIcon,
-  applyPaintOuterSyncToFavicon,
+  applyPaintSaveToFavicon,
+  mapFaviconStashToIconStash,
   outsideContentFromFavicon,
   switchFaviconContentType,
-  updateFaviconStashAfterSave,
   updateIconStashAfterSave
 } from '../utils/paintSettingsSync'
 import { faviconContentToIconConfig } from './LogoEditor'
@@ -146,7 +144,7 @@ export function FaviconEditor({
   const renderIdRef = useRef(0)
   const [exporting, setExporting] = useState<string | null>(null)
   const [exportNameStyle, setExportNameStyle] = useState<ExportNameStyle>(() => getStoredExportNameStyle())
-  const [previewSize, setPreviewSize] = useState(256)
+  const [previewSize, setPreviewSize] = useState(512)
   const [panelWidth, setPanelWidth] = useState(288)
   // Ref to the panel DOM node so we can update its width directly during drag
   // without a React state update (= no re-render = no spurious canvas redraw).
@@ -357,69 +355,44 @@ export function FaviconEditor({
       containerDecorationsPng: result.containerDecorationsPng,
       contentDecorationsPng: result.contentDecorationsPng,
       // Linked letters stay as live outside settings (not baked into decorations).
-      linkedTextInDecorations: result.linkedTextInDecorations ?? false
+      linkedTextInDecorations: result.linkedTextInDecorations ?? false,
+      paintShapeSize: result.paintShapeSize
     })!
     const favIds = new Set(targets.faviconIds)
     const logoIds = new Set(targets.logoIds)
-    if (matchingLogoVariant && (matchingLogoVariant.config.iconLinked ?? true)) {
-      logoIds.add(matchingLogoVariant.id)
-    }
     const sync = result.contentSync
+    if (!config) return
 
-    let nextFavicons = variantsRef.current
+    const savedFavicon = applyPaintSaveToFavicon(config, session, sync)
+    const savedIcon = updateIconStashAfterSave(
+      {
+        ...faviconContentToIconConfig(
+          savedFavicon.content,
+          matchingLogoVariant?.config.icon ?? DEFAULT_ICON_CONFIG,
+          savedFavicon
+        ),
+        // Hidden per-type stash comes from the painted favicon, not the linked
+        // logo’s preserved custom icon (that `icon` field is unused while synced).
+        contentTypeStash: mapFaviconStashToIconStash(savedFavicon.contentTypeStash)
+      },
+      session
+    )
+
     if (favIds.size > 0) {
-      nextFavicons = variantsRef.current.map((v) => {
-        if (!favIds.has(v.id)) return v
-        const content = applyPaintContentSyncToFaviconContent(v.config.content, sync)
-        const withSession: FaviconConfig = applyPaintOuterSyncToFavicon(
-          {
-            ...v.config,
-            paintSession: session,
-            content
-          },
-          sync
-        )
-        return {
-          ...v,
-          config: updateFaviconStashAfterSave(withSession, session)
-        }
-      })
-      onChange(nextFavicons)
+      onChange(
+        variantsRef.current.map((v) => {
+          if (!favIds.has(v.id)) return v
+          return { ...v, config: structuredClone(savedFavicon) }
+        })
+      )
     }
 
     if (logoIds.size > 0 && onLogoChange) {
       onLogoChange(
         logoVariantsRef.current.map((v) => {
           if (!logoIds.has(v.id)) return v
-          const twin = nextFavicons.find((f) => f.label === v.label)
-          const linked = (v.config.iconLinked ?? true) && !!twin
-          if (linked && twin) {
-            // Synced logo: update syncedIcon mirror only (custom icon stays).
-            return {
-              ...v,
-              config: {
-                ...v.config,
-                syncedIcon: faviconContentToIconConfig(
-                  twin.config.content,
-                  v.config.icon,
-                  twin.config
-                ),
-                iconSyncBroken: false,
-                syncedIconSnapshot: null
-              }
-            }
-          }
-          // Unsynced / frozen: write onto what the logo actually shows (or a
-          // favicon-derived copy), not a stale custom `icon` left behind while synced.
-          const baseIcon = twin
-            ? faviconContentToIconConfig(twin.config.content, v.config.icon, twin.config)
-            : v.config.iconSyncBroken && v.config.syncedIconSnapshot
-              ? v.config.syncedIconSnapshot
-              : v.config.icon
-          const icon = applyPaintContentSyncToIcon(
-            { ...baseIcon, paintSession: session },
-            sync
-          )
+          // Paint Save is a one-time copy: unlink and replace the stored original
+          // icon (the custom `icon` kept while synced) with the painted result.
           return {
             ...v,
             config: {
@@ -427,14 +400,15 @@ export function FaviconEditor({
               iconLinked: false,
               iconSyncBroken: false,
               syncedIconSnapshot: null,
-              icon: updateIconStashAfterSave(icon, session)
+              syncedIcon: null,
+              icon: structuredClone(savedIcon)
             }
           }
         })
       )
     }
     setShowPaint(false)
-  }, [onChange, onLogoChange, matchingLogoVariant])
+  }, [onChange, onLogoChange, matchingLogoVariant, config])
 
   const copyIconFromLogo = useCallback(() => {
     if (!config || !matchingLogoVariant?.config?.icon) return
@@ -762,6 +736,10 @@ export function FaviconEditor({
             contentOverlayImage={paintContentOverlay}
             hasContainer={paintHasContainer || hasOuterShape}
             innerDrawSize={faviconInnerDrawSize(config, 512)}
+            outerBorderWidthPx={config.borderWidth ?? 0}
+            outerBorderColor={config.borderColor}
+            outerShadowColor={config.shadowColor}
+            outerFillColor={config.backgroundColor}
             initialVectors={paintVectors}
             initialLayerOrder={paintLayerOrder}
             outsideContentSettings={paintOutsideContent}

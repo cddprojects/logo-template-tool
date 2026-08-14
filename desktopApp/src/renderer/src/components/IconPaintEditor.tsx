@@ -27,6 +27,8 @@ import {
   proxyBoxFromSizeRatio,
   stripContentProxyVectors
 } from '../utils/paintSettingsSync'
+import { bakeCanvasDropShadow } from '../utils/paintVectorRender'
+import { reuseCanvas, takeCanvas, releaseCanvas, reset2dState } from '../utils/canvasPool'
 
 type Tool = 'pointer' | 'brush' | 'eraser' | 'fill' | 'eyedropper' | 'line' | 'shape' | 'freepoly' | 'polygon' | 'select' | 'text' | 'reshape'
 
@@ -276,6 +278,17 @@ interface IconPaintEditorProps {
    * outers). Paint stays on the Outer overlay only.
    */
   syncOuterFillColor?: boolean
+  /**
+   * Visible outer-shape border thickness in paint pixels (clip-and-double stroke).
+   * Used so Fill on the background does not recolour the border, and vice versa.
+   */
+  outerBorderWidthPx?: number
+  /** Live outer border colour (alpha ignored when matching the shadow). */
+  outerBorderColor?: string | null
+  /** Live outer shadow colour (alpha ignored when matching the border). */
+  outerShadowColor?: string | null
+  /** Live outer fill / background colour — used to keep interior separate from the rim. */
+  outerFillColor?: string | null
   /** Optional: pick which logo / favicon variants receive Save. */
   logoVariantOptions?: PaintVariantOption[]
   faviconVariantOptions?: PaintVariantOption[]
@@ -362,6 +375,8 @@ interface LineObj {
   shadowSpread?: number
   /** Rotation about the object's centre, in radians. */
   rot?: number
+  /** Frozen rotation/scale origin (crop mode). */
+  transformOrigin?: Pt
   /** Horizontal mirror scale (default 1). Text flip toggles ±1. */
   scaleX?: number
   /** Vertical mirror scale (default 1). Text flip toggles ±1. */
@@ -387,6 +402,8 @@ interface LineObj {
 
 /** Cache decoded stamp images so undo/redo redraws stay sync after the first load. */
 const stampImgCache = new Map<string, HTMLImageElement>()
+const textOffSlot: { current: HTMLCanvasElement | null } = { current: null }
+const strokeScratchSlot: { current: HTMLCanvasElement | null } = { current: null }
 function ensureStampImage(dataUrl: string, onReady?: () => void): HTMLImageElement | null {
   const cached = stampImgCache.get(dataUrl)
   if (cached) {
@@ -399,6 +416,67 @@ function ensureStampImage(dataUrl: string, onReady?: () => void): HTMLImageEleme
   if (onReady) img.onload = () => onReady()
   img.src = dataUrl
   return null
+}
+
+/** Live Inner letters / contentBound proxy — fillable material, not session walls. */
+function isLiveInnerVector(l: LineObj): boolean {
+  return !!l.linkedOutsideText || !!l.contentBound
+}
+
+/** Spiral search for a pixel that may start a flood (click landed on a cut). */
+function findFillSeed(
+  w: number,
+  h: number,
+  sx: number,
+  sy: number,
+  canStart: (x: number, y: number) => boolean
+): { x: number; y: number } | null {
+  const x0 = Math.floor(sx)
+  const y0 = Math.floor(sy)
+  if (canStart(x0, y0)) return { x: x0, y: y0 }
+  const maxR = 16
+  for (let r = 1; r <= maxR; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue
+        const x = x0 + dx
+        const y = y0 + dy
+        if (x < 0 || y < 0 || x >= w || y >= h) continue
+        if (canStart(x, y)) return { x, y }
+      }
+    }
+  }
+  return null
+}
+
+/** 4-connected flood from (sx,sy). `canVisit` receives the ImageData byte index. */
+function floodFillConnected(
+  w: number,
+  h: number,
+  sx: number,
+  sy: number,
+  canVisit: (byteIndex: number) => boolean
+): Uint8Array {
+  const visited = new Uint8Array(w * h)
+  const x0 = Math.floor(sx)
+  const y0 = Math.floor(sy)
+  if (x0 < 0 || y0 < 0 || x0 >= w || y0 >= h) return visited
+  const start = y0 * w + x0
+  if (!canVisit(start * 4)) return visited
+  const stack = [start]
+  visited[start] = 1
+  while (stack.length) {
+    const p = stack.pop()!
+    const x = p % w
+    const y = (p / w) | 0
+    const neighbors = [x > 0 ? p - 1 : -1, x + 1 < w ? p + 1 : -1, y > 0 ? p - w : -1, y + 1 < h ? p + w : -1]
+    for (const np of neighbors) {
+      if (np < 0 || visited[np] || !canVisit(np * 4)) continue
+      visited[np] = 1
+      stack.push(np)
+    }
+  }
+  return visited
 }
 
 function stampRenderDataUrl(l: LineObj, _width: number, _height: number): string {
@@ -1001,32 +1079,33 @@ function renderLineWithReshape(ctx: CanvasRenderingContext2D, l: LineObj): void 
   }
   const W = ctx.canvas.width
   const H = ctx.canvas.height
-  const temp = document.createElement('canvas')
-  temp.width = W
-  temp.height = H
-  const tctx = temp.getContext('2d')!
-  tctx.clearRect(0, 0, W, H)
-  renderLineUnwarpedToCanvas(tctx, l)
-  const src = resolveReshapeSource(temp, l, W, H)
-  if (!src) {
-    renderLineBase(ctx, l)
-    return
+  const temp = takeCanvas(W, H)
+  try {
+    const tctx = temp.getContext('2d')!
+    renderLineUnwarpedToCanvas(tctx, l)
+    const src = resolveReshapeSource(temp, l, W, H)
+    if (!src) {
+      renderLineBase(ctx, l)
+      return
+    }
+    const q: [Pt, Pt, Pt, Pt] = [quad[0], quad[1], quad[2], quad[3]]
+    // Unchanged quad: draw normally — avoids mesh seam lines on entering reshape.
+    if (reshapeQuadMatchesSource(q, src)) {
+      renderLineBase(ctx, l)
+      return
+    }
+    ctx.save()
+    ctx.imageSmoothingEnabled = true
+    ctx.imageSmoothingQuality = 'high'
+    if (quadIsAxisAlignedRect(q)) {
+      drawImageAxisRect(ctx, temp, src.x, src.y, src.w, src.h, q)
+    } else {
+      drawImageHomographyQuad(ctx, temp, src.x, src.y, src.w, src.h, q)
+    }
+    ctx.restore()
+  } finally {
+    releaseCanvas(temp)
   }
-  const q: [Pt, Pt, Pt, Pt] = [quad[0], quad[1], quad[2], quad[3]]
-  // Unchanged quad: draw normally — avoids mesh seam lines on entering reshape.
-  if (reshapeQuadMatchesSource(q, src)) {
-    renderLineBase(ctx, l)
-    return
-  }
-  ctx.save()
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
-  if (quadIsAxisAlignedRect(q)) {
-    drawImageAxisRect(ctx, temp, src.x, src.y, src.w, src.h, q)
-  } else {
-    drawImageHomographyQuad(ctx, temp, src.x, src.y, src.w, src.h, q)
-  }
-  ctx.restore()
 }
 
 function translateReshape(l: LineObj, dx: number, dy: number): void {
@@ -1133,12 +1212,13 @@ function outsideOffsetToPaint(settings: OutsideTextSettings, resolution: number)
   }
 }
 
-/** Map outside Inner content shadow → paint text shadow (design 256 → paint px). */
+/** Map outside Inner content shadow → paint text shadow (design 256 → inner-draw px). */
 function outsideShadowToPaint(
   settings: OutsideTextSettings,
-  resolution: number
+  resolution: number,
+  innerDrawSize = resolution
 ): Pick<LineObj, 'shadow' | 'shadowColor' | 'shadowBlur' | 'shadowSpread' | 'shadowOffsetX' | 'shadowOffsetY'> {
-  const scale = resolution / 256
+  const scale = Math.max(1, innerDrawSize) / 256
   if (!settings.contentShadowEnabled) {
     return {
       shadow: false,
@@ -1170,7 +1250,7 @@ function lineFromOutsideText(
   const letterSpacing = (settings.letterSpacing ?? 0) * (resolution / 256)
   const weight = parseFontWeightNum(settings.fontWeight)
   const off = outsideOffsetToPaint(settings, resolution)
-  const shadow = outsideShadowToPaint(settings, resolution)
+  const shadow = outsideShadowToPaint(settings, resolution, innerDrawSize)
   const probe: LineObj = {
     id: genId(),
     type: 'text',
@@ -1227,7 +1307,7 @@ function textPanelStateFromLine(l: LineObj): {
     shadowColor: l.shadowColor ?? '#000000b3',
     shadowBlur: l.shadowBlur ?? 8,
     shadowOX: l.shadowOffsetX ?? 0,
-    shadowOY: l.shadowOffsetY ?? 4,
+    shadowOY: l.shadowOffsetY ?? 3,
     shadowSpread: l.shadowSpread ?? 0
   }
 }
@@ -1244,7 +1324,7 @@ function applyOutsideTextToLine(
   const letterSpacing = (settings.letterSpacing ?? 0) * (resolution / 256)
   const weight = parseFontWeightNum(settings.fontWeight)
   const off = outsideOffsetToPaint(settings, resolution)
-  const shadow = outsideShadowToPaint(settings, resolution)
+  const shadow = outsideShadowToPaint(settings, resolution, innerDrawSize)
   const link = opts?.linkToOutside ?? !!l.linkedOutsideText
   const next: LineObj = {
     ...l,
@@ -1273,7 +1353,7 @@ function lineFromContentProxy(
   innerDrawSize = resolution
 ): LineObj {
   const off = outsideOffsetToPaint(settings, resolution)
-  const shadow = outsideShadowToPaint(settings, resolution)
+  const shadow = outsideShadowToPaint(settings, resolution, innerDrawSize)
   const cx = resolution / 2 + off.x
   const cy = resolution / 2 + off.y
   // Size from live sizeRatio; crop only supplies pixels + aspect (not bbox size).
@@ -1314,7 +1394,7 @@ function applyOutsideContentToProxy(
   innerDrawSize = resolution
 ): LineObj {
   const off = outsideOffsetToPaint(settings, resolution)
-  const shadow = outsideShadowToPaint(settings, resolution)
+  const shadow = outsideShadowToPaint(settings, resolution, innerDrawSize)
   const a = l.pts[0], b = l.pts[1]
   let w = Math.max(1, Math.abs((b?.x ?? 0) - (a?.x ?? 0)))
   let h = Math.max(1, Math.abs((b?.y ?? 0) - (a?.y ?? 0)))
@@ -1353,51 +1433,47 @@ function renderText(ctx: CanvasRenderingContext2D, l: LineObj): void {
   const { lineH } = textMetrics(l)
   const spacing = l.letterSpacing ?? 0
   const font = textFontStr(l)
-  ctx.save()
-  ctx.font = font
-  ctx.textAlign = 'left'
-  ctx.textBaseline = 'top'
-  if (l.shadow) {
-    const blur = l.shadowBlur ?? 0
-    const ox = l.shadowOffsetX ?? 0
-    const oy = l.shadowOffsetY ?? 0
-    const spread = l.shadowSpread ?? 0
-    const sColor = firstSolidColor(l.shadowColor ?? '#00000080')
-    if (spread > 0) {
-      const HUGE = 10000
-      const sc = document.createElement('canvas')
-      sc.width = ctx.canvas.width
-      sc.height = ctx.canvas.height
-      const s = sc.getContext('2d')!
-      s.font = font
-      s.textAlign = 'left'
-      s.textBaseline = 'top'
-      s.fillStyle = '#000'
-      s.strokeStyle = '#000'
-      s.lineJoin = 'round'
-      s.lineWidth = spread * 2
-      rows.forEach((r, i) => {
-        const y = p.y + i * lineH
-        if (r) {
-          strokeSpacedText(s, r, p.x, y, spacing)
-          fillSpacedText(s, r, p.x, y, spacing)
-        }
-      })
-      ctx.save()
-      ctx.filter = `drop-shadow(${ox + HUGE}px ${oy + HUGE}px ${blur}px ${sColor})`
-      ctx.drawImage(sc, -HUGE, -HUGE)
-      ctx.restore()
-    } else {
-      ctx.shadowColor = sColor
-      ctx.shadowBlur = blur
-      ctx.shadowOffsetX = ox
-      ctx.shadowOffsetY = oy
-    }
-  }
   const b = textBBox(l)
-  ctx.fillStyle = resolveCanvasColor(ctx, l.color, b.x, b.y, Math.max(1, b.w), Math.max(1, b.h))
-  rows.forEach((r, i) => { if (r) fillSpacedText(ctx, r, p.x, p.y + i * lineH, spacing) })
-  ctx.restore()
+
+  const drawGlyphs = (target: CanvasRenderingContext2D, ox: number, oy: number, fillStyle: string | CanvasGradient) => {
+    target.font = font
+    target.textAlign = 'left'
+    target.textBaseline = 'top'
+    target.fillStyle = fillStyle
+    rows.forEach((r, i) => { if (r) fillSpacedText(target, r, p.x + ox, p.y + i * lineH + oy, spacing) })
+  }
+
+  if (!l.shadow) {
+    drawGlyphs(ctx, 0, 0, resolveCanvasColor(ctx, l.color, b.x, b.y, Math.max(1, b.w), Math.max(1, b.h)))
+    return
+  }
+
+  const blur = l.shadowBlur ?? 0
+  const sox = l.shadowOffsetX ?? 0
+  const soy = l.shadowOffsetY ?? 0
+  const spread = l.shadowSpread ?? 0
+  const padL = Math.ceil(Math.max(0, blur * 2 + spread - sox) + 4)
+  const padR = Math.ceil(Math.max(0, blur * 2 + spread + sox) + 4)
+  const padT = Math.ceil(Math.max(0, blur * 2 + spread - soy) + 4)
+  const padB = Math.ceil(Math.max(0, blur * 2 + spread + soy) + 4)
+  const tw = Math.max(1, Math.ceil(b.w) + padL + padR)
+  const th = Math.max(1, Math.ceil(b.h) + padT + padB)
+  const off = reuseCanvas(textOffSlot, tw, th)
+  const o = off.getContext('2d')!
+  drawGlyphs(
+    o,
+    -b.x + padL,
+    -b.y + padT,
+    resolveCanvasColor(o, l.color, padL, padT, Math.max(1, b.w), Math.max(1, b.h))
+  )
+  const src = bakeCanvasDropShadow(off, {
+    blur,
+    ox: sox,
+    oy: soy,
+    spread,
+    color: l.shadowColor ?? '#00000080'
+  })
+  ctx.drawImage(src, b.x - padL, b.y - padT)
 }
 
 // Sample a line into a flat polyline for rendering / hit-testing.
@@ -1405,7 +1481,7 @@ function flattenLine(l: LineObj): Pt[] {
   const p = l.pts
   if (l.reshapeQuad?.length === 4) return [...l.reshapeQuad, l.reshapeQuad[0]]
   if (l.type === 'text') {
-    const b = textBBox(l)
+    const b = textInkBBox(l)
     return [
       { x: b.x, y: b.y }, { x: b.x + b.w, y: b.y },
       { x: b.x + b.w, y: b.y + b.h }, { x: b.x, y: b.y + b.h }, { x: b.x, y: b.y }
@@ -1433,6 +1509,27 @@ function flattenLine(l: LineObj): Pt[] {
   }
   // free → smooth spline through all anchor points
   return catmullRom(p, 16)
+}
+
+/** Sample whether a canvas point hits the glyph ink, its shadow, or neither. */
+function textFillHit(l: LineObj, canvasPt: Pt, canvasW: number, canvasH: number): 'glyph' | 'shadow' | null {
+  if (l.type !== 'text' || !l.text) return null
+  const w = Math.max(1, Math.ceil(canvasW))
+  const h = Math.max(1, Math.ceil(canvasH))
+  const x = Math.max(0, Math.min(w - 1, Math.floor(canvasPt.x)))
+  const y = Math.max(0, Math.min(h - 1, Math.floor(canvasPt.y)))
+  const sample = (withShadow: boolean): number => {
+    const c = document.createElement('canvas')
+    c.width = w
+    c.height = h
+    const ctx = c.getContext('2d')
+    if (!ctx) return 0
+    renderLineBase(ctx, withShadow ? l : { ...l, shadow: false })
+    return ctx.getImageData(x, y, 1, 1).data[3]
+  }
+  if (sample(false) > 12) return 'glyph'
+  if (l.shadow && sample(true) > 12) return 'shadow'
+  return null
 }
 
 // Convert an existing line's points to a different type (preserving endpoints).
@@ -1607,6 +1704,7 @@ function drawCap(ctx: CanvasRenderingContext2D, at: Pt, dir: Pt, cap: CapType, c
 
 // Axis-aligned bounding-box centre of an object's (unrotated) geometry.
 function objCenter(l: LineObj): Pt {
+  if (l.transformOrigin) return { x: l.transformOrigin.x, y: l.transformOrigin.y }
   if (l.type === 'text') {
     return textInkCenter(l)
   }
@@ -1658,7 +1756,7 @@ function unmapObjDisplayPt(p: Pt, l: LineObj): Pt {
 
 // Top-centre anchor (unrotated) used to attach the rotate pin.
 function objTopCenter(l: LineObj): Pt {
-  if (l.type === 'text') { const b = textBBox(l); return { x: b.x + b.w / 2, y: b.y } }
+  if (l.type === 'text') { const b = textInkBBox(l); return { x: b.x + b.w / 2, y: b.y } }
   const pts = l.pts.length ? l.pts : [{ x: 0, y: 0 }]
   let minX = Infinity, minY = Infinity, maxX = -Infinity
   for (const p of pts) { minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x) }
@@ -1695,9 +1793,7 @@ function renderLine(ctx: CanvasRenderingContext2D, l: LineObj): void {
   }
   // Composite this layer in isolation so destination-out eraser strokes never
   // punch through layers below it.
-  const canvas = document.createElement('canvas')
-  canvas.width = ctx.canvas.width
-  canvas.height = ctx.canvas.height
+  const canvas = reuseCanvas(strokeScratchSlot, ctx.canvas.width, ctx.canvas.height)
   const layerCtx = canvas.getContext('2d')!
   renderLineBase(layerCtx, l)
 
@@ -1746,48 +1842,50 @@ function renderGroup(
   if (group.pts.length < 2) return
   // Render and erase in an isolated surface. destination-out therefore affects
   // only this group's composite and can never punch through unrelated layers.
-  const canvas = document.createElement('canvas')
-  canvas.width = ctx.canvas.width
-  canvas.height = ctx.canvas.height
-  const layerCtx = canvas.getContext('2d')!
-  for (const child of all) {
-    if (child.parentId !== group.id) continue
-    const childVisible = visible
-      ? visible(child)
-      : (child.visible ?? child.editable ?? true) !== false
-    if (child.type === 'group') {
-      // An unchecked group does not suppress checked descendants; it only
-      // disables that group's own paint/edit surface.
-      renderGroup(layerCtx, child, all, visible, childVisible)
-    } else if (childVisible) {
-      renderLine(layerCtx, child)
-    }
-  }
-  if (!applyGroupPaint) {
-    ctx.drawImage(canvas, 0, 0)
-    return
-  }
-  const a = group.pts[0], b = group.pts[1]
-  const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
-  const w = Math.max(1, Math.abs(b.x - a.x)), h = Math.max(1, Math.abs(b.y - a.y))
-  for (const stroke of group.paintStrokes ?? []) {
-    const points = stroke.pts.map((p) => ({ x: x + p.x * w, y: y + p.y * h }))
-    if (!points.length) continue
-    const brushSize = Math.max(0.5, stroke.size * Math.min(w, h))
-    if (points.length === 1) {
-      stampBrushTip(layerCtx, stroke.tip, points[0].x, points[0].y, brushSize, stroke.color, stroke.tool === 'eraser')
-    } else {
-      for (let i = 1; i < points.length; i++) {
-        strokeBrushTip(
-          layerCtx, stroke.tip,
-          points[i - 1].x, points[i - 1].y,
-          points[i].x, points[i].y,
-          brushSize, stroke.color, stroke.tool === 'eraser'
-        )
+  const canvas = takeCanvas(ctx.canvas.width, ctx.canvas.height)
+  try {
+    const layerCtx = canvas.getContext('2d')!
+    for (const child of all) {
+      if (child.parentId !== group.id) continue
+      const childVisible = visible
+        ? visible(child)
+        : (child.visible ?? child.editable ?? true) !== false
+      if (child.type === 'group') {
+        // An unchecked group does not suppress checked descendants; it only
+        // disables that group's own paint/edit surface.
+        renderGroup(layerCtx, child, all, visible, childVisible)
+      } else if (childVisible) {
+        renderLine(layerCtx, child)
       }
     }
+    if (!applyGroupPaint) {
+      ctx.drawImage(canvas, 0, 0)
+      return
+    }
+    const a = group.pts[0], b = group.pts[1]
+    const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
+    const w = Math.max(1, Math.abs(b.x - a.x)), h = Math.max(1, Math.abs(b.y - a.y))
+    for (const stroke of group.paintStrokes ?? []) {
+      const points = stroke.pts.map((p) => ({ x: x + p.x * w, y: y + p.y * h }))
+      if (!points.length) continue
+      const brushSize = Math.max(0.5, stroke.size * Math.min(w, h))
+      if (points.length === 1) {
+        stampBrushTip(layerCtx, stroke.tip, points[0].x, points[0].y, brushSize, stroke.color, stroke.tool === 'eraser')
+      } else {
+        for (let i = 1; i < points.length; i++) {
+          strokeBrushTip(
+            layerCtx, stroke.tip,
+            points[i - 1].x, points[i - 1].y,
+            points[i].x, points[i].y,
+            brushSize, stroke.color, stroke.tool === 'eraser'
+          )
+        }
+      }
+    }
+    ctx.drawImage(canvas, 0, 0)
+  } finally {
+    releaseCanvas(canvas)
   }
-  ctx.drawImage(canvas, 0, 0)
 }
 
 function renderObjectTree(
@@ -1912,6 +2010,7 @@ function cloneLines(arr: LineObj[]): LineObj[] {
   return arr.map((l) => ({
     ...l,
     pts: l.pts.map((p) => ({ ...p })),
+    transformOrigin: l.transformOrigin ? { ...l.transformOrigin } : l.transformOrigin,
     reshapeQuad: l.reshapeQuad?.map((p) => ({ ...p })),
     reshapeBaseQuad: l.reshapeBaseQuad?.map((p) => ({ ...p })),
     reshapeSrc: l.reshapeSrc ? { ...l.reshapeSrc } : l.reshapeSrc,
@@ -2211,6 +2310,257 @@ function starPts(a: Pt, b: Pt, spikes: number, innerRatio = 0.45): Pt[] {
 function pointInRect(a: Pt, b: Pt, p: Pt): boolean {
   return p.x >= Math.min(a.x, b.x) && p.x <= Math.max(a.x, b.x) && p.y >= Math.min(a.y, b.y) && p.y <= Math.max(a.y, b.y)
 }
+
+/** Word-style picture crop: 0=nw 1=n 2=ne 3=e 4=se 5=s 6=sw 7=w */
+interface CropSession {
+  id: string
+  imgX: number
+  imgY: number
+  imgW: number
+  imgH: number
+  x: number
+  y: number
+  w: number
+  h: number
+  startPts: [Pt, Pt]
+}
+const MIN_CROP = 8
+const CROP_HIT = 14
+const CROP_CURSORS = [
+  'nwse-resize', 'ns-resize', 'nesw-resize', 'ew-resize',
+  'nwse-resize', 'ns-resize', 'nesw-resize', 'ew-resize'
+] as const
+
+function stampLocalRect(l: LineObj): { x: number; y: number; w: number; h: number } {
+  const x = Math.min(l.pts[0].x, l.pts[1].x)
+  const y = Math.min(l.pts[0].y, l.pts[1].y)
+  return {
+    x,
+    y,
+    w: Math.max(1, Math.abs(l.pts[1].x - l.pts[0].x)),
+    h: Math.max(1, Math.abs(l.pts[1].y - l.pts[0].y))
+  }
+}
+
+function cropHandleLocals(cs: CropSession): Pt[] {
+  const { x, y, w, h } = cs
+  return [
+    { x, y },
+    { x: x + w / 2, y },
+    { x: x + w, y },
+    { x: x + w, y: y + h / 2 },
+    { x: x + w, y: y + h },
+    { x: x + w / 2, y: y + h },
+    { x, y: y + h },
+    { x, y: y + h / 2 }
+  ]
+}
+
+function mapRectQuad(l: LineObj, x: number, y: number, w: number, h: number): Pt[] {
+  return [
+    { x, y },
+    { x: x + w, y },
+    { x: x + w, y: y + h },
+    { x, y: y + h }
+  ].map((p) => mapObjDisplayPt(p, l))
+}
+
+function cropCursorForHandle(idx: number, rot: number): string {
+  const steps = (((idx + Math.round((rot * 4) / Math.PI)) % 8) + 8) % 8
+  return CROP_CURSORS[steps]
+}
+
+function pointInLocalRect(
+  x: number, y: number, w: number, h: number, p: Pt
+): boolean {
+  return p.x >= x && p.x <= x + w && p.y >= y && p.y <= y + h
+}
+
+function clampCropPan(cs: CropSession): void {
+  cs.imgX = Math.min(cs.x, Math.max(cs.x + cs.w - cs.imgW, cs.imgX))
+  cs.imgY = Math.min(cs.y, Math.max(cs.y + cs.h - cs.imgH, cs.imgY))
+}
+
+function applyCropHandleMove(
+  cs: CropSession,
+  idx: number,
+  local: Pt,
+  start: { x: number; y: number; w: number; h: number },
+  lockAspect: boolean
+): void {
+  const imgL = cs.imgX
+  const imgT = cs.imgY
+  const imgR = cs.imgX + cs.imgW
+  const imgB = cs.imgY + cs.imgH
+  let left = start.x
+  let top = start.y
+  let right = start.x + start.w
+  let bottom = start.y + start.h
+  const moveL = idx === 0 || idx === 6 || idx === 7
+  const moveR = idx === 2 || idx === 3 || idx === 4
+  const moveT = idx === 0 || idx === 1 || idx === 2
+  const moveB = idx === 4 || idx === 5 || idx === 6
+  if (moveL) left = local.x
+  if (moveR) right = local.x
+  if (moveT) top = local.y
+  if (moveB) bottom = local.y
+  if (lockAspect && start.h > 0) {
+    const ratio = start.w / Math.max(1, start.h)
+    if ((moveL || moveR) && (moveT || moveB)) {
+      const origin = { x: moveL ? right : left, y: moveT ? bottom : top }
+      const end = lockAspectRatioEnd(origin, { x: moveL ? left : right, y: moveT ? top : bottom }, ratio)
+      if (moveL) left = end.x
+      else right = end.x
+      if (moveT) top = end.y
+      else bottom = end.y
+    } else if (moveL || moveR) {
+      const w = Math.max(MIN_CROP, Math.abs(right - left))
+      const h = w / ratio
+      const cy = start.y + start.h / 2
+      top = cy - h / 2
+      bottom = cy + h / 2
+    } else if (moveT || moveB) {
+      const h = Math.max(MIN_CROP, Math.abs(bottom - top))
+      const w = h * ratio
+      const cx = start.x + start.w / 2
+      left = cx - w / 2
+      right = cx + w / 2
+    }
+  }
+  if (right < left) {
+    const t = left
+    left = right
+    right = t
+  }
+  if (bottom < top) {
+    const t = top
+    top = bottom
+    bottom = t
+  }
+  left = Math.max(imgL, left)
+  top = Math.max(imgT, top)
+  right = Math.min(imgR, right)
+  bottom = Math.min(imgB, bottom)
+  if (right - left < MIN_CROP) {
+    if (moveR && !moveL) left = Math.max(imgL, right - MIN_CROP)
+    else right = Math.min(imgR, left + MIN_CROP)
+  }
+  if (bottom - top < MIN_CROP) {
+    if (moveB && !moveT) top = Math.max(imgT, bottom - MIN_CROP)
+    else bottom = Math.min(imgB, top + MIN_CROP)
+  }
+  cs.x = left
+  cs.y = top
+  cs.w = Math.max(1, right - left)
+  cs.h = Math.max(1, bottom - top)
+}
+
+function drawCropBar(
+  ctx: CanvasRenderingContext2D,
+  center: Pt,
+  angle: number,
+  length: number,
+  thickness: number
+): void {
+  ctx.save()
+  ctx.translate(center.x, center.y)
+  ctx.rotate(angle)
+  const hw = length / 2
+  const hh = thickness / 2
+  ctx.fillStyle = '#1a1a1a'
+  ctx.strokeStyle = '#f5f5f5'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.rect(-hw, -hh, length, thickness)
+  ctx.fill()
+  ctx.stroke()
+  ctx.restore()
+}
+
+function drawCropBarFrom(
+  ctx: CanvasRenderingContext2D,
+  origin: Pt,
+  angle: number,
+  length: number,
+  thickness: number
+): void {
+  const mid = {
+    x: origin.x + Math.cos(angle) * (length / 2),
+    y: origin.y + Math.sin(angle) * (length / 2)
+  }
+  drawCropBar(ctx, mid, angle, length, thickness)
+}
+
+function drawCropOverlay(ctx: CanvasRenderingContext2D, l: LineObj, cs: CropSession): void {
+  const imgQ = mapRectQuad(l, cs.imgX, cs.imgY, cs.imgW, cs.imgH)
+  const cropQ = mapRectQuad(l, cs.x, cs.y, cs.w, cs.h)
+  ctx.save()
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.45)'
+  ctx.beginPath()
+  ctx.moveTo(imgQ[0].x, imgQ[0].y)
+  for (let i = 1; i < 4; i++) ctx.lineTo(imgQ[i].x, imgQ[i].y)
+  ctx.closePath()
+  ctx.moveTo(cropQ[0].x, cropQ[0].y)
+  for (let i = 1; i < 4; i++) ctx.lineTo(cropQ[i].x, cropQ[i].y)
+  ctx.closePath()
+  ctx.fill('evenodd')
+  ctx.restore()
+
+  ctx.save()
+  ctx.strokeStyle = '#ffffff'
+  ctx.lineWidth = 1.75
+  ctx.beginPath()
+  ctx.moveTo(cropQ[0].x, cropQ[0].y)
+  for (let i = 1; i < 4; i++) ctx.lineTo(cropQ[i].x, cropQ[i].y)
+  ctx.closePath()
+  ctx.stroke()
+  ctx.strokeStyle = '#111111'
+  ctx.lineWidth = 1
+  ctx.stroke()
+  ctx.restore()
+
+  const edgeLen = 22
+  const cornerLen = 18
+  const thick = 6
+  drawCropBar(ctx, {
+    x: (cropQ[0].x + cropQ[1].x) / 2,
+    y: (cropQ[0].y + cropQ[1].y) / 2
+  }, Math.atan2(cropQ[1].y - cropQ[0].y, cropQ[1].x - cropQ[0].x), edgeLen, thick)
+  drawCropBar(ctx, {
+    x: (cropQ[1].x + cropQ[2].x) / 2,
+    y: (cropQ[1].y + cropQ[2].y) / 2
+  }, Math.atan2(cropQ[2].y - cropQ[1].y, cropQ[2].x - cropQ[1].x), edgeLen, thick)
+  drawCropBar(ctx, {
+    x: (cropQ[2].x + cropQ[3].x) / 2,
+    y: (cropQ[2].y + cropQ[3].y) / 2
+  }, Math.atan2(cropQ[3].y - cropQ[2].y, cropQ[3].x - cropQ[2].x), edgeLen, thick)
+  drawCropBar(ctx, {
+    x: (cropQ[3].x + cropQ[0].x) / 2,
+    y: (cropQ[3].y + cropQ[0].y) / 2
+  }, Math.atan2(cropQ[0].y - cropQ[3].y, cropQ[0].x - cropQ[3].x), edgeLen, thick)
+  drawCropBarFrom(ctx, cropQ[0], Math.atan2(cropQ[1].y - cropQ[0].y, cropQ[1].x - cropQ[0].x), cornerLen, thick)
+  drawCropBarFrom(ctx, cropQ[0], Math.atan2(cropQ[3].y - cropQ[0].y, cropQ[3].x - cropQ[0].x), cornerLen, thick)
+  drawCropBarFrom(ctx, cropQ[1], Math.atan2(cropQ[0].y - cropQ[1].y, cropQ[0].x - cropQ[1].x), cornerLen, thick)
+  drawCropBarFrom(ctx, cropQ[1], Math.atan2(cropQ[2].y - cropQ[1].y, cropQ[2].x - cropQ[1].x), cornerLen, thick)
+  drawCropBarFrom(ctx, cropQ[2], Math.atan2(cropQ[1].y - cropQ[2].y, cropQ[1].x - cropQ[2].x), cornerLen, thick)
+  drawCropBarFrom(ctx, cropQ[2], Math.atan2(cropQ[3].y - cropQ[2].y, cropQ[3].x - cropQ[2].x), cornerLen, thick)
+  drawCropBarFrom(ctx, cropQ[3], Math.atan2(cropQ[2].y - cropQ[3].y, cropQ[2].x - cropQ[3].x), cornerLen, thick)
+  drawCropBarFrom(ctx, cropQ[3], Math.atan2(cropQ[0].y - cropQ[3].y, cropQ[0].x - cropQ[3].x), cornerLen, thick)
+}
+
+function cropHandleAt(l: LineObj, cs: CropSession, pt: Pt): number {
+  const pts = cropHandleLocals(cs).map((p) => mapObjDisplayPt(p, l))
+  let best = -1
+  let bestD = CROP_HIT
+  for (let i = 0; i < pts.length; i++) {
+    const d = dist(pts[i], pt)
+    if (d <= bestD) {
+      bestD = d
+      best = i
+    }
+  }
+  return best
+}
 function pointInPoly(poly: Pt[], p: Pt): boolean {
   let inside = false
   for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -2376,9 +2726,11 @@ const normalizeLayerOrder = (order?: PaintLayerId[]): PaintLayerId[] =>
 const CHECKER =
   'repeating-conic-gradient(#3a3a4a 0% 25%, #2a2a36 0% 50%) 0 0 / 20px 20px'
 
-// The modal overlays the frameless window's title bar, whose -webkit-app-region:
-// drag strip would otherwise swallow clicks on the header buttons. Marking the
-// whole modal no-drag restores normal clicking.
+// Inline -webkit-app-region (Vite strips the prefix from stylesheets).
+// Overlay sits below the h-10 TitleBar so the window stays draggable; the rest
+// of the modal is no-drag so canvas/tools receive clicks. Paint header empty
+// space is also a drag region; Cancel/Save stay no-drag.
+const DRAG    = { WebkitAppRegion: 'drag'    } as React.CSSProperties
 const NO_DRAG = { WebkitAppRegion: 'no-drag' } as React.CSSProperties
 
 // Distance (px) the rotate pin sits above an object's top edge.
@@ -2517,6 +2869,105 @@ function ShapeMenu({
   )
 }
 
+/**
+ * Euclidean distance (px) to the nearest outside pixel (alpha < `outsideA`).
+ * Used so a curved border ring is a true offset of the silhouette, not a
+ * diamond-shaped Manhattan band that misses the stroke and hits the shadow.
+ */
+function alphaOutsideEDT(
+  data: Uint8ClampedArray,
+  W: number,
+  H: number,
+  outsideA = 150
+): Float32Array {
+  const INF = 1e12
+  const sq = new Float64Array(W * H)
+  for (let i = 0; i < W * H; i++) sq[i] = data[i * 4 + 3] < outsideA ? 0 : INF
+
+  const nMax = Math.max(W, H)
+  const f = new Float64Array(nMax)
+  const d = new Float64Array(nMax)
+  const v = new Int32Array(nMax)
+  const z = new Float64Array(nMax + 1)
+
+  const edt1d = (n: number) => {
+    let k = 0
+    v[0] = 0
+    z[0] = Number.NEGATIVE_INFINITY
+    z[1] = Number.POSITIVE_INFINITY
+    for (let q = 1; q < n; q++) {
+      let s: number
+      for (;;) {
+        const r = v[k]
+        const denom = 2 * (q - r)
+        s = denom === 0 ? Number.POSITIVE_INFINITY : ((f[q] + q * q) - (f[r] + r * r)) / denom
+        if (s > z[k]) break
+        k--
+        if (k < 0) {
+          k = 0
+          s = Number.NEGATIVE_INFINITY
+          break
+        }
+      }
+      k++
+      v[k] = q
+      z[k] = s
+      z[k + 1] = Number.POSITIVE_INFINITY
+    }
+    k = 0
+    for (let q = 0; q < n; q++) {
+      while (z[k + 1] < q) k++
+      const r = v[k]
+      d[q] = (q - r) * (q - r) + f[r]
+    }
+  }
+
+  for (let x = 0; x < W; x++) {
+    for (let y = 0; y < H; y++) f[y] = sq[y * W + x]
+    edt1d(H)
+    for (let y = 0; y < H; y++) sq[y * W + x] = d[y]
+  }
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) f[x] = sq[y * W + x]
+    edt1d(W)
+    for (let x = 0; x < W; x++) sq[y * W + x] = d[x]
+  }
+
+  const out = new Float32Array(W * H)
+  for (let i = 0; i < W * H; i++) out[i] = Math.sqrt(sq[i])
+  return out
+}
+
+function cssSolidRgb(color: string | null | undefined): [number, number, number] | null {
+  if (!color || color === 'transparent') return null
+  const s = firstSolidColor(color).trim()
+  if (!s || s === 'transparent') return null
+  const named = s.toLowerCase()
+  if (named === 'white') return [255, 255, 255]
+  if (named === 'black') return [0, 0, 0]
+  const hex = s.match(/^#([0-9a-fA-F]{3,8})$/)
+  if (hex) {
+    let h = hex[1]
+    if (h.length === 3 || h.length === 4) h = [...h].map((c) => c + c).join('')
+    return [
+      parseInt(h.slice(0, 2), 16),
+      parseInt(h.slice(2, 4), 16),
+      parseInt(h.slice(4, 6), 16)
+    ]
+  }
+  const rgb = s.match(/rgba?\(\s*(\d+)\s*[,\s]\s*(\d+)\s*[,\s]\s*(\d+)/i)
+  if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3])]
+  return null
+}
+
+function rgbClose3(
+  a: [number, number, number],
+  b: [number, number, number],
+  tol = 40
+): boolean {
+  return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) <= tol
+}
+
 export function IconPaintEditor({
   containerImage,
   contentImage,
@@ -2531,6 +2982,10 @@ export function IconPaintEditor({
   outsideContentSettings = null,
   outsideTextSettings = null,
   syncOuterFillColor = true,
+  outerBorderWidthPx = 0,
+  outerBorderColor = null,
+  outerShadowColor = null,
+  outerFillColor = null,
   logoVariantOptions = [],
   faviconVariantOptions = [],
   initialSaveTargets,
@@ -2562,7 +3017,7 @@ export function IconPaintEditor({
   // displayComposite (visibility-aware) + preview (handles/cursor). Mounting
   // source canvases in the DOM (even with display:none) under PreviewStage's
   // CSS transform caused unchecked base/object pixels to keep painting.
-  /** Live Outer/Inner bases — read-only; rebaked from settings outside Paint. */
+  /** Live Outer/Inner bases — rebaked from settings outside Paint. */
   const baseContainerCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const baseContentCanvasRef = useRef<HTMLCanvasElement | null>(null)
   /** Paint overlays — brush / eraser / fill write here only. */
@@ -2570,6 +3025,14 @@ export function IconPaintEditor({
   const contentCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const displayCompositeRef = useRef<HTMLCanvasElement>(null)
   const previewRef = useRef<HTMLCanvasElement>(null)
+  const paintFrameRef = useRef<HTMLCanvasElement | null>(null)
+  /** Last Outer Fill click: fill / border / shadow — used on Save to sync live settings. */
+  const lastOuterFillTargetRef = useRef<'fill' | 'border' | 'shadow' | null>(null)
+  const lastOuterFillColorRef = useRef<string | null>(null)
+  /** Every Outer fill this session (border then shadow must both survive). */
+  const lastOuterFillColorsRef = useRef<{ fill?: string; border?: string; shadow?: string }>({})
+  /** Fill-all on Outer: live fill + border + shadow should all take the paint colour. */
+  const lastOuterFillAllRef = useRef(false)
 
   const [tool, setTool] = useState<Tool>('pointer')
   const toolRef = useRef<Tool>('pointer')
@@ -2667,7 +3130,7 @@ export function IconPaintEditor({
   const [txtShadowColor, setTxtShadowColor] = useState('#000000b3')
   const [txtShadowBlur, setTxtShadowBlur] = useState(8)
   const [txtShadowOX, setTxtShadowOX] = useState(0)
-  const [txtShadowOY, setTxtShadowOY] = useState(4)
+  const [txtShadowOY, setTxtShadowOY] = useState(3)
   const [txtShadowSpread, setTxtShadowSpread] = useState(0)
   /** When set, text is edited via an on-canvas textarea (Paint-style). */
   const [textEditId, setTextEditId] = useState<string | null>(null)
@@ -2762,7 +3225,7 @@ export function IconPaintEditor({
     label: string | null
   } | null>(null)
   const lineDragRef = useRef<{
-    kind: 'create' | 'draw' | 'handle' | 'move' | 'rotate' | 'reshapeCorner'
+    kind: 'create' | 'draw' | 'handle' | 'move' | 'rotate' | 'reshapeCorner' | 'cropHandle' | 'cropPan'
     id: string
     idx?: number
     grab?: Pt
@@ -2773,6 +3236,11 @@ export function IconPaintEditor({
     startCenter?: Pt
     snapshot?: LineObj[]
   } | null>(null)
+  const cropSessionRef = useRef<CropSession | null>(null)
+  const [cropping, setCropping] = useState(false)
+  const [cropHoverCursor, setCropHoverCursor] = useState<string | null>(null)
+  const applyStampCropRef = useRef<() => boolean>(() => true)
+  const cancelStampCropRef = useRef<() => void>(() => {})
   const baseTransformRef = useRef<{
     kind: 'move' | 'resize' | 'rotate'
     source: HTMLCanvasElement
@@ -2802,6 +3270,8 @@ export function IconPaintEditor({
   const W = resolution
   const H = resolution
   const innerDraw = Math.max(16, innerDrawSize ?? W)
+  const displayNeedsResetRef = useRef(false)
+  const paintDropLockRef = useRef(false)
 
   const ensureOffscreenCanvas = (ref: React.MutableRefObject<HTMLCanvasElement | null>) => {
     if (!ref.current) ref.current = document.createElement('canvas')
@@ -2826,10 +3296,76 @@ export function IconPaintEditor({
     id === 'content'
       ? ensureOffscreenCanvas(contentCanvasRef)
       : ensureOffscreenCanvas(containerCanvasRef)
-  /** Draw live base then paint overlay for one stack slot. */
-  const drawBaseAndOverlay = (ctx: CanvasRenderingContext2D, id: PaintLayerId) => {
-    ctx.drawImage(baseCanvas(id), 0, 0)
-    ctx.drawImage(layerCanvas(id), 0, 0)
+  /**
+   * One paint stack slot: live base → live Inner vectors → overlay → session
+   * vectors. Overlay sits on top of Inner letters/icons so brush cuts and Fill
+   * are visible on the content (session drawings stay above the overlay).
+   */
+  const paintStackSlot = (
+    ctx: CanvasRenderingContext2D,
+    id: PaintLayerId,
+    opts?: { base?: boolean; overlay?: boolean; skipId?: string | null }
+  ) => {
+    const skipId = opts?.skipId
+    const skip = (l: LineObj) => !!(skipId && l.id === skipId && l.type === 'text')
+    if (opts?.base !== false) ctx.drawImage(baseCanvas(id), 0, 0)
+    for (const l of linesRef.current) {
+      if (l.parentId || vectorLayerOf(l) !== id || !isLiveInnerVector(l) || skip(l)) continue
+      renderObjectTree(ctx, l, linesRef.current, isVectorVisible)
+    }
+    if (opts?.overlay !== false) ctx.drawImage(layerCanvas(id), 0, 0)
+    for (const l of linesRef.current) {
+      if (l.parentId || vectorLayerOf(l) !== id || isLiveInnerVector(l) || skip(l)) continue
+      renderObjectTree(ctx, l, linesRef.current, isVectorVisible)
+    }
+  }
+
+  const overlayHasOpaque = (id: PaintLayerId): boolean => {
+    const data = layerCanvas(id).getContext('2d')?.getImageData(0, 0, W, H).data
+    if (!data) return false
+    for (let i = 3; i < data.length; i += 16) {
+      if (data[i] > 8) return true
+    }
+    return false
+  }
+
+  const layerCompositeAlphaAt = (id: PaintLayerId, x: number, y: number): number => {
+    const px = Math.max(0, Math.min(W - 1, Math.floor(x)))
+    const py = Math.max(0, Math.min(H - 1, Math.floor(y)))
+    const b = baseCanvas(id).getContext('2d')?.getImageData(px, py, 1, 1).data[3] ?? 0
+    const o = layerCanvas(id).getContext('2d')?.getImageData(px, py, 1, 1).data[3] ?? 0
+    return Math.round(o + (b * (255 - o)) / 255)
+  }
+
+  const vectorAlphaAt = (id: PaintLayerId, x: number, y: number): number => {
+    const px = Math.max(0, Math.min(W - 1, Math.floor(x)))
+    const py = Math.max(0, Math.min(H - 1, Math.floor(y)))
+    let alpha = 0
+    for (const root of linesRef.current) {
+      if (root.parentId || vectorLayerOf(root) !== id) continue
+      if (!isVectorVisible(root)) continue
+      const probe = takeCanvas(W, H)
+      try {
+        const pctx = probe.getContext('2d')!
+        renderObjectTree(pctx, root, linesRef.current, isVectorVisible)
+        alpha = Math.max(alpha, pctx.getImageData(px, py, 1, 1).data[3] ?? 0)
+      } finally {
+        releaseCanvas(probe)
+      }
+      if (alpha > 8) return alpha
+    }
+    return alpha
+  }
+
+  /** Fill the topmost layer that already has ink at the click — never empty-flood Inner over Outer. */
+  const floodFillTargetLayer = (x: number, y: number): PaintLayerId | null => {
+    for (const id of layerOrderRef.current) {
+      if (!layerIsEditable(id)) continue
+      if (layerCompositeAlphaAt(id, x, y) > 8) return id
+      if (vectorAlphaAt(id, x, y) > 8) return id
+    }
+    const editable = layerOrderRef.current.filter(layerIsEditable)
+    return editable[editable.length - 1] ?? null
   }
 
   // All checked layers (Outer + Inner). Used by eraser, fill, marquee, Remove BG, etc.
@@ -3043,6 +3579,10 @@ export function IconPaintEditor({
       }
       containerUsableRef.current = usable
       setContainerUsable(usable)
+      lastOuterFillTargetRef.current = null
+      lastOuterFillColorRef.current = null
+      lastOuterFillColorsRef.current = {}
+      lastOuterFillAllRef.current = false
       if (usable && hasContainer) {
         editContainerRef.current = true
         setEditContainer(true)
@@ -3117,7 +3657,7 @@ export function IconPaintEditor({
           setTxtShadowColor(seededProxy.shadowColor ?? '#000000b3')
           setTxtShadowBlur(seededProxy.shadowBlur ?? 8)
           setTxtShadowOX(seededProxy.shadowOffsetX ?? 0)
-          setTxtShadowOY(seededProxy.shadowOffsetY ?? 4)
+          setTxtShadowOY(seededProxy.shadowOffsetY ?? 3)
           setTxtShadowSpread(seededProxy.shadowSpread ?? 0)
           ensureStampImage(crop.dataUrl, () => {
             redrawLinesRef.current()
@@ -3135,8 +3675,13 @@ export function IconPaintEditor({
         const linked = restored.find((l) => l.type === 'text' && l.linkedOutsideText)
         const linkOutside = !!(linked && outside)
         if (linkOutside && linked) {
-          syncLinkedTextPanel(linked, true)
-          loadFont(linked.fontFamily ?? 'Inter').then(() => {
+          const next = applyOutsideTextToLine(linked, outside, W, innerDraw, {
+            preservePosition: true,
+            linkToOutside: true
+          })
+          restored = restored.map((l) => (l.id === next.id ? next : l))
+          syncLinkedTextPanel(next, true)
+          loadFont(next.fontFamily ?? 'Inter').then(() => {
             redrawLinesRef.current()
             drawHandles()
           })
@@ -3239,6 +3784,10 @@ export function IconPaintEditor({
   const undo = useCallback(() => {
     // Cancel an uncommitted marquee first, restoring pixels/objects to their
     // original layers instead of losing the lifted content.
+    if (cropSessionRef.current) {
+      cancelStampCropRef.current()
+      return
+    }
     if (floatRef.current || marqueeRef.current) {
       cancelFloating()
       return
@@ -3258,6 +3807,10 @@ export function IconPaintEditor({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
   const redo = useCallback(() => {
+    if (cropSessionRef.current) {
+      cancelStampCropRef.current()
+      return
+    }
     let stackIndex = -1
     for (let i = redoOrderRef.current.length - 1; i >= 0; i--) {
       const idx = redoOrderRef.current[i]
@@ -3280,10 +3833,56 @@ export function IconPaintEditor({
   }, [selectedId, selectedBaseLayer])
 
   const clearAll = () => {
-    const ctxs = targetCtxs()
-    if (!ctxs.length) return
-    for (const ctx of ctxs) ctx.clearRect(0, 0, W, H)
+    if (textEditIdRef.current) endTextEditRef.current()
+    if (cropSessionRef.current) cancelStampCropRef.current()
+    dropFloating()
+
+    const selectedObjectIds = new Set(
+      [...selectedLayerIdsRef.current].filter((id) =>
+        linesRef.current.some((item) => item.id === id && !item.marqueeItem)
+      )
+    )
+    for (const id of [...selectedObjectIds]) {
+      descendantIds(id).forEach((childId) => selectedObjectIds.add(childId))
+    }
+    const selectedBase = selectedBaseLayerRef.current
+    const overlaysToClear = new Set<PaintLayerId>()
+    if (selectedBase) overlaysToClear.add(selectedBase)
+    else if (selectedObjectIds.size === 0) {
+      for (const id of layerOrderRef.current) {
+        if (layerIsEditable(id)) overlaysToClear.add(id)
+      }
+    }
+
+    const shouldClearStrokes = (l: LineObj): boolean => {
+      if (l.marqueeItem) return false
+      if (selectedObjectIds.size) return selectedObjectIds.has(l.id)
+      if (selectedBase) return vectorLayerOf(l) === selectedBase
+      return overlaysToClear.has(vectorLayerOf(l))
+    }
+
+    let changed = false
+    for (const id of overlaysToClear) {
+      const ctx = layerCanvas(id).getContext('2d')
+      if (!ctx) continue
+      reset2dState(ctx)
+      ctx.clearRect(0, 0, W, H)
+      changed = true
+    }
+
+    const next = linesRef.current.map((l) => {
+      if (!shouldClearStrokes(l) || !l.paintStrokes?.length) return l
+      changed = true
+      return { ...l, paintStrokes: undefined }
+    })
+
+    if (!changed) return
+
+    linesRef.current = next
+    commitLines(next)
+    displayNeedsResetRef.current = true
     redrawLines()
+    drawHandles()
     pushHistory()
   }
 
@@ -3521,9 +4120,19 @@ export function IconPaintEditor({
           return
         }
       }
+      if (e.key === 'Enter' && cropSessionRef.current) {
+        e.preventDefault()
+        applyStampCropRef.current()
+        return
+      }
       if (e.key === 'Enter' && floatRef.current) { e.preventDefault(); clipActionsRef.current.commitFloat(); return }
       if (e.key === 'Enter' && marqueeRef.current) { e.preventDefault(); clipActionsRef.current.clearSel(); return }
       if (e.key === 'Escape') {
+        if (cropSessionRef.current) {
+          e.preventDefault()
+          cancelStampCropRef.current()
+          return
+        }
         if (textEditIdRef.current) {
           e.preventDefault()
           endTextEditRef.current()
@@ -3921,9 +4530,7 @@ export function IconPaintEditor({
     const showContent = !!editContentRef.current
     const showContainer = !!(editContainerRef.current && containerUsableRef.current)
 
-    const frame = document.createElement('canvas')
-    frame.width = W
-    frame.height = H
+    const frame = reuseCanvas(paintFrameRef, W, H)
     const frameCtx = frame.getContext('2d')!
 
     for (const item of linesRef.current) {
@@ -3931,31 +4538,36 @@ export function IconPaintEditor({
         const a = item.pts[0], b = item.pts[1]
         const width = a && b ? Math.max(1, Math.abs(b.x - a.x)) : 1
         const height = a && b ? Math.max(1, Math.abs(b.y - a.y)) : 1
-        ensureStampImage(
-          stampRenderDataUrl(item, width, height),
-          () => redrawLinesRef.current()
-        )
+        const url = stampRenderDataUrl(item, width, height)
+        const cached = url ? stampImgCache.get(url) : undefined
+        if (url && !(cached && cached.complete && cached.naturalWidth > 0)) {
+          ensureStampImage(url, () => redrawLinesRef.current())
+        }
       }
     }
 
     for (const id of [...layerOrderRef.current].reverse()) {
       const baseVisible = id === 'content' ? showContent : showContainer
-      if (baseVisible) drawBaseAndOverlay(frameCtx, id)
-      for (const l of linesRef.current) {
-        if (
-          l.parentId ||
-          vectorLayerOf(l) !== id ||
-          (skipId && l.id === skipId && l.type === 'text')
-        ) continue
-        renderObjectTree(frameCtx, l, linesRef.current, isVectorVisible)
+      if (baseVisible) {
+        paintStackSlot(frameCtx, id, { skipId })
+      } else {
+        paintStackSlot(frameCtx, id, { base: false, overlay: false, skipId })
       }
     }
 
-    // Hard-clear presentation canvas (size assign drops retained GPU buffers).
-    displayEl.width = W
-    displayEl.height = H
+    if (displayNeedsResetRef.current) {
+      displayEl.width = W
+      displayEl.height = H
+      displayNeedsResetRef.current = false
+    } else {
+      if (displayEl.width !== W) displayEl.width = W
+      if (displayEl.height !== H) displayEl.height = H
+    }
     const display = displayEl.getContext('2d')
-    if (display) display.drawImage(frame, 0, 0)
+    if (display) {
+      display.clearRect(0, 0, W, H)
+      display.drawImage(frame, 0, 0)
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [W, H, editContent, editContainer, containerUsable, layerOrder])
   const redrawLinesRef = useRef(redrawLines)
@@ -4176,6 +4788,11 @@ export function IconPaintEditor({
     if (!l && drawContentHandles(p)) return
     // Never leave handles (or any preview pixels) for a hidden object layer.
     if (!l || !isVectorVisible(l)) return
+    const cropSession = cropSessionRef.current
+    if (cropSession && l.id === cropSession.id && l.type === 'stamp') {
+      drawCropOverlay(p, l, cropSession)
+      return
+    }
     if (activeTool === 'reshape' && lineReshapeable(l)) {
       if (!l.reshapeQuad?.length) l = ensureReshapeInit(l.id) ?? l
     }
@@ -4184,7 +4801,7 @@ export function IconPaintEditor({
       if (activeTool === 'reshape') return
     }
     if (l.type === 'text') {
-      const b = textBBox(l)
+      const b = textInkBBox(l)
       const corners = [
         { x: b.x, y: b.y }, { x: b.x + b.w, y: b.y },
         { x: b.x + b.w, y: b.y + b.h }, { x: b.x, y: b.y + b.h }
@@ -4224,6 +4841,33 @@ export function IconPaintEditor({
     drawRotatePin(p, l)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [W, H, tool])
+
+  const paintViewRafRef = useRef(0)
+  const paintViewHandlesRef = useRef(false)
+  const paintViewAfterRef = useRef<(() => void) | null>(null)
+  const cancelPaintView = () => {
+    if (paintViewRafRef.current) {
+      cancelAnimationFrame(paintViewRafRef.current)
+      paintViewRafRef.current = 0
+    }
+    paintViewHandlesRef.current = false
+    paintViewAfterRef.current = null
+  }
+  const schedulePaintView = (handles = false, after?: () => void) => {
+    if (handles) paintViewHandlesRef.current = true
+    if (after) paintViewAfterRef.current = after
+    if (paintViewRafRef.current) return
+    paintViewRafRef.current = requestAnimationFrame(() => {
+      paintViewRafRef.current = 0
+      const showHandles = paintViewHandlesRef.current
+      const afterFn = paintViewAfterRef.current
+      paintViewHandlesRef.current = false
+      paintViewAfterRef.current = null
+      redrawLines()
+      if (showHandles) drawHandles()
+      afterFn?.()
+    })
+  }
 
   const commitLines = useCallback((arr: LineObj[]) => {
     const normalized = normalizeLinkedTextVectors(
@@ -4294,7 +4938,7 @@ export function IconPaintEditor({
       setTxtShadowColor(l.shadowColor ?? '#000000b3')
       setTxtShadowBlur(l.shadowBlur ?? 8)
       setTxtShadowOX(l.shadowOffsetX ?? 0)
-      setTxtShadowOY(l.shadowOffsetY ?? 4)
+      setTxtShadowOY(l.shadowOffsetY ?? 3)
       setTxtShadowSpread(l.shadowSpread ?? 0)
     }
   }
@@ -4331,6 +4975,13 @@ export function IconPaintEditor({
   const deleteSelected = () => {
     const id = selectedIdRef.current
     if (!id) return
+    if (cropSessionRef.current) {
+      const cropObj = linesRef.current.find((item) => item.id === cropSessionRef.current?.id)
+      if (cropObj) cropObj.transformOrigin = undefined
+      cropSessionRef.current = null
+      setCropping(false)
+      setCropHoverCursor(null)
+    }
     const selected = linesRef.current.find((l) => l.id === id)
     // Linked letters stay — they are the live Inner text. contentBound proxies
     // may be deleted (a fresh proxy is re-seeded next time Paint opens).
@@ -4522,6 +5173,43 @@ export function IconPaintEditor({
       }
     }
     if (tool === 'pointer') {
+      const cropSession = cropSessionRef.current
+      if (cropSession) {
+        const cropObj = linesRef.current.find((item) => item.id === cropSession.id)
+        if (cropObj && cropObj.type === 'stamp' && isVectorVisible(cropObj)) {
+          const cropHi = cropHandleAt(cropObj, cropSession, pt)
+          if (cropHi >= 0) {
+            lineDragRef.current = {
+              kind: 'cropHandle',
+              id: cropSession.id,
+              idx: cropHi,
+              startRect: { x: cropSession.x, y: cropSession.y, w: cropSession.w, h: cropSession.h }
+            }
+            return
+          }
+          const local = unmapObjDisplayPt(pt, cropObj)
+          if (
+            pointInLocalRect(cropSession.x, cropSession.y, cropSession.w, cropSession.h, local) ||
+            pointInLocalRect(cropSession.imgX, cropSession.imgY, cropSession.imgW, cropSession.imgH, local)
+          ) {
+            lineDragRef.current = {
+              kind: 'cropPan',
+              id: cropSession.id,
+              grab: local,
+              startRect: {
+                x: cropSession.imgX,
+                y: cropSession.imgY,
+                w: cropSession.imgW,
+                h: cropSession.imgH
+              }
+            }
+            return
+          }
+        }
+        applyStampCropRef.current()
+        // If the bitmap is still decoding, stay in crop mode on this click.
+        if (cropSessionRef.current) return
+      }
       if (beginContentTransform(pt)) return
       // 1. Dragging the rotate pin or a handle of the selected object.
       const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
@@ -4763,14 +5451,35 @@ export function IconPaintEditor({
         ctx.drawImage(baseTransform.source, 0, 0)
         ctx.restore()
       }
-      redrawLines()
-      drawHandles()
+      schedulePaintView(true)
       return
     }
     const dr = lineDragRef.current
     if (!dr) return
     const l = linesRef.current.find((x) => x.id === dr.id)
     if (!l) return
+    if (dr.kind === 'cropHandle' || dr.kind === 'cropPan') {
+      const cs = cropSessionRef.current
+      if (!cs || cs.id !== l.id) return
+      const local = unmapObjDisplayPt(pt, l)
+      if (dr.kind === 'cropHandle' && dr.startRect && dr.idx != null) {
+        applyCropHandleMove(cs, dr.idx, local, dr.startRect, shiftHeldRef.current)
+        drawHandles()
+        return
+      }
+      if (dr.kind === 'cropPan' && dr.grab && dr.startRect) {
+        cs.imgX = dr.startRect.x + (local.x - dr.grab.x)
+        cs.imgY = dr.startRect.y + (local.y - dr.grab.y)
+        clampCropPan(cs)
+        l.pts = [
+          { x: cs.imgX, y: cs.imgY },
+          { x: cs.imgX + cs.imgW, y: cs.imgY + cs.imgH }
+        ]
+        schedulePaintView(true)
+        return
+      }
+      return
+    }
     if (dr.kind === 'draw') {
       const last = l.pts[l.pts.length - 1]
       // Fixed adjustable-point count overrides sampling: capture densely, resample on up.
@@ -4911,9 +5620,7 @@ export function IconPaintEditor({
           if (l.borderWidth != null) l.borderWidth *= strokeScale
         }
         syncGroupBounds()
-        redrawLines()
-        drawHandles()
-        drawAlignmentGuides(resizeEdgeGuide(box, corner))
+        schedulePaintView(true, () => drawAlignmentGuides(resizeEdgeGuide(box, corner)))
         return
       }
       if (before && l.type === 'shape' && l.keepStrokeOnResize === false) {
@@ -4965,9 +5672,7 @@ export function IconPaintEditor({
               label: snapped.label
             }
           : null
-      redrawLines()
-      drawHandles()
-      drawReshapeSnapGuides()
+      schedulePaintView(true, () => drawReshapeSnapGuides())
       return
     } else if (dr.kind === 'move') {
       const d = { x: pt.x - dr.grab!.x, y: pt.y - dr.grab!.y }
@@ -5000,9 +5705,7 @@ export function IconPaintEditor({
         x: snap.x ? dr.grab!.x : pt.x,
         y: snap.y ? dr.grab!.y : pt.y
       }
-      redrawLines()
-      drawHandles()
-      drawAlignmentGuides(snap)
+      schedulePaintView(true, () => drawAlignmentGuides(snap))
       return
     } else if (dr.kind === 'rotate') {
       const c = dr.center!
@@ -5060,15 +5763,16 @@ export function IconPaintEditor({
         }
         syncGroupBounds()
       }
-      redrawLines()
-      drawHandles()
-      drawRotationGuide(l, snapped, l.type === 'group' ? nextRot : undefined)
+      schedulePaintView(true, () => {
+        drawRotationGuide(l, snapped, l.type === 'group' ? nextRot : undefined)
+      })
       return
     }
-    redrawLines(); drawHandles()
+    schedulePaintView(true)
   }
 
   const lineUp = (pt: Pt) => {
+    cancelPaintView()
     if (baseTransformRef.current) {
       baseTransformRef.current = null
       redrawLines()
@@ -5081,6 +5785,11 @@ export function IconPaintEditor({
     reshapeSnapGuidesRef.current = null
     resizeSnapLockRef.current = { width: false, height: false }
     if (!dr) return
+    if (dr.kind === 'cropHandle' || dr.kind === 'cropPan') {
+      redrawLines()
+      drawHandles()
+      return
+    }
     const l = linesRef.current.find((x) => x.id === dr.id)
     // Discard accidental zero-size creations.
     if (l && (dr.kind === 'create' || dr.kind === 'draw')) {
@@ -5176,6 +5885,9 @@ export function IconPaintEditor({
     lineDragRef.current = null
     objectPaintStrokeRef.current = null
     drawing.current = false
+    if (cropSessionRef.current && tool !== 'pointer' && tool !== 'reshape') {
+      applyStampCropRef.current()
+    }
     if (
       tool !== 'line' && tool !== 'freepoly' && tool !== 'pointer' &&
       tool !== 'text' && tool !== 'brush' && tool !== 'eraser' && tool !== 'fill' &&
@@ -5186,6 +5898,11 @@ export function IconPaintEditor({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tool])
+
+  useEffect(() => {
+    const cs = cropSessionRef.current
+    if (cs && cs.id !== selectedId) applyStampCropRef.current()
+  }, [selectedId])
 
   useEffect(() => () => stopPointerDragCapture(), [])
 
@@ -5210,7 +5927,7 @@ export function IconPaintEditor({
     else if (tool === 'pointer' || tool === 'reshape') drawHandles()
     else clearPreview()
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lines, selectedId, tool])
+  }, [lines, selectedId, selectedLayerIds, tool])
 
   // Fingerprint of every visibility checkbox. Remounting the display canvas on
   // change defeats Chromium's transformed-layer bitmap cache (stale frames after
@@ -5271,17 +5988,14 @@ export function IconPaintEditor({
   }
 
   // Flattened composite (eyedropper + save snapshot).
-  // Order: live base → paint overlay → vectors per stack slot.
+  // Order: live base → live Inner vectors → overlay → session vectors.
   const compositeCanvas = (): HTMLCanvasElement => {
     const c = document.createElement('canvas')
     c.width = W; c.height = H
     const x = c.getContext('2d')!
     for (const id of [...layerOrderRef.current].reverse()) {
-      if (layerIsEditable(id)) drawBaseAndOverlay(x, id)
-      for (const l of linesRef.current) {
-        if (l.parentId || vectorLayerOf(l) !== id) continue
-        renderObjectTree(x, l, linesRef.current, isVectorVisible)
-      }
+      if (layerIsEditable(id)) paintStackSlot(x, id)
+      else paintStackSlot(x, id, { base: false, overlay: false })
     }
     return c
   }
@@ -5379,23 +6093,9 @@ export function IconPaintEditor({
         }
       }
     } else {
-      // Transparent clicks flood only their connected region. Opaque icon pixels
-      // are barriers, so an outlined icon's inside and outside stay separate.
-      const visited = new Uint8Array(width * height)
-      const stack: number[] = [px, py]
-      while (stack.length >= 2) {
-        const cy = stack.pop()!
-        const cx = stack.pop()!
-        if (cx < 0 || cy < 0 || cx >= width || cy >= height) continue
-        const p = cy * width + cx
-        if (visited[p]) continue
-        visited[p] = 1
-        const i = p * 4
-        if (data[i + 3] > 2) continue
-        data[i] = fr; data[i + 1] = fg; data[i + 2] = fb; data[i + 3] = fa
-        changed = true
-        stack.push(cx - 1, cy, cx + 1, cy, cx, cy - 1, cx, cy + 1)
-      }
+      // Transparent padding / counters: do not paint the stamp. Fall through so
+      // Fill can recolour the Outer shape showing through the letters / icon.
+      return null
     }
 
     if (!changed) return null
@@ -5414,15 +6114,165 @@ export function IconPaintEditor({
     }
   }
 
+  /**
+   * Flood-fill one connected region of a stamp/shape/text, stopping at brush/
+   * eraser cuts on the object and at overlay paint that crosses it.
+   */
+  const fillObjectRespectingCuts = (item: LineObj, canvasPoint: Pt): LineObj | null => {
+    if (item.type !== 'stamp' && item.type !== 'shape' && item.type !== 'poly' && item.type !== 'text') {
+      return null
+    }
+    const canvas = takeCanvas(W, H)
+    const interiorCanvas = takeCanvas(W, H)
+    try {
+      const ctx = canvas.getContext('2d')!
+      const interiorCtx = interiorCanvas.getContext('2d')!
+      ctx.imageSmoothingEnabled = true
+      ctx.imageSmoothingQuality = 'high'
+      interiorCtx.imageSmoothingEnabled = true
+      interiorCtx.imageSmoothingQuality = 'high'
+      renderLine(interiorCtx, { ...item, paintStrokes: undefined })
+      renderLine(ctx, item)
+      const obj = ctx.getImageData(0, 0, W, H)
+      const od = obj.data
+      const interior = interiorCtx.getImageData(0, 0, W, H).data
+      const overlay = layerCanvas(vectorLayerOf(item)).getContext('2d')?.getImageData(0, 0, W, H)
+      const ov = overlay?.data
+      const rgbCut = (i: number) =>
+        Math.abs(interior[i] - od[i]) +
+        Math.abs(interior[i + 1] - od[i + 1]) +
+        Math.abs(interior[i + 2] - od[i + 2]) > 48
+      const isCut = (i: number) => {
+        if (ov && ov[i + 3] > 8) return true
+        const ia = interior[i + 3]
+        const fa = od[i + 3]
+        if (ia > 2 && fa <= 2) return true
+        if (ia > 2 && fa > 2 && rgbCut(i)) return true
+        return false
+      }
+      const seed = findFillSeed(W, H, canvasPoint.x, canvasPoint.y, (x, y) => {
+        const i = (y * W + x) * 4
+        return interior[i + 3] > 2 && !isCut(i)
+      })
+      if (!seed) return null
+      const seedI = (seed.y * W + seed.x) * 4
+      const tr = interior[seedI], tg = interior[seedI + 1], tb = interior[seedI + 2]
+      const region = floodFillConnected(W, H, seed.x, seed.y, (i) => {
+        if (interior[i + 3] <= 2) return false
+        if (isCut(i)) return false
+        return Math.abs(interior[i] - tr) + Math.abs(interior[i + 1] - tg) + Math.abs(interior[i + 2] - tb) <= 72
+      })
+      const fill = pixelColor(color)
+      const fr = parseInt(fill.slice(1, 3), 16)
+      const fg = parseInt(fill.slice(3, 5), 16)
+      const fb = parseInt(fill.slice(5, 7), 16)
+      const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
+      let flooded = 0
+      let opaque = 0
+      let wallHits = 0
+      for (let p = 0; p < W * H; p++) {
+        const i = p * 4
+        if (interior[i + 3] > 2) {
+          opaque++
+          if (isCut(i)) wallHits++
+        }
+        if (!region[p]) continue
+        od[i] = fr
+        od[i + 1] = fg
+        od[i + 2] = fb
+        od[i + 3] = interior[i + 3] >= 180 ? fa : Math.round((interior[i + 3] * fa) / 255)
+        flooded++
+      }
+      if (!flooded) return null
+      if (item.type === 'text' && wallHits === 0 && opaque > 0 && flooded >= opaque * 0.98) {
+        return { ...item, color: firstSolidColor(color) }
+      }
+      if (
+        (item.type === 'shape' || item.type === 'poly') &&
+        !item.paintStrokes?.length &&
+        wallHits === 0 &&
+        opaque > 0 &&
+        flooded >= opaque * 0.98
+      ) {
+        return { ...item, color: firstSolidColor(color), fill: true }
+      }
+      ctx.putImageData(obj, 0, 0)
+      const bounds = alphaBoundsFromCanvas(canvas) ?? boundsForLine(item)
+      const cropped = takeCanvas(bounds.w, bounds.h)
+      try {
+        cropped.getContext('2d')!.drawImage(
+          canvas,
+          bounds.x, bounds.y, bounds.w, bounds.h,
+          0, 0, bounds.w, bounds.h
+        )
+        const imageDataUrl = cropped.toDataURL('image/png')
+        ensureStampImage(imageDataUrl, () => redrawLinesRef.current())
+        return {
+          ...item,
+          type: 'stamp',
+          pts: [
+            { x: bounds.x, y: bounds.y },
+            { x: bounds.x + bounds.w, y: bounds.y + bounds.h }
+          ],
+          rot: 0,
+          scaleX: 1,
+          scaleY: 1,
+          imageDataUrl,
+          stampSource: item.stampSource ?? 'image',
+          paintStrokes: undefined,
+          sourceSvgMarkup: undefined,
+          sourceStampSize: undefined,
+          keepStrokeOnResize: undefined,
+          linkedOutsideText: undefined,
+          color: firstSolidColor(color)
+        }
+      } finally {
+        releaseCanvas(cropped)
+      }
+    } finally {
+      releaseCanvas(canvas)
+      releaseCanvas(interiorCanvas)
+    }
+  }
+
+  /** True when this object (or a group child) actually has fillable ink at the point. */
+  const objectOwnsFillClick = (item: LineObj, canvasPoint: Pt): boolean => {
+    const l = checkedGroupTarget(item) ?? item
+    if (l.type === 'group') {
+      return descendantIds(l.id).some((id) => {
+        const child = linesRef.current.find((c) => c.id === id)
+        return !!child && child.type !== 'group' && objectOwnsFillClick(child, canvasPoint)
+      })
+    }
+    if (l.type === 'text') return textFillHit(l, canvasPoint, W, H) != null
+    if ((l.type === 'stamp' || l.type === 'shape') && l.pts.length >= 2) {
+      const local = rotatePt(canvasPoint, objCenter(l), -(l.rot ?? 0))
+      return pointInRect(l.pts[0], l.pts[1], local)
+    }
+    if (l.type === 'poly') return pointInPoly(flattenLine(l), canvasPoint)
+    return false
+  }
+
   const fillSelectedObjectLayer = (canvasPoint: Pt): boolean => {
     // Fill follows the clicked icon even when it was not selected beforehand.
     const clickedStamp = [...linesRef.current].reverse().find((item) => {
       if (item.type !== 'stamp' || !isVectorVisible(item) || item.pts.length < 2) return false
+      if (isLiveInnerVector(item) && overlayHasOpaque(vectorLayerOf(item))) return false
       const local = rotatePt(canvasPoint, objCenter(item), -(item.rot ?? 0))
       return pointInRect(item.pts[0], item.pts[1], local)
     })
-    const selected = clickedStamp ??
-      linesRef.current.find((item) => item.id === selectedIdRef.current)
+    const clickedText = [...linesRef.current].reverse().find((item) => {
+      if (item.type !== 'text' || !isVectorVisible(item)) return false
+      if (isLiveInnerVector(item) && overlayHasOpaque(vectorLayerOf(item))) return false
+      return textFillHit(item, canvasPoint, W, H) != null
+    })
+    const selectedExisting = linesRef.current.find((item) => item.id === selectedIdRef.current)
+    const selectedHit =
+      selectedExisting &&
+      isVectorVisible(selectedExisting) &&
+      !(isLiveInnerVector(selectedExisting) && overlayHasOpaque(vectorLayerOf(selectedExisting))) &&
+      objectOwnsFillClick(selectedExisting, canvasPoint)
+    const selected = clickedStamp ?? clickedText ?? (selectedHit ? selectedExisting : undefined)
     if (!selected || !isVectorVisible(selected)) return false
     const target = checkedGroupTarget(selected) ?? selected
     const targetIds =
@@ -5438,18 +6288,44 @@ export function IconPaintEditor({
     const fillColor = firstSolidColor(color)
     const imageUrls: string[] = []
     let changed = false
+    let textFillKind: 'glyph' | 'shadow' | null = null
 
     const next = linesRef.current.map((item): LineObj => {
       if (!targetIds.has(item.id) || item.type === 'group') return item
       if (item.type === 'stamp') {
-        const filled = fillStampPixels(item, canvasPoint)
+        const hasCuts = !!item.paintStrokes?.length || overlayHasOpaque(vectorLayerOf(item))
+        const filled =
+          fillObjectRespectingCuts(item, canvasPoint) ??
+          (hasCuts ? null : fillStampPixels(item, canvasPoint))
         if (!filled) return item
         imageUrls.push(filled.imageDataUrl ?? '')
         changed = true
         return filled
       }
-      changed = true
+      if (item.type === 'text') {
+        const sectional = fillObjectRespectingCuts(item, canvasPoint)
+        if (sectional) {
+          if (sectional.imageDataUrl) imageUrls.push(sectional.imageDataUrl)
+          changed = true
+          return sectional
+        }
+        const hit = textFillHit(item, canvasPoint, W, H)
+        if (!hit) return item
+        textFillKind = hit
+        changed = true
+        if (hit === 'shadow') {
+          return { ...item, shadow: true, shadowColor: fillColor }
+        }
+        return { ...item, color: fillColor }
+      }
       if (item.type === 'shape' || item.type === 'poly') {
+        const filled = fillObjectRespectingCuts(item, canvasPoint)
+        if (filled) {
+          if (filled.imageDataUrl) imageUrls.push(filled.imageDataUrl)
+          changed = true
+          return filled
+        }
+        changed = true
         return { ...item, color: fillColor, fill: true }
       }
       return { ...item, color: fillColor, borderColor: fillColor }
@@ -5457,6 +6333,12 @@ export function IconPaintEditor({
 
     if (!changed) return false
     commitLines(next)
+    if (textFillKind === 'shadow') {
+      setTxtShadow(true)
+      setTxtShadowColor(fillColor)
+    } else if (textFillKind === 'glyph') {
+      setColor(fillColor)
+    }
     for (const url of imageUrls) ensureStampImage(url, () => redrawLinesRef.current())
     redrawLines()
     drawHandles()
@@ -5464,68 +6346,249 @@ export function IconPaintEditor({
     return true
   }
 
-  const recolorAllOpaque = (ctx: CanvasRenderingContext2D) => {
-    const img = ctx.getImageData(0, 0, W, H)
-    const data = img.data
+  const cssPaintColor = (hex: string): string => {
+    const s = firstSolidColor(hex)
+    return s.startsWith('#') && s.length >= 7 ? s.slice(0, 7) : s
+  }
+
+  const recordOuterFill = (kind: 'fill' | 'border' | 'shadow', hex: string) => {
+    const css = cssPaintColor(hex)
+    lastOuterFillTargetRef.current = kind
+    lastOuterFillColorRef.current = css
+    lastOuterFillColorsRef.current = { ...lastOuterFillColorsRef.current, [kind]: css }
+    lastOuterFillAllRef.current = false
+  }
+
+  const punchFilledFromBase = (
+    underlay: HTMLCanvasElement | null | undefined,
+    filled: Uint8Array
+  ) => {
+    if (!underlay) return
+    const bctx = underlay.getContext('2d')
+    if (!bctx) return
+    const punch = bctx.getImageData(0, 0, W, H)
+    const pd = punch.data
+    for (let p = 0; p < filled.length; p++) {
+      if (!filled[p]) continue
+      const i = p * 4
+      pd[i] = 0
+      pd[i + 1] = 0
+      pd[i + 2] = 0
+      pd[i + 3] = 0
+    }
+    bctx.putImageData(punch, 0, 0)
+  }
+
+  const recolorAllOpaque = (
+    ctx: CanvasRenderingContext2D,
+    underlay?: HTMLCanvasElement | null,
+    layerId?: PaintLayerId
+  ) => {
     const fill = pixelColor(color)
     const fr = parseInt(fill.slice(1, 3), 16)
     const fg = parseInt(fill.slice(3, 5), 16)
     const fb = parseInt(fill.slice(5, 7), 16)
     const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
-    // Tint RGB to the fill colour; keep each pixel's alpha so soft edges stay soft.
-    // Fully transparent pixels are left alone.
-    for (let i = 0; i < data.length; i += 4) {
-      if (data[i + 3] === 0) continue
-      data[i] = fr
-      data[i + 1] = fg
-      data[i + 2] = fb
-      // When fill colour has reduced alpha, scale existing alpha so the silhouette
-      // still respects soft edges while adopting the fill opacity.
-      data[i + 3] = Math.round((data[i + 3] * fa) / 255)
+    const sample = document.createElement('canvas')
+    sample.width = W
+    sample.height = H
+    const sampleCtx = sample.getContext('2d')!
+    if (underlay) sampleCtx.drawImage(underlay, 0, 0)
+    sampleCtx.drawImage(ctx.canvas, 0, 0)
+    const data = sampleCtx.getImageData(0, 0, W, H).data
+    const out = ctx.getImageData(0, 0, W, H)
+    const od = out.data
+    const punched = new Uint8Array(W * H)
+    for (let p = 0; p < W * H; p++) {
+      const i = p * 4
+      const srcA = data[i + 3]
+      if (srcA <= 8) continue
+      od[i] = fr
+      od[i + 1] = fg
+      od[i + 2] = fb
+      od[i + 3] = srcA >= 180 ? fa : Math.round((srcA * fa) / 255)
+      punched[p] = 1
     }
-    ctx.putImageData(img, 0, 0)
+    ctx.putImageData(out, 0, 0)
+    punchFilledFromBase(underlay, punched)
+    if (layerId === 'container') {
+      const css = cssPaintColor(fill)
+      lastOuterFillTargetRef.current = 'fill'
+      lastOuterFillColorRef.current = css
+      lastOuterFillColorsRef.current = { fill: css, border: css, shadow: css }
+      lastOuterFillAllRef.current = true
+    }
+  }
+
+  /**
+   * Classify an Outer-layer click as solid fill, border ring, or shadow fringe.
+   * Uses the visible composite (base + overlay). A border sitting on a drop
+   * shadow is "outside" (low alpha), not empty canvas — do not treat that as fill.
+   */
+  const classifyOuterFillTarget = (
+    data: Uint8ClampedArray,
+    sx: number,
+    sy: number,
+    edt: Float32Array
+  ): 'fill' | 'border' | 'shadow' => {
+    const px = Math.max(0, Math.min(W - 1, Math.floor(sx)))
+    const py = Math.max(0, Math.min(H - 1, Math.floor(sy)))
+    const i0 = (py * W + px) * 4
+    const a0 = data[i0 + 3]
+    if (a0 <= 8) return 'fill'
+    if (a0 < 150) return 'shadow'
+
+    const borderPx = Math.max(0, outerBorderWidthPx || 0)
+    const d = edt[py * W + px]
+    if (borderPx > 0 && d <= borderPx + 0.75) return 'border'
+
+    const alphaAt = (x: number, y: number) => {
+      if (x < 0 || y < 0 || x >= W || y >= H) return 0
+      return data[(y * W + x) * 4 + 3]
+    }
+    const clickR = data[i0], clickG = data[i0 + 1], clickB = data[i0 + 2]
+    const matchesClick = (x: number, y: number) => {
+      if (x < 0 || y < 0 || x >= W || y >= H) return false
+      const i = (y * W + x) * 4
+      if (data[i + 3] < 150) return false
+      return (
+        Math.abs(data[i] - clickR) +
+        Math.abs(data[i + 1] - clickG) +
+        Math.abs(data[i + 2] - clickB)
+      ) <= 48
+    }
+
+    const dirs = [
+      [-1, 0], [1, 0], [0, -1], [0, 1],
+      [-1, -1], [1, -1], [-1, 1], [1, 1]
+    ] as const
+    let dOut = 99
+    let outDx = 0
+    let outDy = 0
+    for (const [dx, dy] of dirs) {
+      for (let s = 1; s <= 48; s++) {
+        if (alphaAt(px + dx * s, py + dy * s) < 150) {
+          if (s < dOut) {
+            dOut = s
+            outDx = dx
+            outDy = dy
+          }
+          break
+        }
+      }
+    }
+
+    const countMatch = (dx: number, dy: number) => {
+      let n = 0
+      for (let s = 1; s <= 40; s++) {
+        if (!matchesClick(px + dx * s, py + dy * s)) break
+        n++
+      }
+      return n
+    }
+    const matchThickness = 1 + countMatch(outDx, outDy) + countMatch(-outDx, -outDy)
+
+    let differentInterior = false
+    if (outDx !== 0 || outDy !== 0) {
+      const ix = -outDx
+      const iy = -outDy
+      for (let s = 1; s <= 40; s++) {
+        const x = px + ix * s
+        const y = py + iy * s
+        if (x < 0 || y < 0 || x >= W || y >= H) break
+        if (matchesClick(x, y)) continue
+        const i = (y * W + x) * 4
+        if (data[i + 3] >= 210) {
+          const dist =
+            Math.abs(data[i] - clickR) +
+            Math.abs(data[i + 1] - clickG) +
+            Math.abs(data[i + 2] - clickB)
+          if (dist > 48) differentInterior = true
+          break
+        }
+        if (data[i + 3] < 150) break
+      }
+    }
+
+    if (borderPx <= 0 && differentInterior && matchThickness <= 40 && dOut <= matchThickness + 1) {
+      return 'border'
+    }
+    if (borderPx <= 0 && !differentInterior && matchThickness <= 10 && dOut <= 4) {
+      return 'border'
+    }
+    return 'fill'
   }
 
   /**
    * Flood-fill the paint overlay. Matching uses live base + overlay appearance
    * so clicks on the visible icon work; writes go only into the overlay.
    */
-  const floodFill = (ctx: CanvasRenderingContext2D, sx: number, sy: number, underlay?: HTMLCanvasElement | null) => {
-    const overlayImg = ctx.getImageData(0, 0, W, H)
-    const overlay = overlayImg.data
-    // Sample/match against what the user sees (base under overlay).
+  const floodFill = (
+    ctx: CanvasRenderingContext2D,
+    sx: number,
+    sy: number,
+    underlay?: HTMLCanvasElement | null,
+    layerId?: PaintLayerId
+  ) => {
+    // Sample/match against what the user sees: live base + live Inner + overlay.
+    // Overlay sits on Inner, so brush cuts are part of the visible colour.
     const sampleCanvas = document.createElement('canvas')
     sampleCanvas.width = W
     sampleCanvas.height = H
     const sampleCtx = sampleCanvas.getContext('2d')!
     if (underlay) sampleCtx.drawImage(underlay, 0, 0)
+    if (layerId) {
+      for (const root of linesRef.current) {
+        if (root.parentId || root.marqueeItem) continue
+        if (vectorLayerOf(root) !== layerId || !isLiveInnerVector(root)) continue
+        renderObjectTree(sampleCtx, root, linesRef.current, isVectorVisible)
+      }
+    }
+    const under = sampleCtx.getImageData(0, 0, W, H).data
     sampleCtx.drawImage(ctx.canvas, 0, 0)
     const data = sampleCtx.getImageData(0, 0, W, H).data
-    const px = Math.floor(sx), py = Math.floor(sy)
+    const overlayPix = ctx.getImageData(0, 0, W, H).data
+    let px = Math.floor(sx), py = Math.floor(sy)
     if (px < 0 || py < 0 || px >= W || py >= H) return
 
-    // Only object layers are walls. Including the target base canvas here made
-    // its own opaque line pixels unclickable, so Inner content strokes could
-    // never be recoloured. Render roots recursively to remain safe for groups.
+    // Session drawings are walls. Live Inner letters/icons are fillable content.
     const wallCanvas = document.createElement('canvas')
     wallCanvas.width = W
     wallCanvas.height = H
     const wallCtx = wallCanvas.getContext('2d')!
     for (const root of linesRef.current) {
       if (root.parentId || root.marqueeItem) continue
+      if (isLiveInnerVector(root)) continue
       renderObjectTree(wallCtx, root, linesRef.current, isVectorVisible)
     }
     const wall = wallCtx.getImageData(0, 0, W, H).data
     const isWall = (i: number) => wall[i + 3] > 20
 
+    const clickOnWall = isWall((Math.floor(sy) * W + Math.floor(sx)) * 4)
+    const seed = findFillSeed(W, H, px, py, (x, y) => {
+      const i = (y * W + x) * 4
+      if (isWall(i)) return false
+      // A click on an object must not hop onto Outer underlay behind it.
+      if (clickOnWall && layerId === 'container') return false
+      return under[i + 3] > 8 && overlayPix[i + 3] <= 8
+    }) ?? (!clickOnWall ? { x: px, y: py } : null)
+    if (!seed) return
+    px = seed.x
+    py = seed.y
     const idx = (py * W + px) * 4
-    if (isWall(idx)) return // clicked on a vector wall
+    const seedOnOverlay = overlayPix[idx + 3] > 8
     const tr = data[idx], tg = data[idx + 1], tb = data[idx + 2], ta = data[idx + 3]
     const fill = pixelColor(color)
     const fr = parseInt(fill.slice(1, 3), 16)
     const fg = parseInt(fill.slice(3, 5), 16)
     const fb = parseInt(fill.slice(5, 7), 16)
     const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
+
+    // Empty / near-empty canvas must never join a flood. Outer-shape shadows are
+    // a soft alpha ramp; RGB+alpha tolerance otherwise walks that ramp into the
+    // transparent background and paints the whole stage.
+    const EMPTY_A = 8
+    const clickedEmpty = ta <= EMPTY_A
 
     const tol = 32
     // Same / near-same colour — nothing to do (also prevents an infinite loop if
@@ -5541,9 +6604,260 @@ export function IconPaintEditor({
       Math.abs(data[i] - r) + Math.abs(data[i + 1] - g) + Math.abs(data[i + 2] - b)
 
     const filled = new Uint8Array(W * H)
+    let outerKind: 'fill' | 'border' | 'shadow' | null = null
+
+    // Outer fill stays interior-only. Border and shadow are one flood when they
+    // share a colour (same as a normal fill), so curved strokes + matching glow
+    // recolour together instead of a Manhattan ring that misses the curve.
+    if (layerId === 'container' && !clickedEmpty && !clickOnWall) {
+      const edt = alphaOutsideEDT(data, W, H, 150)
+      outerKind = classifyOuterFillTarget(data, sx, sy, edt)
+      const borderPx = Math.max(0, outerBorderWidthPx || 0)
+
+      const unpremul = (i: number): [number, number, number] | null => {
+        const a = data[i + 3]
+        if (a <= EMPTY_A) return null
+        let r = data[i], g = data[i + 1], b = data[i + 2]
+        if (a < 250 && Math.max(r, g, b) <= a + 1) {
+          const s = 255 / a
+          r = Math.min(255, r * s)
+          g = Math.min(255, g * s)
+          b = Math.min(255, b * s)
+        }
+        return [r, g, b]
+      }
+
+      const clickRgb = unpremul(idx) ?? [tr, tg, tb]
+
+      const sampleBand = (pred: (p: number) => boolean): [number, number, number] | null => {
+        let r = 0, g = 0, b = 0, n = 0
+        const step = Math.max(1, Math.floor(W / 96))
+        for (let y = 0; y < H; y += step) {
+          for (let x = 0; x < W; x += step) {
+            const p = y * W + x
+            if (!pred(p)) continue
+            const rgb = unpremul(p * 4)
+            if (!rgb) continue
+            r += rgb[0]; g += rgb[1]; b += rgb[2]
+            n++
+          }
+        }
+        return n > 4 ? [r / n, g / n, b / n] : null
+      }
+
+      const liveBorder = cssSolidRgb(outerBorderColor)
+      const liveShadow = cssSolidRgb(outerShadowColor)
+      const liveFill = cssSolidRgb(outerFillColor)
+      const bakedBorder = sampleBand((p) => {
+        const a = data[p * 4 + 3]
+        return a >= 180 && edt[p] > 0.35 && edt[p] <= Math.max(borderPx, 14) + 1
+      })
+      const bakedShadow = sampleBand((p) => {
+        const a = data[p * 4 + 3]
+        return a > 16 && a < 140
+      })
+
+      let maxEdt = 0
+      let coreP = 0
+      for (let p = 0; p < W * H; p++) {
+        if (data[p * 4 + 3] >= 200 && edt[p] > maxEdt) {
+          maxEdt = edt[p]
+          coreP = p
+        }
+      }
+      const interiorRgb =
+        unpremul(coreP * 4) ??
+        liveFill ??
+        sampleBand((p) => data[p * 4 + 3] >= 200 && edt[p] > Math.max(borderPx, 8) + 4)
+
+      const clickMatchesLiveBorder = !!(liveBorder && rgbClose3(clickRgb, liveBorder, 56))
+      const clickMatchesLiveShadow = !!(liveShadow && rgbClose3(clickRgb, liveShadow, 56))
+      const sameRimColor = !!(
+        (liveBorder && liveShadow && rgbClose3(liveBorder, liveShadow, 56)) ||
+        (bakedBorder && bakedShadow && rgbClose3(bakedBorder, bakedShadow, 72)) ||
+        (clickMatchesLiveBorder && clickMatchesLiveShadow) ||
+        (outerKind === 'border' && clickMatchesLiveShadow) ||
+        (outerKind === 'shadow' && clickMatchesLiveBorder)
+      )
+
+      const fillDiffersFromRim = !!(
+        interiorRgb &&
+        !rgbClose3(clickRgb, interiorRgb, 48)
+      )
+
+      // When fill colour ≠ rim colour, the stroke's max EDT is the true border
+      // thickness. A too-small passed width treated most of the stroke as
+      // interior and only recolored the outer glow.
+      let rimW = Math.max(borderPx, 1)
+      if (fillDiffersFromRim && interiorRgb) {
+        let measured = 0
+        for (let p = 0; p < W * H; p++) {
+          const a = data[p * 4 + 3]
+          if (a < 160) continue
+          const rgb = unpremul(p * 4)
+          if (!rgb || rgbClose3(rgb, interiorRgb, 40)) continue
+          if (edt[p] > measured) measured = edt[p]
+        }
+        if (measured > rimW) rimW = measured
+      }
+
+      const isSolidInterior = (p: number) => {
+        const a = data[p * 4 + 3]
+        if (a < 185) return false
+        const rgb = unpremul(p * 4)
+        if (fillDiffersFromRim && interiorRgb && rgb) {
+          return rgbClose3(rgb, interiorRgb, 40)
+        }
+        return edt[p] > rimW + 0.5
+      }
+
+      const rimMatchesClick = (i: number) => {
+        const rgb = unpremul(i)
+        if (!rgb) return false
+        if (rgbClose3(rgb, clickRgb, 64)) return true
+        const maxc = Math.max(rgb[0], rgb[1], rgb[2])
+        const minc = Math.min(rgb[0], rgb[1], rgb[2])
+        const clickMax = Math.max(clickRgb[0], clickRgb[1], clickRgb[2])
+        const clickMin = Math.min(clickRgb[0], clickRgb[1], clickRgb[2])
+        if (clickMax - clickMin <= 55 && maxc - minc <= 55 && Math.abs(clickMax - maxc) <= 90) {
+          return true
+        }
+        return false
+      }
+
+      const growNonInterior = (passes: number) => {
+        const dirs8: [number, number][] = [
+          [-1, 0], [1, 0], [0, -1], [0, 1],
+          [-1, -1], [1, -1], [-1, 1], [1, 1]
+        ]
+        for (let pass = 0; pass < passes; pass++) {
+          const extra: number[] = []
+          for (let y = 0; y < H; y++) {
+            for (let x = 0; x < W; x++) {
+              const p = y * W + x
+              if (filled[p] || isSolidInterior(p)) continue
+              if (data[p * 4 + 3] <= 4) continue
+              let adj = false
+              for (const [dx, dy] of dirs8) {
+                const nx = x + dx, ny = y + dy
+                if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
+                if (filled[ny * W + nx]) { adj = true; break }
+              }
+              if (adj) extra.push(p)
+            }
+          }
+          if (!extra.length) break
+          for (const p of extra) filled[p] = 1
+        }
+      }
+
+      if (outerKind === 'fill') {
+        for (let p = 0; p < W * H; p++) {
+          const a = data[p * 4 + 3]
+          if (a < 80) continue
+          if (borderPx <= 0) {
+            if (a >= 150) filled[p] = 1
+            continue
+          }
+          if (edt[p] > borderPx) filled[p] = 1
+          else if (edt[p] > borderPx - 2.75 && a < 245) filled[p] = 1
+        }
+        // Inner-curve AA only — do not walk out into the stroke or drop-shadow.
+        const dirs8: [number, number][] = [
+          [-1, 0], [1, 0], [0, -1], [0, 1],
+          [-1, -1], [1, -1], [-1, 1], [1, 1]
+        ]
+        for (let pass = 0; pass < 2; pass++) {
+          const extra: number[] = []
+          for (let y = 0; y < H; y++) {
+            for (let x = 0; x < W; x++) {
+              const p = y * W + x
+              if (filled[p]) continue
+              const a = data[p * 4 + 3]
+              if (a <= 8 || a >= 245) continue
+              if (a < 150 && edt[p] < 1) continue
+              if (borderPx > 0 && edt[p] <= borderPx - 2.75) continue
+              let adj = false
+              for (const [dx, dy] of dirs8) {
+                const nx = x + dx, ny = y + dy
+                if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
+                if (filled[ny * W + nx]) { adj = true; break }
+              }
+              if (adj) extra.push(p)
+            }
+          }
+          if (!extra.length) break
+          for (const p of extra) filled[p] = 1
+        }
+        recordOuterFill('fill', fill)
+      } else if (sameRimColor) {
+        // Live (or baked) border and shadow are the same colour — recolour the
+        // whole rim in one Fill, including curve AA between stroke and glow.
+        for (let p = 0; p < W * H; p++) {
+          if (isSolidInterior(p)) continue
+          if (data[p * 4 + 3] > 4) filled[p] = 1
+        }
+        growNonInterior(3)
+        recordOuterFill('border', fill)
+        recordOuterFill('shadow', fill)
+      } else {
+        const dirs8: [number, number][] = [
+          [-1, 0], [1, 0], [0, -1], [0, 1],
+          [-1, -1], [1, -1], [-1, 1], [1, 1]
+        ]
+        const stack: number[] = [px, py]
+        while (stack.length >= 2) {
+          const y = stack.pop()!
+          const x = stack.pop()!
+          if (x < 0 || y < 0 || x >= W || y >= H) continue
+          const p = y * W + x
+          if (filled[p]) continue
+          if (isSolidInterior(p)) continue
+          if (!rimMatchesClick(p * 4)) continue
+          filled[p] = 1
+          for (const [dx, dy] of dirs8) stack.push(x + dx, y + dy)
+        }
+        for (let p = 0; p < W * H; p++) {
+          if (filled[p] || isSolidInterior(p)) continue
+          if (rimMatchesClick(p * 4)) filled[p] = 1
+        }
+        growNonInterior(2)
+
+        let sawBorder = false
+        let sawShadow = false
+        for (let p = 0; p < W * H; p++) {
+          if (!filled[p]) continue
+          if (data[p * 4 + 3] < 150) sawShadow = true
+          else sawBorder = true
+        }
+        if (sawBorder) recordOuterFill('border', fill)
+        if (sawShadow) recordOuterFill('shadow', fill)
+        if (!sawBorder && !sawShadow) recordOuterFill(outerKind, fill)
+      }
+
+      const out = ctx.getImageData(0, 0, W, H)
+      const od = out.data
+      for (let p = 0; p < filled.length; p++) {
+        if (!filled[p]) continue
+        const i = p * 4
+        const srcA = data[i + 3]
+        if (srcA <= EMPTY_A) continue
+        const outA = srcA < 150
+          ? Math.round((srcA * fa) / 255)
+          : srcA >= 12
+            ? fa
+            : Math.max(od[i + 3], Math.round((srcA * fa) / 255))
+        od[i] = fr
+        od[i + 1] = fg
+        od[i + 2] = fb
+        od[i + 3] = outA
+      }
+      ctx.putImageData(out, 0, 0)
+      punchFilledFromBase(underlay, filled)
+      return
+    }
+
     const paintAt = (i: number, p: number) => {
-      data[i] = fr; data[i + 1] = fg; data[i + 2] = fb; data[i + 3] = fa
-      overlay[i] = fr; overlay[i + 1] = fg; overlay[i + 2] = fb; overlay[i + 3] = fa
       filled[p] = 1
     }
 
@@ -5554,11 +6868,22 @@ export function IconPaintEditor({
       if (filled[p]) return false
       const i = p * 4
       if (isWall(i)) return false
+      if (!seedOnOverlay && overlayPix[i + 3] > 8) return false
+      const a = data[i + 3]
+      if (clickedEmpty) {
+        if (a > EMPTY_A) return false
+        return true
+      }
+      if (a <= EMPTY_A) return false
+      // Relative alpha band: a large outer shadow is a continuous ramp from
+      // ~opaque down to empty. Absolute ±32 on alpha walks that ramp into the
+      // transparent stage. Stay within ~35% of the clicked alpha instead.
+      const aTol = Math.max(18, Math.round(ta * 0.35))
+      if (Math.abs(a - ta) > aTol) return false
       return (
         Math.abs(data[i] - tr) <= tol &&
         Math.abs(data[i + 1] - tg) <= tol &&
-        Math.abs(data[i + 2] - tb) <= tol &&
-        Math.abs(data[i + 3] - ta) <= tol
+        Math.abs(data[i + 2] - tb) <= tol
       )
     }
 
@@ -5592,7 +6917,9 @@ export function IconPaintEditor({
       }
     }
 
-    if (fillCleanEdges) {
+    // Recolor of existing pixels (border / shadow / fill): also absorb AA and
+    // white-bake fringes so they are not left peeking beside the new colour.
+    if (fillCleanEdges && clickedEmpty) {
       // Pass 2–3: absorb anti-aliased fringes and thin leftover outline rings
       // next to the filled area. Thick opaque bands of a different color stay.
       const fringeTol = 110
@@ -5632,13 +6959,26 @@ export function IconPaintEditor({
       const isFringe = (x: number, y: number, i: number): boolean => {
         if (isWall(i)) return false
         const a = data[i + 3]
+        if (!clickedEmpty && a <= EMPTY_A) return false
+        if (clickedEmpty && a > EMPTY_A) return false
         const dRgb = rgbDist(i, tr, tg, tb)
-        const dFull = dRgb + Math.abs(a - ta)
-        // Semi-transparent or near-target AA fringe
-        if (dFull <= fringeTol) return true
-        if (a < opaqueA && dRgb <= fringeTol) return true
-        // Thin solid leftover outline of a different colour
+        const dFill = rgbDist(i, fr, fg, fb)
+        const aTol = Math.max(18, Math.round(ta * 0.35))
+        // Solid neighbouring region of a different colour (fill vs border) stays.
+        if (!clickedEmpty && a >= opaqueA && dRgb > 48 && dFill > 40) return false
+        // AA fringe of the clicked colour only — not the rest of a shadow ramp
+        // and never empty canvas around an outer-shape shadow.
+        if (dRgb <= fringeTol && Math.abs(a - ta) <= aTol) return true
         if (isThinLeftoverOutline(x, y, i)) return true
+        if (!clickedEmpty) {
+          // Leftover white from baking the shape over a light backdrop.
+          const r = data[i], g = data[i + 1], b = data[i + 2]
+          const maxc = Math.max(r, g, b)
+          const minc = Math.min(r, g, b)
+          if (maxc >= 200 && maxc - minc <= 90) return true
+          // Soft AA of the clicked band — not a neighbouring shadow ramp.
+          if (a < 220 && dRgb <= 140 && Math.abs(a - ta) <= aTol) return true
+        }
         return false
       }
 
@@ -5685,11 +7025,47 @@ export function IconPaintEditor({
         redrawLines()
         drawHandles()
       }
+    } else if (!clickedEmpty) {
+      // Absorb leftover white bake / AA of the clicked band only — do not walk
+      // into a neighbouring fill, border, or shadow region.
+      const dirs: [number, number][] = [[-1, 0], [1, 0], [0, -1], [0, 1]]
+      const aTol = Math.max(18, Math.round(ta * 0.35))
+      for (let pass = 0; pass < 2; pass++) {
+        const queue: number[] = []
+        for (let y = 0; y < H; y++) {
+          for (let x = 0; x < W; x++) {
+            const p = y * W + x
+            if (filled[p]) continue
+            let adj = false
+            for (const [dx, dy] of dirs) {
+              const nx = x + dx, ny = y + dy
+              if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
+              if (filled[ny * W + nx]) { adj = true; break }
+            }
+            if (!adj) continue
+            const i = p * 4
+            if (isWall(i)) continue
+            const a = data[i + 3]
+            if (a <= EMPTY_A) continue
+            const dRgb = rgbDist(i, tr, tg, tb)
+            const dFill = rgbDist(i, fr, fg, fb)
+            if (a >= 210 && dRgb > 48 && dFill > 40) continue
+            const r = data[i], g = data[i + 1], b = data[i + 2]
+            const maxc = Math.max(r, g, b)
+            const minc = Math.min(r, g, b)
+            const towardWhite = maxc >= 200 && maxc - minc <= 90
+            const sameBand = dRgb <= 110 && Math.abs(a - ta) <= aTol
+            if (towardWhite || sameBand) queue.push(p)
+          }
+        }
+        if (!queue.length) break
+        for (const p of queue) paintAt(p * 4, p)
+      }
     }
 
     // Grow fill 1px into soft / near-edge underlay pixels so live-base outlines
     // cannot peek through when the overlay is scaled outside Paint.
-    {
+    if (clickedEmpty) {
       const grow: number[] = []
       const dirs4: [number, number][] = [[-1, 0], [1, 0], [0, -1], [0, 1]]
       for (let y = 0; y < H; y++) {
@@ -5707,8 +7083,6 @@ export function IconPaintEditor({
             if (a < 10) continue
             const dRgb = rgbDist(i, tr, tg, tb)
             const nearFill = rgbDist(i, fr, fg, fb) <= 40
-            // Soft AA fringe or near the original / fill colour only — do not
-            // bleed into solid neighbouring regions of a different colour.
             if (a < 220 || dRgb <= 110 || nearFill) grow.push(np)
           }
         }
@@ -5718,7 +7092,30 @@ export function IconPaintEditor({
       }
     }
 
-    ctx.putImageData(overlayImg, 0, 0)
+    // Commit: merge a clean fill-colour silhouette into the overlay (do not
+    // wipe earlier overlay paint). Solid bake pixels get full cover so original
+    // RGB (including white AA) cannot show through; soft shadow keeps its alpha.
+    const out = ctx.getImageData(0, 0, W, H)
+    const od = out.data
+    for (let p = 0; p < filled.length; p++) {
+      if (!filled[p]) continue
+      const i = p * 4
+      const srcA = data[i + 3]
+      if (srcA <= EMPTY_A && !clickedEmpty) continue
+      const outA = clickedEmpty
+        ? fa
+        : outerKind === 'shadow'
+          ? Math.round((srcA * fa) / 255)
+          : srcA >= 16
+            ? fa
+            : Math.max(od[i + 3], Math.round((srcA * fa) / 255))
+      od[i] = fr
+      od[i + 1] = fg
+      od[i + 2] = fb
+      od[i + 3] = outA
+    }
+    ctx.putImageData(out, 0, 0)
+    if (!clickedEmpty) punchFilledFromBase(underlay, filled)
   }
 
   const eyedrop = (sx: number, sy: number) => {
@@ -6082,6 +7479,22 @@ export function IconPaintEditor({
   }
 
   nudgeSelectedRef.current = (dx, dy) => {
+    const crop = cropSessionRef.current
+    if (crop) {
+      const l = linesRef.current.find((item) => item.id === crop.id)
+      if (l && l.type === 'stamp') {
+        crop.imgX += dx
+        crop.imgY += dy
+        clampCropPan(crop)
+        l.pts = [
+          { x: crop.imgX, y: crop.imgY },
+          { x: crop.imgX + crop.imgW, y: crop.imgY + crop.imgH }
+        ]
+        redrawLines()
+        drawHandles()
+        return
+      }
+    }
     const f = floatRef.current
     if (f) {
       f.x += dx
@@ -6537,17 +7950,27 @@ export function IconPaintEditor({
   }
 
   const handleStageDrop = async (e: React.DragEvent) => {
-    const file = e.dataTransfer.files?.[0]
-    if (file && isIgTemplateFile(file)) return
+    if (!paintDropAcceptsDrag(e)) return
+    // Stop immediately — nested canvas + row handlers both listen, and awaiting
+    // before stopPropagation lets the same drop place the icon twice.
+    e.preventDefault()
+    e.stopPropagation()
+    if (paintDropLockRef.current) return
+    paintDropLockRef.current = true
 
-    let handled = false
+    const file = e.dataTransfer.files?.[0]
+    if (file && isIgTemplateFile(file)) {
+      paintDropLockRef.current = false
+      return
+    }
+
     const pt = dropPtOnCanvas(e)
+    try {
     const svgData = e.dataTransfer.getData(PAINT_SVG_MIME) || e.dataTransfer.getData('text/plain')
     if (svgData && svgData.includes('<svg')) {
       const fromLibrary = e.dataTransfer.types.includes(PAINT_SVG_MIME) ||
         e.dataTransfer.types.includes(PAINT_LUCIDE_MIME)
       await placeSvgMarkup(svgData, pt, fromLibrary ? 'library' : 'image')
-      handled = true
     } else {
       const lucideRaw = e.dataTransfer.getData(PAINT_LUCIDE_MIME)
       if (lucideRaw) {
@@ -6556,7 +7979,6 @@ export function IconPaintEditor({
           if (parsed.name) {
             const markup = await renderLucideToSvg(parsed.name, 'currentColor', parsed.strokeWidth ?? 2)
             if (markup) await placeSvgMarkup(markup, pt, 'library')
-            handled = true
           }
         } catch {
           /* ignore bad payload */
@@ -6566,7 +7988,6 @@ export function IconPaintEditor({
           try {
             const text = await file.text()
             if (text.includes('<svg')) await placeSvgMarkup(text, pt, 'image')
-            handled = true
           } catch {
             /* ignore */
           }
@@ -6574,17 +7995,14 @@ export function IconPaintEditor({
           try {
             const url = await readBlobAsDataUrl(file)
             placeExternalImage(url, pt)
-            handled = true
           } catch {
             /* ignore */
           }
         }
       }
     }
-
-    if (handled) {
-      e.preventDefault()
-      e.stopPropagation()
+    } finally {
+      paintDropLockRef.current = false
     }
   }
 
@@ -6791,6 +8209,25 @@ export function IconPaintEditor({
 
   // ── Pointer handlers ─────────────────────────────────────────────────────────
   const handlePointerMove = (pt: Pt) => {
+    const cropSession = cropSessionRef.current
+    if (cropSession && !lineDragRef.current) {
+      const cropObj = linesRef.current.find((item) => item.id === cropSession.id)
+      let next: string | null = null
+      if (cropObj && cropObj.type === 'stamp') {
+        const hi = cropHandleAt(cropObj, cropSession, pt)
+        if (hi >= 0) next = cropCursorForHandle(hi, cropObj.rot ?? 0)
+        else {
+          const q = unmapObjDisplayPt(pt, cropObj)
+          if (
+            pointInLocalRect(cropSession.x, cropSession.y, cropSession.w, cropSession.h, q) ||
+            pointInLocalRect(cropSession.imgX, cropSession.imgY, cropSession.imgW, cropSession.imgH, q)
+          ) {
+            next = 'move'
+          }
+        }
+      }
+      setCropHoverCursor((prev) => (prev === next ? prev : next))
+    }
     if (tool === 'line' || tool === 'freepoly' || tool === 'pointer' || tool === 'shape' || tool === 'text' || tool === 'reshape') { lineMove(pt); return }
 
     if (tool === 'select') {
@@ -6870,7 +8307,10 @@ export function IconPaintEditor({
         if (l && stroke) {
           stroke.pts.push(shapeLocalPaintPoint(l, snap.pt))
           lastPt.current = snap.pt
-          redrawLines()
+          schedulePaintView(false, () => {
+            drawEraserCursor(snap.pt)
+            drawEraserSnapGuides(snap)
+          })
         }
         drawEraserCursor(snap.pt)
         drawEraserSnapGuides(snap)
@@ -6892,7 +8332,10 @@ export function IconPaintEditor({
           )
         }
         lastPt.current = snap.pt
-        redrawLines()
+        schedulePaintView(false, () => {
+          drawEraserCursor(snap.pt)
+          drawEraserSnapGuides(snap)
+        })
       }
       drawEraserCursor(snap.pt)
       drawEraserSnapGuides(snap)
@@ -6909,7 +8352,7 @@ export function IconPaintEditor({
         const stroke = l?.paintStrokes?.[activeObjectStroke.index]
         if (l && stroke) {
           stroke.pts.push(shapeLocalPaintPoint(l, pt))
-          redrawLines()
+          schedulePaintView()
         }
         lastPt.current = pt
         return
@@ -6919,11 +8362,12 @@ export function IconPaintEditor({
         strokeBrushTip(ctx, brushTip, lastPt.current.x, lastPt.current.y, pt.x, pt.y, size, c, false)
       }
       lastPt.current = pt
-      redrawLines()
+      schedulePaintView()
     }
   }
 
   const handlePointerUp = (pt: Pt) => {
+    cancelPaintView()
     if (tool === 'line' || tool === 'freepoly' || tool === 'pointer' || tool === 'shape' || tool === 'text' || tool === 'reshape') { lineUp(pt); return }
     if (tool === 'select') {
       if (marqueeResizeRef.current) {
@@ -6967,8 +8411,9 @@ export function IconPaintEditor({
       if (objectPaintStrokeRef.current) {
         objectPaintStrokeRef.current = null
         commitLines([...linesRef.current])
-        redrawLines()
       }
+      redrawLines()
+      if (tool === 'eraser') drawEraserCursor(pt)
       pushHistory()
     }
   }
@@ -7107,10 +8552,12 @@ export function IconPaintEditor({
       if (l && (l.type === 'shape' || l.type === 'stamp' || l.type === 'group')) return
     }
 
-    // Selected object layers own fill — never fall through to base overlays.
+    // Object layers own fill only when the click actually hits them. A selected
+    // shape/stamp/text must not swallow Outer background / border / shadow fills.
+    // Overlay cuts on live Inner are handled by floodFill (inner is in the sample,
+    // not a wall); do not abort when the click lands on the cut itself.
     if (tool === 'fill') {
       if (fillSelectedObjectLayer(pt)) return
-      if (selectedObjectOwnsRasterTools()) return
     }
 
     const targets = targetCtxs()
@@ -7121,11 +8568,24 @@ export function IconPaintEditor({
     if (tool === 'fill') {
       // Base overlays only when no object layer owns the tool.
       if (fillAllOpaque) {
-        for (const ctx of targets) recolorAllOpaque(ctx)
-      } else {
         for (const id of [...layerOrderRef.current].reverse().filter(layerIsEditable)) {
           const ctx = layerCanvas(id).getContext('2d')
-          if (ctx) floodFill(ctx, pt.x, pt.y, baseCanvas(id))
+          if (ctx) recolorAllOpaque(ctx, baseCanvas(id), id)
+        }
+      } else {
+        let id = floodFillTargetLayer(pt.x, pt.y)
+        // Inner object ink sits on top of Outer. Never treat that click as an
+        // Outer Fill — it would recolor the live shape on save.
+        if (
+          id === 'container' &&
+          layerIsEditable('content') &&
+          vectorAlphaAt('content', pt.x, pt.y) > 8
+        ) {
+          id = 'content'
+        }
+        if (id) {
+          const ctx = layerCanvas(id).getContext('2d')
+          if (ctx) floodFill(ctx, pt.x, pt.y, baseCanvas(id), id)
         }
       }
       redrawLines()
@@ -7176,6 +8636,7 @@ export function IconPaintEditor({
   }
 
   const handleSave = async () => {
+    if (cropSessionRef.current) applyStampCropRef.current()
     if (textEditIdRef.current) endTextEditRef.current()
     if (tool === 'polygon' && polyPts.current.length) finishPolygon()
     if (floatRef.current) commitFloat()
@@ -7205,7 +8666,11 @@ export function IconPaintEditor({
       containerOverlay: cc,
       contentBase: baseCt,
       contentOverlay: ct,
-      syncOuterFillColor
+      syncOuterFillColor,
+      outerFillTarget: lastOuterFillTargetRef.current ?? undefined,
+      outerFillPaintColor: lastOuterFillColorRef.current ?? undefined,
+      outerFillColors: lastOuterFillColorsRef.current,
+      outerFillAll: lastOuterFillAllRef.current || undefined
     })
     // Full Outer recolor via Fill → clear overlay so live backgroundColor /
     // containerColor owns the color (keeps favicon↔logo sync consistent).
@@ -7237,7 +8702,8 @@ export function IconPaintEditor({
         containerDecorationsPng: containerDecor.toDataURL('image/png'),
         contentDecorationsPng: contentDecor.toDataURL('image/png'),
         contentSync,
-        linkedTextInDecorations: bakeLinkedText
+        linkedTextInDecorations: bakeLinkedText,
+        paintShapeSize: Math.round(innerDraw)
       },
       {
         logoIds: [...saveLogoIds],
@@ -7405,84 +8871,137 @@ export function IconPaintEditor({
   }
 
   /**
-   * Crop a selected raster item. Portions outside the canvas are removed first;
-   * otherwise transparent padding is trimmed from the image.
+   * Word-style crop: Crop enters a mode with handles. Apply with Crop again,
+   * Enter, or click outside. Escape cancels.
    */
-  const cropSelectedStamp = () => {
-    const l = linesRef.current.find((item) => item.id === selectedIdRef.current)
-    if (!l || l.type !== 'stamp' || !l.imageDataUrl || l.pts.length < 2) return
-    const img = ensureStampImage(l.imageDataUrl, () => cropSelectedStamp())
-    if (!img) return
-
-    const x = Math.min(l.pts[0].x, l.pts[1].x)
-    const y = Math.min(l.pts[0].y, l.pts[1].y)
-    const w = Math.max(1, Math.abs(l.pts[1].x - l.pts[0].x))
-    const h = Math.max(1, Math.abs(l.pts[1].y - l.pts[0].y))
-    const iw = img.naturalWidth || img.width
-    const ih = img.naturalHeight || img.height
-    const source = document.createElement('canvas')
-    source.width = iw
-    source.height = ih
-    const sourceCtx = source.getContext('2d')!
-    sourceCtx.drawImage(img, 0, 0)
-    const pixels = sourceCtx.getImageData(0, 0, iw, ih).data
-
-    // Begin with the source portion whose displayed bounds intersect the canvas.
-    let left = Math.max(0, Math.floor((-x / w) * iw))
-    let top = Math.max(0, Math.floor((-y / h) * ih))
-    let right = Math.min(iw, Math.ceil(((W - x) / w) * iw))
-    let bottom = Math.min(ih, Math.ceil(((H - y) / h) * ih))
-    if (right <= left || bottom <= top) return
-
-    // Trim transparent padding within the visible source portion.
-    let alphaLeft = right
-    let alphaTop = bottom
-    let alphaRight = left
-    let alphaBottom = top
-    for (let py = top; py < bottom; py++) {
-      for (let px = left; px < right; px++) {
-        if (pixels[(py * iw + px) * 4 + 3] === 0) continue
-        alphaLeft = Math.min(alphaLeft, px)
-        alphaTop = Math.min(alphaTop, py)
-        alphaRight = Math.max(alphaRight, px + 1)
-        alphaBottom = Math.max(alphaBottom, py + 1)
-      }
+  const endCropSession = (restore: boolean) => {
+    const cs = cropSessionRef.current
+    const l = cs ? linesRef.current.find((item) => item.id === cs.id) : null
+    if (restore && cs && l && l.pts.length >= 2) {
+      l.pts = [{ ...cs.startPts[0] }, { ...cs.startPts[1] }]
     }
-    if (alphaRight <= alphaLeft || alphaBottom <= alphaTop) return
-    left = alphaLeft
-    top = alphaTop
-    right = alphaRight
-    bottom = alphaBottom
-    if (left === 0 && top === 0 && right === iw && bottom === ih) return
+    if (l) l.transformOrigin = undefined
+    cropSessionRef.current = null
+    setCropping(false)
+    setCropHoverCursor(null)
+  }
 
+  const applyStampCrop = (): boolean => {
+    const cs = cropSessionRef.current
+    if (!cs) return true
+    const l = linesRef.current.find((item) => item.id === cs.id)
+    if (!l || l.type !== 'stamp' || !l.imageDataUrl || l.pts.length < 2) {
+      endCropSession(false)
+      redrawLines()
+      drawHandles()
+      return true
+    }
+    const full =
+      Math.abs(cs.x - cs.imgX) < 0.75 &&
+      Math.abs(cs.y - cs.imgY) < 0.75 &&
+      Math.abs(cs.w - cs.imgW) < 0.75 &&
+      Math.abs(cs.h - cs.imgH) < 0.75
+    if (full) {
+      const moved =
+        Math.hypot(l.pts[0].x - cs.startPts[0].x, l.pts[0].y - cs.startPts[0].y) > 0.5 ||
+        Math.hypot(l.pts[1].x - cs.startPts[1].x, l.pts[1].y - cs.startPts[1].y) > 0.5
+      endCropSession(false)
+      commitLines([...linesRef.current])
+      redrawLines()
+      drawHandles()
+      if (moved) pushHistory()
+      return true
+    }
+    const img = ensureStampImage(l.imageDataUrl, () => { applyStampCrop() })
+    if (!img) return false
+    const nw = img.naturalWidth || img.width
+    const nh = img.naturalHeight || img.height
+    if (nw < 1 || nh < 1) {
+      endCropSession(false)
+      redrawLines()
+      drawHandles()
+      return true
+    }
+    let sx = ((cs.x - cs.imgX) / Math.max(1, cs.imgW)) * nw
+    let sy = ((cs.y - cs.imgY) / Math.max(1, cs.imgH)) * nh
+    let sw = (cs.w / Math.max(1, cs.imgW)) * nw
+    let sh = (cs.h / Math.max(1, cs.imgH)) * nh
+    sx = Math.max(0, Math.floor(sx))
+    sy = Math.max(0, Math.floor(sy))
+    sw = Math.max(1, Math.min(nw - sx, Math.round(sw)))
+    sh = Math.max(1, Math.min(nh - sy, Math.round(sh)))
     const out = document.createElement('canvas')
-    out.width = right - left
-    out.height = bottom - top
-    out.getContext('2d')!.drawImage(
-      img,
-      left, top, out.width, out.height,
-      0, 0, out.width, out.height
-    )
-    const oldCenter = objCenter(l)
-    const localX = x + (left / iw) * w
-    const localY = y + (top / ih) * h
-    const newW = (out.width / iw) * w
-    const newH = (out.height / ih) * h
-    const localCenter = { x: localX + newW / 2, y: localY + newH / 2 }
-    const displayedCenter = rotatePt(localCenter, oldCenter, l.rot ?? 0)
+    out.width = sw
+    out.height = sh
+    out.getContext('2d')!.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh)
+    const origin = l.transformOrigin ?? objCenter(l)
+    const localCenter = { x: cs.x + cs.w / 2, y: cs.y + cs.h / 2 }
+    const displayedCenter = rotatePt(localCenter, origin, l.rot ?? 0)
+    const ox = (cs.x - cs.imgX) / Math.max(1, cs.imgW)
+    const oy = (cs.y - cs.imgY) / Math.max(1, cs.imgH)
+    const rw = cs.w / Math.max(1, cs.imgW)
+    const rh = cs.h / Math.max(1, cs.imgH)
+    if (l.paintStrokes?.length) {
+      l.paintStrokes = l.paintStrokes.map((stroke) => ({
+        ...stroke,
+        pts: stroke.pts.map((p) => ({
+          x: (p.x - ox) / Math.max(0.0001, rw),
+          y: (p.y - oy) / Math.max(0.0001, rh)
+        }))
+      }))
+    }
     l.pts = [
-      { x: displayedCenter.x - newW / 2, y: displayedCenter.y - newH / 2 },
-      { x: displayedCenter.x + newW / 2, y: displayedCenter.y + newH / 2 }
+      { x: displayedCenter.x - cs.w / 2, y: displayedCenter.y - cs.h / 2 },
+      { x: displayedCenter.x + cs.w / 2, y: displayedCenter.y + cs.h / 2 }
     ]
     l.imageDataUrl = out.toDataURL('image/png')
     l.sourceSvgMarkup = undefined
     l.sourceStampSize = undefined
     l.keepStrokeOnResize = undefined
     ensureStampImage(l.imageDataUrl)
+    endCropSession(false)
     commitLines([...linesRef.current])
     redrawLines()
     drawHandles()
     pushHistory()
+    return true
+  }
+  applyStampCropRef.current = applyStampCrop
+
+  const cancelStampCrop = () => {
+    if (!cropSessionRef.current) return
+    endCropSession(true)
+    commitLines([...linesRef.current])
+    redrawLines()
+    drawHandles()
+  }
+  cancelStampCropRef.current = cancelStampCrop
+
+  const cropSelectedStamp = () => {
+    if (cropSessionRef.current) {
+      applyStampCrop()
+      return
+    }
+    const l = linesRef.current.find((item) => item.id === selectedIdRef.current)
+    if (!l || l.type !== 'stamp' || !l.imageDataUrl || l.pts.length < 2) return
+    if (toolRef.current !== 'pointer') setTool('pointer')
+    const origin = objCenter(l)
+    l.transformOrigin = { x: origin.x, y: origin.y }
+    const r = stampLocalRect(l)
+    cropSessionRef.current = {
+      id: l.id,
+      imgX: r.x,
+      imgY: r.y,
+      imgW: r.w,
+      imgH: r.h,
+      x: r.x,
+      y: r.y,
+      w: r.w,
+      h: r.h,
+      startPts: [{ ...l.pts[0] }, { ...l.pts[1] }]
+    }
+    setCropping(true)
+    drawHandles()
   }
 
   /** Create a persistent parent group without flattening its child objects. */
@@ -7573,14 +9092,20 @@ export function IconPaintEditor({
   const allObjectsSelected = eligibleObjectIds.length > 0 &&
     eligibleObjectIds.every((id) => selectedLayerIds.has(id))
   const toggleSelectAllObjects = () => {
+    const ids = linesRef.current.filter((l) => !l.marqueeItem).map((l) => l.id)
+    if (!ids.length) return
     setTool('pointer')
-    if (allObjectsSelected) {
+    const allOn = ids.every((id) => selectedLayerIdsRef.current.has(id))
+    if (allOn) {
+      selectedLayerIdsRef.current = new Set()
       setSelectedLayerIds(new Set())
       selectedIdRef.current = null
       setSelectedId(null)
     } else {
-      setSelectedLayerIds(new Set(eligibleObjectIds))
-      const first = linesRef.current.find((l) => eligibleObjectIds.includes(l.id))
+      const next = new Set(ids)
+      selectedLayerIdsRef.current = next
+      setSelectedLayerIds(next)
+      const first = linesRef.current.find((l) => ids.includes(l.id))
       if (first) {
         selectedIdRef.current = first.id
         setSelectedId(first.id)
@@ -7589,6 +9114,8 @@ export function IconPaintEditor({
     setSelectedBaseLayer(null)
     selectedBaseLayerRef.current = null
     clearPreview()
+    redrawLines()
+    drawHandles()
   }
 
   const canSave =
@@ -7701,7 +9228,7 @@ export function IconPaintEditor({
         setTxtShadowColor(next.shadowColor ?? '#000000b3')
         setTxtShadowBlur(next.shadowBlur ?? 8)
         setTxtShadowOX(next.shadowOffsetX ?? 0)
-        setTxtShadowOY(next.shadowOffsetY ?? 4)
+        setTxtShadowOY(next.shadowOffsetY ?? 3)
         setTxtShadowSpread(next.shadowSpread ?? 0)
         redrawLines()
         drawHandles()
@@ -7730,7 +9257,7 @@ export function IconPaintEditor({
     setTxtShadowColor(next.shadowColor ?? '#000000b3')
     setTxtShadowBlur(next.shadowBlur ?? 8)
     setTxtShadowOX(next.shadowOffsetX ?? 0)
-    setTxtShadowOY(next.shadowOffsetY ?? 4)
+    setTxtShadowOY(next.shadowOffsetY ?? 3)
     setTxtShadowSpread(next.shadowSpread ?? 0)
     loadFont(next.fontFamily ?? 'Inter').then(() => { redrawLines(); drawHandles() })
     redrawLines()
@@ -7752,12 +9279,12 @@ export function IconPaintEditor({
   }
 
   return (
-    <div style={NO_DRAG} className="fixed inset-0 z-[9998] flex flex-col bg-bg/95 backdrop-blur-sm">
-      {openMenu && <div className="fixed inset-0 z-30" onClick={() => setOpenMenu(null)} />}
-      {/* Header */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-surface shrink-0">
+    <div style={NO_DRAG} className="fixed top-10 left-0 right-0 bottom-0 z-[9998] flex flex-col bg-bg/95 backdrop-blur-sm">
+      {openMenu && <div className="absolute inset-0 z-30" onClick={() => setOpenMenu(null)} />}
+      {/* Header — drag region so the window can still be moved in paint mode */}
+      <div style={DRAG} className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-surface shrink-0">
         <span className="text-sm font-semibold text-text">{title}</span>
-        <div className="flex items-center gap-2">
+        <div style={NO_DRAG} className="flex items-center gap-2">
           <button
             onClick={onClose}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-surface3 text-muted hover:text-text transition-colors"
@@ -8191,10 +9718,16 @@ export function IconPaintEditor({
           {selectedObj?.type === 'stamp' && (
             <button
               onClick={cropSelectedStamp}
-              title="Crop selected image to the canvas and trim transparent padding"
-              className="h-8 px-2 rounded-lg flex items-center gap-1 bg-surface3 text-[10px] font-medium text-muted hover:text-text transition-colors"
+              title={cropping
+                ? 'Apply crop (Enter). Esc cancels. Drag handles to crop, drag inside to move the picture.'
+                : 'Crop image — drag handles like Word. Shift locks aspect.'}
+              className={`h-8 px-2 rounded-lg flex items-center gap-1 text-[10px] font-medium transition-colors ${
+                cropping
+                  ? 'bg-accent text-white'
+                  : 'bg-surface3 text-muted hover:text-text'
+              }`}
             >
-              <CropIcon size={14} /> Crop
+              <CropIcon size={14} /> {cropping ? 'Done' : 'Crop'}
             </button>
           )}
           <button
@@ -8819,7 +10352,9 @@ export function IconPaintEditor({
             className="absolute inset-0 w-full h-full"
             style={{
               visibility: anythingLayerVisible ? 'visible' : 'hidden',
-              cursor: tool === 'pointer' || tool === 'reshape' ? 'default' : tool === 'text' ? 'text' : (noTarget && tool !== 'fill' && tool !== 'eyedropper' && tool !== 'line' && tool !== 'freepoly' && tool !== 'select' && tool !== 'shape' ? 'not-allowed' : 'crosshair')
+              cursor: cropping && cropHoverCursor
+                ? cropHoverCursor
+                : tool === 'pointer' || tool === 'reshape' ? 'default' : tool === 'text' ? 'text' : (noTarget && tool !== 'fill' && tool !== 'eyedropper' && tool !== 'line' && tool !== 'freepoly' && tool !== 'select' && tool !== 'shape' ? 'not-allowed' : 'crosshair')
             }}
             onMouseDown={onDown}
             onMouseMove={onMove}
@@ -8853,7 +10388,7 @@ export function IconPaintEditor({
             const solid = firstSolidColor(l.color)
             const c = objCenter(l)
             const rot = l.rot ?? 0
-            const b = textBBox(probe)
+            const b = textInkBBox(probe)
             const corner = rotatePt({ x: b.x, y: b.y }, c, rot)
             const pin = rotatePinAt({ ...l, text: textValue || ' ' })
             const exitAndDrag = (kind: 'handle' | 'rotate', ev: React.MouseEvent) => {
@@ -9455,7 +10990,11 @@ export function IconPaintEditor({
           <div className="shrink-0 border-t border-border p-2 space-y-1.5">
             <button
               type="button"
-              onClick={toggleSelectAllObjects}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                toggleSelectAllObjects()
+              }}
               disabled={eligibleObjectIds.length === 0}
               className="w-full h-7 rounded-lg flex items-center justify-center bg-surface3 border border-border text-[10px] font-semibold text-muted hover:text-text hover:border-muted disabled:opacity-35 disabled:cursor-not-allowed transition-colors"
             >

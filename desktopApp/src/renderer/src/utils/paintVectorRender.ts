@@ -1,13 +1,57 @@
 import type { PaintVector } from '../types'
+import { reuseCanvas, takeCanvas, releaseCanvas } from './canvasPool'
 
 type Pt = { x: number; y: number }
 
 const measCanvas = typeof document !== 'undefined' ? document.createElement('canvas') : null
+const bakeOutSlot: { current: HTMLCanvasElement | null } = { current: null }
+const bakeSpreadSlot: { current: HTMLCanvasElement | null } = { current: null }
+const textOffSlot: { current: HTMLCanvasElement | null } = { current: null }
 
 function firstSolidColor(color: string): string {
   if (!color || color === 'transparent') return '#000000'
   if (color.startsWith('linear-gradient')) return '#ffffff'
   return color.length >= 7 ? color.slice(0, 7) : color
+}
+
+/**
+ * CSS drop-shadow on an identity canvas. Bake first, then rotate/flip the
+ * result so Offset X/Y stays attached to the letter. Applying `filter` after
+ * rotate / negative scale drops the shadow in Chromium.
+ */
+export function bakeCanvasDropShadow(
+  src: HTMLCanvasElement,
+  opts: { blur?: number; ox?: number; oy?: number; spread?: number; color: string }
+): HTMLCanvasElement {
+  const W = Math.max(1, src.width)
+  const H = Math.max(1, src.height)
+  const out = reuseCanvas(bakeOutSlot, W, H)
+  const ctx = out.getContext('2d')!
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  const blur = opts.blur ?? 0
+  const ox = opts.ox ?? 0
+  const oy = opts.oy ?? 0
+  const spread = Math.max(0, opts.spread ?? 0)
+  const color = firstSolidColor(opts.color)
+  if (spread > 0) {
+    const HUGE = 10000
+    const spreadSize = Math.max(W, H) + spread * 2
+    const sc = reuseCanvas(bakeSpreadSlot, spreadSize, spreadSize)
+    const s = sc.getContext('2d')!
+    s.imageSmoothingEnabled = true
+    s.imageSmoothingQuality = 'high'
+    s.drawImage(src, 0, 0, spreadSize, spreadSize)
+    ctx.filter = `drop-shadow(${ox + HUGE}px ${oy + HUGE}px ${blur}px ${color})`
+    ctx.drawImage(sc, -spread - HUGE, -spread - HUGE)
+    ctx.filter = 'none'
+    ctx.drawImage(src, 0, 0)
+  } else {
+    ctx.filter = `drop-shadow(${ox}px ${oy}px ${blur}px ${color})`
+    ctx.drawImage(src, 0, 0)
+    ctx.filter = 'none'
+  }
+  return out
 }
 
 type CtxLetterSpacing = CanvasRenderingContext2D & { letterSpacing?: string }
@@ -156,6 +200,41 @@ export interface InnerContentDecor {
   contentShadowOffsetY?: number
 }
 
+function paintTextBorderWidth(v: PaintVector, decor?: InnerContentDecor, sessionRes?: number): number {
+  if (!v.linkedOutsideText || !decor || !sessionRes) return 0
+  return (decor.contentBorderWidth ?? 0) * (sessionRes / 256)
+}
+
+function drawPaintGlyphs(
+  ctx: CanvasRenderingContext2D,
+  v: PaintVector,
+  rows: string[],
+  p: Pt,
+  lineH: number,
+  spacing: number,
+  font: string,
+  ox: number,
+  oy: number,
+  borderW: number,
+  borderColor: string
+): void {
+  ctx.font = font
+  ctx.textAlign = 'left'
+  ctx.textBaseline = 'top'
+  ctx.fillStyle = v.color.startsWith('linear-gradient') ? firstSolidColor(v.color) : v.color
+  rows.forEach((r, i) => {
+    if (r) fillSpacedText(ctx, r, p.x + ox, p.y + i * lineH + oy, spacing)
+  })
+  if (borderW > 0) {
+    ctx.lineWidth = borderW
+    ctx.strokeStyle = borderColor
+    ctx.lineJoin = 'round'
+    rows.forEach((r, i) => {
+      if (r) strokeSpacedText(ctx, r, p.x + ox, p.y + i * lineH + oy, spacing)
+    })
+  }
+}
+
 function renderPaintText(
   ctx: CanvasRenderingContext2D,
   v: PaintVector,
@@ -168,47 +247,51 @@ function renderPaintText(
   const { lineH } = textMetrics(v)
   const spacing = v.letterSpacing ?? 0
   const font = textFontStr(v)
-  ctx.save()
-  ctx.font = font
-  ctx.textAlign = 'left'
-  ctx.textBaseline = 'top'
-  // Linked outside text uses the renderer's border/shadow pipeline — not paint vector shadow.
-  const usePaintShadow = !!v.shadow && !v.linkedOutsideText
-  if (usePaintShadow) {
-    const blur = v.shadowBlur ?? 0
-    const ox = v.shadowOffsetX ?? 0
-    const oy = v.shadowOffsetY ?? 0
-    ctx.shadowColor = firstSolidColor(v.shadowColor ?? '#00000080')
-    ctx.shadowBlur = blur
-    ctx.shadowOffsetX = ox
-    ctx.shadowOffsetY = oy
-  } else {
-    ctx.shadowColor = 'transparent'
-    ctx.shadowBlur = 0
-    ctx.shadowOffsetX = 0
-    ctx.shadowOffsetY = 0
+  const b = textBBox(v)
+  const borderW = paintTextBorderWidth(v, decor, sessionRes)
+  const borderColor = (decor?.contentBorderColor ?? 'transparent') === 'transparent'
+    ? '#000000'
+    : (decor?.contentBorderColor ?? '#000000')
+
+  const transformed = needsDisplayTransform(v) || !!(v.reshapeQuad && v.reshapeQuad.length === 4)
+  const bakeLinked =
+    !!v.linkedOutsideText &&
+    transformed &&
+    !!(v.shadow || decor?.contentShadowEnabled) &&
+    !decor?.contentShadowInset
+  const bakeOwn = !v.linkedOutsideText && !!v.shadow
+
+  if (!bakeLinked && !bakeOwn) {
+    drawPaintGlyphs(ctx, v, rows, p, lineH, spacing, font, 0, 0, borderW, borderColor)
+    return
   }
-  ctx.fillStyle = v.color.startsWith('linear-gradient') ? firstSolidColor(v.color) : v.color
-  rows.forEach((r, i) => {
-    if (r) fillSpacedText(ctx, r, p.x, p.y + i * lineH, spacing)
+
+  const scale = (sessionRes ?? 256) / 256
+  const blur = v.shadowBlur ?? Math.round((decor?.contentShadowBlur ?? 8) * scale)
+  const sox = v.shadowOffsetX ?? Math.round((decor?.contentShadowOffsetX ?? 0) * scale)
+  const soy = v.shadowOffsetY ?? Math.round((decor?.contentShadowOffsetY ?? 3) * scale)
+  const spread = v.shadowSpread ?? Math.round((decor?.contentShadowSpread ?? 0) * scale)
+  const padL = Math.ceil(Math.max(0, blur * 2 + spread - sox) + 4)
+  const padR = Math.ceil(Math.max(0, blur * 2 + spread + sox) + 4)
+  const padT = Math.ceil(Math.max(0, blur * 2 + spread - soy) + 4)
+  const padB = Math.ceil(Math.max(0, blur * 2 + spread + soy) + 4)
+  const tw = Math.max(1, Math.ceil(b.w) + padL + padR)
+  const th = Math.max(1, Math.ceil(b.h) + padT + padB)
+  const off = reuseCanvas(textOffSlot, tw, th)
+  const o = off.getContext('2d')!
+  drawPaintGlyphs(
+    o, v, rows, p, lineH, spacing, font,
+    -b.x + padL, -b.y + padT,
+    borderW, borderColor
+  )
+  const src = bakeCanvasDropShadow(off, {
+    blur,
+    ox: sox,
+    oy: soy,
+    spread,
+    color: v.shadowColor ?? decor?.contentShadowColor ?? '#00000080'
   })
-
-  if (v.linkedOutsideText && decor && sessionRes) {
-    const cbw = (decor.contentBorderWidth ?? 0) * (sessionRes / 256)
-    if (cbw > 0) {
-      const cbc = (decor.contentBorderColor ?? 'transparent') === 'transparent'
-        ? '#000000'
-        : (decor.contentBorderColor ?? '#000000')
-      ctx.lineWidth = cbw
-      ctx.strokeStyle = cbc
-      ctx.lineJoin = 'round'
-      rows.forEach((r, i) => {
-        if (r) strokeSpacedText(ctx, r, p.x, p.y + i * lineH, spacing)
-      })
-    }
-  }
-
-  ctx.restore()
+  ctx.drawImage(src, b.x - padL, b.y - padT)
 }
 
 function renderPaintTextVector(
@@ -254,7 +337,8 @@ export function contentVectorsForLiveRender(vectors: PaintVector[] | undefined):
   return (vectors ?? []).filter((v) => {
     if (v.parentId || v.contentBound || !isVectorVisible(v)) return false
     if ((v.layer ?? 'content') !== 'content') return false
-    if (v.linkedOutsideText) return true
+    // Unrotated linked letters stay as live Inner text (keeps content shadow).
+    if (v.linkedOutsideText) return linkedTextHasPaintTransform(v)
     return v.type === 'text'
   })
 }
@@ -303,61 +387,63 @@ export function compositeInnerContentDecor(
     const HUGE = 10000
     const pad = Math.ceil(csb * 2 + Math.max(cW, cH) + Math.abs(csx) + Math.abs(csy) + 4)
 
-    const frameCanvas = document.createElement('canvas')
-    frameCanvas.width = cW + pad * 2
-    frameCanvas.height = cH + pad * 2
-    const fCtx = frameCanvas.getContext('2d')!
-    fCtx.fillStyle = '#000000'
-    fCtx.fillRect(0, 0, frameCanvas.width, frameCanvas.height)
-    fCtx.globalCompositeOperation = 'destination-out'
-    if (cSpread > 0) {
-      const hs = Math.max(1, cW - cSpread * 2)
-      const ho = pad + (cW - hs) / 2
-      fCtx.drawImage(offscreen, ho, ho, hs, hs)
-    } else {
-      fCtx.drawImage(offscreen, pad, pad, cW, cH)
+    const frameCanvas = takeCanvas(cW + pad * 2, cH + pad * 2)
+    const shadowCanvas = takeCanvas(cW, cH)
+    const insetCanvas = takeCanvas(cW, cH)
+    try {
+      const fCtx = frameCanvas.getContext('2d')!
+      fCtx.fillStyle = '#000000'
+      fCtx.fillRect(0, 0, frameCanvas.width, frameCanvas.height)
+      fCtx.globalCompositeOperation = 'destination-out'
+      if (cSpread > 0) {
+        const hs = Math.max(1, cW - cSpread * 2)
+        const ho = pad + (cW - hs) / 2
+        fCtx.drawImage(offscreen, ho, ho, hs, hs)
+      } else {
+        fCtx.drawImage(offscreen, pad, pad, cW, cH)
+      }
+      fCtx.globalCompositeOperation = 'source-over'
+
+      const sCtx = shadowCanvas.getContext('2d')!
+      sCtx.imageSmoothingEnabled = true
+      sCtx.imageSmoothingQuality = 'high'
+      sCtx.filter = `drop-shadow(${csx + HUGE}px ${csy + HUGE}px ${csb}px ${csc})`
+      sCtx.drawImage(frameCanvas, -HUGE - pad, -HUGE - pad)
+      sCtx.filter = 'none'
+      sCtx.globalCompositeOperation = 'destination-in'
+      sCtx.drawImage(offscreen, 0, 0, cW, cH)
+      sCtx.globalCompositeOperation = 'source-over'
+
+      const iCtx = insetCanvas.getContext('2d')!
+      iCtx.drawImage(offscreen, 0, 0, cW, cH)
+      iCtx.drawImage(shadowCanvas, 0, 0)
+
+      ctx.drawImage(insetCanvas, x, y)
+    } finally {
+      releaseCanvas(frameCanvas)
+      releaseCanvas(shadowCanvas)
+      releaseCanvas(insetCanvas)
     }
-    fCtx.globalCompositeOperation = 'source-over'
-
-    const shadowCanvas = document.createElement('canvas')
-    shadowCanvas.width = cW
-    shadowCanvas.height = cH
-    const sCtx = shadowCanvas.getContext('2d')!
-    sCtx.imageSmoothingEnabled = true
-    sCtx.imageSmoothingQuality = 'high'
-    sCtx.filter = `drop-shadow(${csx + HUGE}px ${csy + HUGE}px ${csb}px ${csc})`
-    sCtx.drawImage(frameCanvas, -HUGE - pad, -HUGE - pad)
-    sCtx.filter = 'none'
-    sCtx.globalCompositeOperation = 'destination-in'
-    sCtx.drawImage(offscreen, 0, 0, cW, cH)
-    sCtx.globalCompositeOperation = 'source-over'
-
-    const insetCanvas = document.createElement('canvas')
-    insetCanvas.width = cW
-    insetCanvas.height = cH
-    const iCtx = insetCanvas.getContext('2d')!
-    iCtx.drawImage(offscreen, 0, 0, cW, cH)
-    iCtx.drawImage(shadowCanvas, 0, 0)
-
-    ctx.drawImage(insetCanvas, x, y)
     return
   }
 
   if (cSpread > 0) {
     const HUGE = 10000
     const spreadSize = size + cSpread * 2
-    const spreadCanvas = document.createElement('canvas')
-    spreadCanvas.width = spreadSize
-    spreadCanvas.height = spreadSize
-    const sCtx = spreadCanvas.getContext('2d')!
-    sCtx.imageSmoothingEnabled = true
-    sCtx.imageSmoothingQuality = 'high'
-    sCtx.drawImage(offscreen, 0, 0, spreadSize, spreadSize)
+    const spreadCanvas = takeCanvas(spreadSize, spreadSize)
+    try {
+      const sCtx = spreadCanvas.getContext('2d')!
+      sCtx.imageSmoothingEnabled = true
+      sCtx.imageSmoothingQuality = 'high'
+      sCtx.drawImage(offscreen, 0, 0, spreadSize, spreadSize)
 
-    ctx.filter = `drop-shadow(${csx + HUGE}px ${csy + HUGE}px ${csb}px ${csc})`
-    ctx.drawImage(spreadCanvas, x - cSpread - HUGE, y - cSpread - HUGE)
-    ctx.filter = 'none'
-    ctx.drawImage(offscreen, x, y, size, size)
+      ctx.filter = `drop-shadow(${csx + HUGE}px ${csy + HUGE}px ${csb}px ${csc})`
+      ctx.drawImage(spreadCanvas, x - cSpread - HUGE, y - cSpread - HUGE)
+      ctx.filter = 'none'
+      ctx.drawImage(offscreen, x, y, size, size)
+    } finally {
+      releaseCanvas(spreadCanvas)
+    }
     return
   }
 
