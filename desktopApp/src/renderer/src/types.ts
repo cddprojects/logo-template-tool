@@ -473,6 +473,11 @@ export interface PaintVector {
    * Layers above still draw on top.
    */
   punchThrough?: boolean
+  /**
+   * Punch is an enclosed counter (the empty space inside "b"), not the glyph
+   * ink. Composite dest-out must not nibble the letter's inner edge.
+   */
+  punchEnclosedHole?: boolean
   /** Invisible flood-fill mask used only for punch-through compositing. */
   punchMask?: boolean
 }

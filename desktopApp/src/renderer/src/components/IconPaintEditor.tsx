@@ -417,6 +417,8 @@ interface LineObj {
   reshapeBaseQuad?: Pt[]
   /** Transparent fill cuts a hole through every layer below this object. */
   punchThrough?: boolean
+  /** Punch is the empty counter inside a glyph, not the letter ink. */
+  punchEnclosedHole?: boolean
   /** Invisible flood-fill mask used only for punch-through compositing. */
   punchMask?: boolean
 }
@@ -567,7 +569,15 @@ async function restorePunchMasks(
     }
     if (l.punchThrough && !punchMaskCanvases.has(l.id)) {
       const bits = layerBits.get((l.layer ?? 'content') as PaintLayerId)
-      if (bits) setLocalPunchFromFilled(l, bits, W, H)
+      if (!bits) continue
+      if (l.type === 'text') {
+        const mapped = textPunchBitsFromSavedLayer(l, bits, W, H)
+        if (!mapped) continue
+        setLocalPunchFromFilled(l, mapped.bits, W, H)
+        if (mapped.enclosed) l.punchEnclosedHole = true
+      } else {
+        setLocalPunchFromFilled(l, bits, W, H)
+      }
     }
   }
 
@@ -2034,6 +2044,43 @@ function rewritePunchBitsFromLocal(item: LineObj, W: number, H: number): void {
   punchMaskBits.set(item.id, bits)
 }
 
+function textPunchBitsFromSavedLayer(
+  l: LineObj,
+  bits: Uint8Array,
+  W: number,
+  H: number
+): { bits: Uint8Array; enclosed: boolean } | null {
+  const c = document.createElement('canvas')
+  c.width = W
+  c.height = H
+  const ctx = c.getContext('2d')
+  if (!ctx) return { bits, enclosed: !!l.punchEnclosedHole }
+  renderText(ctx, { ...l, color: '#000000', shadow: false, punchThrough: false })
+  const gd = ctx.getImageData(0, 0, W, H).data
+  const hole = new Uint8Array(bits.length)
+  let glyph = 0
+  let overlap = 0
+  let mask = 0
+  let holeN = 0
+  for (let p = 0; p < bits.length; p++) {
+    const onGlyph = gd[p * 4 + 3] >= 80
+    if (onGlyph) glyph++
+    if (!bits[p]) continue
+    mask++
+    if (onGlyph) overlap++
+    else {
+      hole[p] = 1
+      holeN++
+    }
+  }
+  // Older saves dest-outed the whole glyph as the punch mask.
+  const looksLikeFullGlyph = glyph > 0 && overlap >= glyph * 0.45 && holeN < overlap * 0.35
+  if (looksLikeFullGlyph) {
+    return holeN > 8 ? { bits: hole, enclosed: true } : null
+  }
+  return { bits, enclosed: mask > 0 && overlap < mask * 0.35 }
+}
+
 function destOutLocalPunch(ctx: CanvasRenderingContext2D, item: LineObj): boolean {
   const hasLocalHole = item.punchMask || item.punchThrough || punchMaskCanvases.has(item.id)
   if (!hasLocalHole) return false
@@ -2063,6 +2110,52 @@ function destOutLocalPunch(ctx: CanvasRenderingContext2D, item: LineObj): boolea
   }
   paint()
   return true
+}
+
+/** Punch-through dest-out on the stack. Enclosed counters skip the glyph ink. */
+function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: LineObj): boolean {
+  if (!item.punchEnclosedHole) return destOutLocalPunch(ctx, item)
+  const box = punchLocalBox(item)
+  const sync = punchMaskCanvases.get(item.id)
+  if (!box || !sync) return destOutLocalPunch(ctx, item)
+  const w = ctx.canvas.width
+  const h = ctx.canvas.height
+  const tmp = takeCanvas(w, h)
+  try {
+    const t = tmp.getContext('2d')!
+    t.imageSmoothingEnabled = false
+    const paintMask = () => t.drawImage(sync, box.x, box.y, box.w, box.h)
+    if (lineNeedsDisplayTransform(item)) {
+      const c = objCenter(item)
+      t.save()
+      t.translate(c.x, c.y)
+      t.rotate(item.rot ?? 0)
+      t.scale(item.scaleX ?? 1, item.scaleY ?? 1)
+      t.translate(-c.x, -c.y)
+      paintMask()
+      t.restore()
+    } else {
+      paintMask()
+    }
+    const wasShadow = item.shadow
+    const wasPunch = item.punchThrough
+    item.shadow = false
+    item.punchThrough = false
+    t.save()
+    t.globalCompositeOperation = 'destination-out'
+    renderLineBody(t, item)
+    t.restore()
+    item.shadow = wasShadow
+    item.punchThrough = wasPunch
+    ctx.save()
+    ctx.globalCompositeOperation = 'destination-out'
+    ctx.imageSmoothingEnabled = false
+    ctx.drawImage(tmp, 0, 0)
+    ctx.restore()
+    return true
+  } finally {
+    releaseCanvas(tmp)
+  }
 }
 
 function setLocalPunchFromFilled(item: LineObj, filled: Uint8Array, W: number, H: number): void {
@@ -2119,6 +2212,10 @@ function objectHasFillHole(l: LineObj): boolean {
 
 function destOutObjectPunch(ctx: CanvasRenderingContext2D, l: LineObj): void {
   if (l.punchMask || !objectHasFillHole(l)) return
+  // Punch-through is applied on the composite after the object is drawn.
+  // Dest-outing the same mask on the glyph eats enclosed counters (the hole
+  // in "b") and can leave a 1px fringe.
+  if (l.punchThrough) return
   if (destOutLocalPunch(ctx, l)) return
   // Canvas-fixed bits stay at the punch origin. After a move they leave a ghost
   // of Outer fill between the object and its shadow. Local-box objects skip them.
@@ -2418,7 +2515,20 @@ function renderPunchSilhouette(
       return
     }
     if (item.type === 'text') {
-      renderText(ctx, { ...item, color: '#000000', shadow: false })
+      const box = punchLocalBox(item)
+      const sync = punchMaskCanvases.get(item.id)
+      if (sync && box) {
+        ctx.drawImage(sync, box.x, box.y, box.w, box.h)
+        return
+      }
+      const bits = punchMaskBits.get(item.id)
+      if (bits && bits.length === ctx.canvas.width * ctx.canvas.height) {
+        stampPunchBits(bits)
+        return
+      }
+      // Enclosed counters (the hole in "b") live on a local mask. Never fall back
+      // to the whole glyph — that punches the letter on Save and on re-enter.
+      return
     }
   }
   if (lineNeedsDisplayTransform(item)) {
@@ -2444,7 +2554,7 @@ function punchObjectFromComposite(
   if (item.type !== 'group' && (!item.punchThrough || !visible(item))) return
   const w = ctx.canvas.width
   const h = ctx.canvas.height
-  if (destOutLocalPunch(ctx, item)) return
+  if (destOutPunchThroughOnComposite(ctx, item)) return
   if (!item.punchMask && punchLocalBox(item)) return
   const bits = punchMaskBits.get(item.id)
   if (bits && bits.length === w * h) {
@@ -3970,14 +4080,11 @@ export function IconPaintEditor({
   const paintStackSlot = (
     ctx: CanvasRenderingContext2D,
     id: PaintLayerId,
-    opts?: { base?: boolean; overlay?: boolean; skipId?: string | null; preview?: boolean }
+    opts?: { base?: boolean; overlay?: boolean; skipId?: string | null }
   ) => {
-    if (opts?.preview && slotHiddenInPreview(id)) return
     const skipId = opts?.skipId
     const skip = (l: LineObj) => !!(skipId && l.id === skipId && l.type === 'text')
-    const vis = (l: LineObj) =>
-      isVectorVisible(l) && (!opts?.preview || !objectHiddenInPreview(l))
-    const hideObjects = !!(opts?.preview && objectsHiddenOnBase(id))
+    const vis = (l: LineObj) => isVectorVisible(l)
     const liveDirty = liveDirtyLayers()
     const useSlotCache = !!(liveDirty && !liveDirty.has(id))
     const cacheSlot = id === 'content' ? slotCacheContentRef : slotCacheContainerRef
@@ -3988,7 +4095,6 @@ export function IconPaintEditor({
         for (const l of linesRef.current) {
           if (l.parentId || vectorLayerOf(l) !== id || skip(l)) continue
           if (l.punchMask && !l.punchThrough) continue
-          if (hideObjects && !l.punchMask) continue
           punchObjectFromComposite(ctx, l, linesRef.current, vis)
         }
         return
@@ -3999,18 +4105,14 @@ export function IconPaintEditor({
     )
     const paintSlot = (t: CanvasRenderingContext2D) => {
       if (opts?.base !== false) t.drawImage(baseCanvas(id), 0, 0)
-      if (!hideObjects) {
-        for (const l of linesRef.current) {
-          if (l.parentId || vectorLayerOf(l) !== id || !isLiveInnerVector(l) || skip(l)) continue
-          renderObjectTree(t, l, linesRef.current, vis)
-        }
+      for (const l of linesRef.current) {
+        if (l.parentId || vectorLayerOf(l) !== id || !isLiveInnerVector(l) || skip(l)) continue
+        renderObjectTree(t, l, linesRef.current, vis)
       }
       if (opts?.overlay !== false) t.drawImage(layerCanvas(id), 0, 0)
-      if (!hideObjects) {
-        for (const l of linesRef.current) {
-          if (l.parentId || vectorLayerOf(l) !== id || isLiveInnerVector(l) || skip(l)) continue
-          renderObjectTree(t, l, linesRef.current, vis)
-        }
+      for (const l of linesRef.current) {
+        if (l.parentId || vectorLayerOf(l) !== id || isLiveInnerVector(l) || skip(l)) continue
+        renderObjectTree(t, l, linesRef.current, vis)
       }
       for (const l of linesRef.current) {
         if (vectorLayerOf(l) !== id || skip(l) || !vis(l)) continue
@@ -4038,7 +4140,6 @@ export function IconPaintEditor({
     for (const l of linesRef.current) {
       if (l.parentId || vectorLayerOf(l) !== id || skip(l)) continue
       if (l.punchMask && !l.punchThrough) continue
-      if (hideObjects && !l.punchMask) continue
       punchObjectFromComposite(ctx, l, linesRef.current, vis)
     }
   }
@@ -4140,90 +4241,8 @@ export function IconPaintEditor({
     return (l.visible ?? l.editable ?? true) !== false
   }
 
-  /** Panel list, top to bottom. First = highest, last = lowest. */
-  const panelStackKeys = (): string[] => {
-    const keys: string[] = []
-    const list = linesRef.current
-    const appendChildren = (parentId: string) => {
-      for (const child of [...list].filter((l) => l.parentId === parentId).reverse()) {
-        keys.push(`object:${child.id}`)
-        if (child.type === 'group') appendChildren(child.id)
-      }
-    }
-    for (const id of layerOrderRef.current) {
-      const roots = [...list]
-        .filter((l) => vectorLayerOf(l) === id && !l.marqueeItem && !l.punchMask && !l.parentId)
-        .reverse()
-      for (const root of roots) {
-        keys.push(`object:${root.id}`)
-        if (root.type === 'group') appendChildren(root.id)
-      }
-      keys.push(`base:${id}`)
-    }
-    return keys
-  }
-
-  const previewPanelCacheRef = useRef<{ keys: string[]; rank: number | null; token: string } | null>(null)
-  const previewPanel = () => {
-    const token = `${selectedBaseLayerRef.current ?? ''}:${[...selectedLayerIdsRef.current].join(',')}`
-    if (previewPanelCacheRef.current?.token === token) return previewPanelCacheRef.current
-    const keys = panelStackKeys()
-    const base = selectedBaseLayerRef.current
-    let rank: number | null = null
-    if (base && layerIsEditable(base)) {
-      const i = keys.indexOf(`base:${base}`)
-      rank = i >= 0 ? i : null
-    } else {
-      const ids = selectedLayerIdsRef.current
-      if (ids.size) {
-        for (const id of ids) {
-          const item = linesRef.current.find((l) => l.id === id)
-          if (!item || item.punchMask || item.marqueeItem) continue
-          const i = keys.indexOf(`object:${item.id}`)
-          if (i < 0) continue
-          if (rank == null || i < rank) rank = i
-        }
-      }
-    }
-    const cached = { keys, rank, token }
-    previewPanelCacheRef.current = cached
-    return cached
-  }
-
-  /** Rank of the selected row in the panel (0 = top / highest). */
-  const panelSelectionRank = (): number | null => previewPanel().rank
-
-  const slotHiddenInPreview = (id: PaintLayerId): boolean => {
-    const { keys, rank } = previewPanel()
-    if (rank == null) return false
-    const baseRank = keys.indexOf(`base:${id}`)
-    return baseRank >= 0 && baseRank < rank
-  }
-
-  /** Selecting a base row hides every object sitting above that overlay. */
-  const objectsHiddenOnBase = (id: PaintLayerId): boolean => {
-    const { keys, rank } = previewPanel()
-    if (rank == null) return false
-    return keys[rank] === `base:${id}`
-  }
-
-  const objectHiddenInPreview = (l: LineObj): boolean => {
-    const { keys, rank } = previewPanel()
-    if (rank == null) return false
-    let cur: LineObj | undefined = l
-    while (cur) {
-      const i = keys.indexOf(`object:${cur.id}`)
-      if (i >= 0) return i < rank
-      cur = cur.parentId
-        ? linesRef.current.find((item) => item.id === cur!.parentId)
-        : undefined
-    }
-    const baseRank = keys.indexOf(`base:${vectorLayerOf(l)}`)
-    return baseRank >= 0 && baseRank < rank
-  }
-
   const isPaintHitVisible = (l: LineObj): boolean =>
-    !l.punchMask && isVectorVisible(l) && !objectHiddenInPreview(l)
+    !l.punchMask && isVectorVisible(l)
 
   /** A checked ancestor group owns edits; otherwise the item edits itself. */
   const checkedGroupTarget = (l: LineObj): LineObj | null => {
@@ -5409,9 +5428,9 @@ export function IconPaintEditor({
     for (const id of [...layerOrderRef.current].reverse()) {
       const baseVisible = id === 'content' ? showContent : showContainer
       if (baseVisible) {
-        paintStackSlot(frameCtx, id, { skipId, preview: true })
+        paintStackSlot(frameCtx, id, { skipId })
       } else {
-        paintStackSlot(frameCtx, id, { base: false, overlay: false, skipId, preview: true })
+        paintStackSlot(frameCtx, id, { base: false, overlay: false, skipId })
       }
     }
 
@@ -5735,7 +5754,6 @@ export function IconPaintEditor({
       selectedIdRef.current
     ) as unknown as LineObj[]
     linesRef.current = normalized
-    previewPanelCacheRef.current = null
     slotCacheReadyRef.current = { content: false, container: false }
     setLines(normalized)
   }, [])
@@ -7083,6 +7101,12 @@ export function IconPaintEditor({
       const obj = ctx.getImageData(0, 0, W, H)
       const od = obj.data
       const interior = interiorCtx.getImageData(0, 0, W, H).data
+      const clickX = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
+      const clickY = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
+      const clickI = (clickY * W + clickX) * 4
+      // Counters (empty space inside "b") are not glyph ink. Do not spiral onto
+      // the letter and punch the character instead of the hole.
+      if (interior[clickI + 3] < 80 && od[clickI + 3] < 80) return null
       const overlay = layerCanvas(vectorLayerOf(item)).getContext('2d')?.getImageData(0, 0, W, H)
       const ov = overlay?.data
       const rgbCut = (i: number) =>
@@ -7333,7 +7357,8 @@ export function IconPaintEditor({
           changed = true
           return { ...sectional, punchThrough: punch || !!sectional.punchThrough }
         }
-        if (hit !== 'fill') return item
+        // Empty counters are not glyph ink. Let flood-fill bind the hole.
+        if (transparent || hit !== 'fill') return item
         textFillKind = 'glyph'
         changed = true
         return { ...item, color: fillColor, punchThrough: punch || !!item.punchThrough }
@@ -7429,7 +7454,9 @@ export function IconPaintEditor({
     if (!owner) return false
     setLocalPunchFromFilled(owner, filled, W, H)
     const next = linesRef.current.map((l) =>
-      l.id === owner.id ? { ...l, punchThrough: punchThrough || !!l.punchThrough } : l
+      l.id === owner.id
+        ? { ...l, punchThrough: punchThrough || !!l.punchThrough, punchEnclosedHole: true }
+        : l
     )
     linesRef.current = next
     commitLines(next)
