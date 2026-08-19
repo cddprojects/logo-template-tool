@@ -14,8 +14,8 @@ import {
   CANVA_BUSINESS_TYPE_OPTIONS,
   CANVA_DESIGN_TYPE_OPTIONS,
   CANVA_IMAGE_REFERENCE_OPTIONS,
-  copyCanvaPromptAndReference,
-  type CanvaClipboardResult
+  openCanvaWithPromptAndReference,
+  type CanvaOpenResult
 } from '../utils/canvaPrompt'
 import { ColorRow, SelectRow } from './Controls'
 
@@ -27,10 +27,11 @@ interface CanvaPromptPanelProps {
   onChange: (patch: Partial<FaviconContent>) => void
 }
 
-const COPY_LABELS: Record<CanvaClipboardResult, string> = {
-  full: 'Prompt + image copied!',
-  'text-only': 'Prompt copied (image blocked)',
-  failed: 'Copy failed — try again'
+const OPEN_LABELS: Record<CanvaOpenResult, string> = {
+  filled: 'Prompt filled — paste the image',
+  login: 'Sign in to Canva, then click Generate again',
+  opened: 'Canva opened — prompt and image are on the clipboard',
+  failed: 'Could not open Canva — try again'
 }
 
 export function CanvaPromptPanel({
@@ -40,10 +41,14 @@ export function CanvaPromptPanel({
   appName,
   onChange
 }: CanvaPromptPanelProps): JSX.Element {
-  const [copyResult, setCopyResult] = useState<CanvaClipboardResult | null>(null)
+  const isWebApp =
+    typeof window !== 'undefined' &&
+    !!(window as Window & { __WEB__?: boolean }).__WEB__
+  const [openResult, setOpenResult] = useState<CanvaOpenResult | null>(null)
   const prompt = useMemo(() => buildCanvaPrompt(content, appName), [content, appName])
   const hasLogoIcon = !!logoIcon
   const imageRef = content.canvaImageReference ?? 'none'
+  const hasReference = imageRef !== 'none'
 
   const imageReferenceOptions = useMemo(
     () =>
@@ -56,12 +61,9 @@ export function CanvaPromptPanel({
   )
 
   const handleGenerate = useCallback(async () => {
-    const result = await copyCanvaPromptAndReference(content, appName, faviconConfig, logoIcon)
-    setCopyResult(result)
-    window.setTimeout(() => setCopyResult(null), 2500)
-    if (result !== 'failed') {
-      window.open(CANVA_AI_URL, '_blank', 'noopener,noreferrer')
-    }
+    const result = await openCanvaWithPromptAndReference(content, appName, faviconConfig, logoIcon)
+    setOpenResult(result)
+    window.setTimeout(() => setOpenResult(null), 4500)
   }, [content, appName, faviconConfig, logoIcon])
 
   const secondaryEnabled = !!(content.canvaSecondaryColor?.trim())
@@ -144,15 +146,21 @@ export function CanvaPromptPanel({
         disabled={imageRef === 'logo-icon' && !hasLogoIcon}
         className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-xs font-semibold bg-accent text-white hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
       >
-        {copyResult ? <CheckCircle2 size={14} /> : <ClipboardCopy size={14} />}
-        {copyResult
-          ? (copyResult === 'text-only' && imageRef === 'none' ? 'Prompt copied!' : COPY_LABELS[copyResult])
+        {openResult ? <CheckCircle2 size={14} /> : <ClipboardCopy size={14} />}
+        {openResult
+          ? openResult === 'opened' && isWebApp
+            ? 'Copied prompt + image — paste in Canva'
+            : OPEN_LABELS[openResult]
           : 'Generate with Canva'}
       </button>
       <p className="text-[10px] text-muted leading-snug">
-        {imageRef === 'none'
-          ? 'Copies the prompt to your clipboard, then opens Canva AI.'
-          : 'Copies the prompt (with a reference note) and the selected image to your clipboard, then opens Canva AI. Paste into the chat (Ctrl+V).'}
+        {isWebApp
+          ? hasReference
+            ? 'Copies the prompt and reference image together, then opens Canva AI. Paste in the prompt box for the text, or into the image slot for the reference (Ctrl+V).'
+            : 'Copies the prompt, then opens Canva AI. Paste into the prompt box (Ctrl+V) and press Send.'
+          : hasReference
+            ? 'Opens Canva AI and fills the prompt. The reference image is on the clipboard — paste it (Ctrl+V), then press Send.'
+            : 'Opens Canva AI and fills the prompt. Press Send in Canva.'}
         {' '}App name (from Logo): {appName}.
       </p>
       <details className="text-[10px] text-muted">

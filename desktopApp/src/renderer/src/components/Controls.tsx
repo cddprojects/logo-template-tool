@@ -127,6 +127,59 @@ const byteHex = (n: number): string =>
  * Normalize a solid CSS colour to #RRGGBB or #RRGGBBAA.
  * Gradients are left unchanged; unknown values fall back to #888888.
  */
+export type TransparentFillMode = 'see-through' | 'punch'
+
+/** True when a solid hex is 8 characters and ends with 00 (zero opacity). */
+export function isZeroAlphaHex(color: string): boolean {
+  if (!color || color === 'transparent' || color === 'none') return true
+  if (isGradientColor(color)) return false
+  const hex = toHexColor(color)
+  return /^#[0-9a-fA-F]{8}$/.test(hex) && hex.slice(7, 9).toLowerCase() === '00'
+}
+
+export const TransparentFillModeContext = React.createContext<{
+  mode: TransparentFillMode
+  setMode: (mode: TransparentFillMode) => void
+} | null>(null)
+
+export function TransparentFillToggle({
+  mode,
+  onChange,
+  showLabel = true
+}: {
+  mode: TransparentFillMode
+  onChange: (mode: TransparentFillMode) => void
+  showLabel?: boolean
+}): JSX.Element {
+  return (
+    <div className="flex items-center gap-1.5 min-w-0">
+      {showLabel && <span className="text-[11px] text-muted shrink-0">Transparent</span>}
+      <div className="flex items-center rounded-lg border border-border overflow-hidden">
+        <button
+          type="button"
+          onClick={() => onChange('see-through')}
+          title="Hide this fill so layers below show through"
+          className={`px-2 py-1 text-[11px] font-medium transition-colors ${
+            mode === 'see-through' ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+          }`}
+        >
+          See-through
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange('punch')}
+          title="Cut a hole through every layer below this fill. Layers above still show."
+          className={`px-2 py-1 text-[11px] font-medium transition-colors ${
+            mode === 'punch' ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+          }`}
+        >
+          Punch hole
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export function toHexColor(color: string): string {
   const h = color.trim()
   if (isGradientColor(h)) return h
@@ -281,7 +334,10 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
   // Position: below swatch, clamp to viewport
   const POPUP_W = 288
   const activeTab = solidOnly ? 'solid' : tab
-  const POPUP_H = activeTab === 'solid' ? (solidOnly ? 72 : 100) : activeTab === 'linear' ? 248 : 272
+  const punchCtx = React.useContext(TransparentFillModeContext)
+  const showPunchToggle = !!punchCtx && activeTab === 'solid' && isZeroAlphaHex(solidHex)
+  const POPUP_H = (activeTab === 'solid' ? (solidOnly ? 72 : 100) : activeTab === 'linear' ? 248 : 272) +
+    (showPunchToggle ? 36 : 0)
   const left = Math.min(rect.left, window.innerWidth - POPUP_W - 8)
   const topBelow = rect.bottom + 6
   const top = topBelow + POPUP_H > window.innerHeight - 8 ? rect.top - POPUP_H - 6 : topBelow
@@ -326,34 +382,43 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
 
       {/* ── Solid ── */}
       {activeTab === 'solid' && (
-        <div className="flex items-center gap-2">
-          <input
-            type="color"
-            value={toColorInputValue(solidHex)}
-            onChange={e => {
-              const next = withPickedRgb(solidHex, e.target.value)
-              applyPrimaryColor(next)
-            }}
-            className="w-8 h-8 shrink-0 rounded cursor-pointer border border-border/50"
-            title="Pick colour"
-          />
-          <input
-            type="text"
-            value={hexText}
-            onFocus={() => { hexFocused.current = true }}
-            onBlur={() => {
-              hexFocused.current = false
-              if (/^#[0-9a-fA-F]{6,8}$/.test(hexText)) applyPrimaryColor(hexText)
-              else setHexText(solidHex)
-            }}
-            onChange={e => {
-              setHexText(e.target.value)
-              if (/^#[0-9a-fA-F]{6,8}$/.test(e.target.value)) applyPrimaryColor(e.target.value)
-            }}
-            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
-            className="flex-1 min-w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs font-mono focus:outline-none focus:border-accent"
-            maxLength={9}
-          />
+        <div className="space-y-2">
+          <div className="flex items-center gap-2">
+            <input
+              type="color"
+              value={toColorInputValue(solidHex)}
+              onChange={e => {
+                // Shadow rows have no alpha slider — don't keep leftover 80/b3
+                // from the default dark shadow when the user picks #ffffff.
+                const next = solidOnly
+                  ? toColorInputValue(e.target.value)
+                  : withPickedRgb(solidHex, e.target.value)
+                applyPrimaryColor(next)
+              }}
+              className="w-8 h-8 shrink-0 rounded cursor-pointer border border-border/50"
+              title="Pick colour"
+            />
+            <input
+              type="text"
+              value={hexText}
+              onFocus={() => { hexFocused.current = true }}
+              onBlur={() => {
+                hexFocused.current = false
+                if (/^#[0-9a-fA-F]{6,8}$/.test(hexText)) applyPrimaryColor(hexText)
+                else setHexText(solidHex)
+              }}
+              onChange={e => {
+                setHexText(e.target.value)
+                if (/^#[0-9a-fA-F]{6,8}$/.test(e.target.value)) applyPrimaryColor(e.target.value)
+              }}
+              onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+              className="flex-1 min-w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs font-mono focus:outline-none focus:border-accent"
+              maxLength={9}
+            />
+          </div>
+          {showPunchToggle && punchCtx && (
+            <TransparentFillToggle mode={punchCtx.mode} onChange={punchCtx.setMode} showLabel={false} />
+          )}
         </div>
       )}
 
@@ -552,9 +617,12 @@ export function ColorRow({ label, value, onChange, solidOnly = false }: ColorRow
   }
 
   const emit = (v: string) => onChange(solidOnly ? firstSolidColor(v) : v)
+  const punchCtx = React.useContext(TransparentFillModeContext)
+  const showPunchToggle = !!punchCtx && !isGrad && isZeroAlphaHex(effectiveValue)
 
   return (
     <Row label={label}>
+      <div className="flex flex-col gap-1.5 min-w-0">
       <div className="flex items-center gap-2 min-w-0">
         {/* Swatch — shows gradient or solid color, opens popup */}
         <button
@@ -606,6 +674,10 @@ export function ColorRow({ label, value, onChange, solidOnly = false }: ColorRow
             solidOnly={solidOnly}
           />
         )}
+      </div>
+      {showPunchToggle && punchCtx && (
+        <TransparentFillToggle mode={punchCtx.mode} onChange={punchCtx.setMode} showLabel={false} />
+      )}
       </div>
     </Row>
   )

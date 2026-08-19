@@ -4,10 +4,15 @@ import { resolveImageDataUrl } from './imageRecolor'
 import {
   applyPaintDecorations,
   applyPaintLayerDecorations,
+  applyPaintLayerDecorationsHiRes,
+  applyPaintPunchMask,
+  sessionHasPunchMask,
   sessionUsesLayeredPaint,
+  shouldSkipLiveInnerForPaintSession,
   shouldSkipLiveLettersForPaintSession
 } from './paintDecorations'
 import { innerContentDecorFromFavicon, innerContentDecorFromIcon, logoPaintOuterLayout } from './paintSettingsSync'
+import { resolveFaviconDrawType } from './contentTypeSync'
 import { takeCanvas, releaseCanvas, fitCanvas, reset2dState } from './canvasPool'
 
 // ── Gradient color utilities ──────────────────────────────────────────────────
@@ -87,6 +92,46 @@ export function firstSolidColor(color: string): string {
   if (!color.startsWith('linear-gradient(') && !color.startsWith('radial-gradient(')) return color
   const m = color.match(/(?:linear|radial)-gradient\([^,]+(?:,\s*[^,]+)?,\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\))/)
   return m ? m[1] : '#888888'
+}
+
+/** True when a solid fill is fully transparent (#RRGGBB00 / transparent / none). */
+function isZeroAlphaFill(color: string): boolean {
+  if (!color || color === 'transparent' || color === 'none') return true
+  if (color.startsWith('linear-gradient(') || color.startsWith('radial-gradient(')) return false
+  const h = color.trim()
+  return /^#[0-9a-fA-F]{8}$/.test(h) && h.slice(7, 9).toLowerCase() === '00'
+}
+
+function wantsTransparentPunch(
+  mode: 'see-through' | 'punch' | undefined,
+  color: string
+): boolean {
+  return mode === 'punch' && isZeroAlphaFill(color)
+}
+
+function destOutSilhouette(
+  ctx: CanvasRenderingContext2D,
+  draw: (c: CanvasRenderingContext2D) => void
+): void {
+  ctx.save()
+  ctx.globalCompositeOperation = 'destination-out'
+  draw(ctx)
+  ctx.restore()
+}
+
+function iconInnerFillColor(icon: IconConfig): string {
+  if (icon.sourceType === 'letters') return icon.textColor ?? icon.primaryColor
+  return icon.primaryColor
+}
+
+function faviconInnerFillColor(
+  content: FaviconConfig['content'],
+  drawType: string
+): string {
+  if (drawType === 'letters') return content.textColor
+  if (drawType === 'shape') return content.shapeColor
+  if (drawType === 'lucide' || drawType === 'svg-markup') return content.lucideColor
+  return content.svgColor
 }
 
 // ── Primitive shape drawing ───────────────────────────────────────────────────
@@ -506,6 +551,71 @@ export function iconOuterShadowPad(
   return { ...sides, pad, blur, spread, ox, oy }
 }
 
+async function drawIconContentSilhouette(
+  ctx: CanvasRenderingContext2D,
+  icon: IconConfig,
+  localCx: number,
+  localCy: number,
+  superArea: number,
+  dprScale: number,
+  skipLiveLetters: boolean
+): Promise<void> {
+  ctx.fillStyle = '#000000'
+  switch (icon.sourceType) {
+    case 'shape': {
+      const drawSize = superArea * (icon.shapeSizeRatio ?? 1.0)
+      const sx = localCx - drawSize / 2
+      const sy = localCy - drawSize / 2
+      const shapeRadFrac =
+        icon.shape === 'square' || icon.shape === 'rounded'
+          ? (icon.shapeBorderRadius ?? 0) / (icon.size || 112)
+          : 0
+      drawShape(ctx, icon.shape, sx, sy, drawSize, '#000000', shapeRadFrac)
+      break
+    }
+    case 'lucide': {
+      const drawSize = superArea * (icon.lucideSizeRatio ?? 1.0)
+      const rawSvg = await renderLucideToSvg(icon.lucideIconName, 'currentColor', icon.lucideStrokeWidth)
+      if (rawSvg) {
+        await drawSvgOnCanvas(
+          ctx,
+          applySvgColor(rawSvg, '#000000'),
+          localCx - drawSize / 2,
+          localCy - drawSize / 2,
+          drawSize,
+          drawSize
+        )
+      }
+      break
+    }
+    case 'svg': {
+      const drawSize = superArea * (icon.svgMarkupSizeRatio ?? 1.0)
+      if (!icon.svgMarkup) break
+      const colored = icon.svgMarkupUseOriginalColors
+        ? icon.svgMarkup
+        : applySvgColor(icon.svgMarkup, '#000000', '#000000', '#000000', '#000000', '#000000')
+      await drawSvgOnCanvas(ctx, colored, localCx - drawSize / 2, localCy - drawSize / 2, drawSize, drawSize)
+      break
+    }
+    case 'letters': {
+      if (skipLiveLetters) break
+      const letterText = icon.text ?? ''
+      if (letterText.length > 0 && !letterText.trim()) break
+      const fontSize = superArea * (icon.fontSizeRatio ?? 0.52)
+      const fontStyle = (icon.fontItalic ?? false) ? 'italic ' : ''
+      const letterSp = (icon.letterSpacing ?? 0) * dprScale
+      ctx.font = `${fontStyle}${icon.fontWeight ?? '700'} ${fontSize}px "${icon.fontFamily ?? 'Inter'}", sans-serif`
+      ctx.textAlign = 'center'
+      ctx.textBaseline = 'alphabetic'
+      const display = letterText || '?'
+      const itm = measureSpacedText(ctx, display, letterSp)
+      const drawY = localCy + (itm.actualBoundingBoxAscent - itm.actualBoundingBoxDescent) / 2
+      fillSpacedText(ctx, display, localCx, drawY, letterSp)
+      break
+    }
+  }
+}
+
 export async function drawIcon(
   ctx: CanvasRenderingContext2D,
   icon: IconConfig,
@@ -652,6 +762,30 @@ export async function drawIcon(
         drawShape(ctx, icon.containerShape, x, y, size, resolveCanvasColor(ctx, icon.containerColor, x, y, size, size), cRadFrac)
       }
       ctx.restore()
+      if (
+        wantsTransparentPunch(icon.transparentFillMode, icon.containerColor) &&
+        !sessionHasPunchMask(icon.paintSession, 'container')
+      ) {
+        destOutSilhouette(ctx, (c) => {
+          c.fillStyle = '#000000'
+          // Inset by the full border so the hole matches the fill, not the stroke.
+          const punchInset = _borderWidth > 0 ? _borderWidth : 0
+          if (_borderSvgPath && icon.containerSvgMarkup) {
+            const vb = parseSvgViewBox(icon.containerSvgMarkup) ?? { x: 0, y: 0, w: 24, h: 24 }
+            const { scale: svgScale, tx, ty } = svgViewBoxTransform(vb, size)
+            c.save()
+            c.translate(x + tx, y + ty)
+            c.scale(svgScale, svgScale)
+            c.fill(new Path2D(_borderSvgPath))
+            c.restore()
+          } else if (punchInset > 0) {
+            clipInsetShape(c, icon.containerShape, x, y, size, cRadFrac, punchInset)
+            c.fill()
+          } else {
+            drawShape(c, icon.containerShape, x, y, size, '#000000', cRadFrac)
+          }
+        })
+      }
     }
 
     // Reset shadow so content doesn't double-shadow
@@ -662,7 +796,8 @@ export async function drawIcon(
 
     // Outer paint under Inner content (layered / overlay-only sessions).
     if (sessionUsesLayeredPaint(icon.paintSession)) {
-      await applyPaintLayerDecorations(
+      const outerShape = logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size
+      await applyPaintLayerDecorationsHiRes(
         ctx,
         icon.paintSession,
         x,
@@ -670,8 +805,10 @@ export async function drawIcon(
         size,
         'container',
         undefined,
-        logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size
+        outerShape,
+        superSample
       )
+      await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'container', outerShape)
     }
   }
 
@@ -701,6 +838,7 @@ export async function drawIcon(
   const localCx  = (cx - x) * SUPER   // content centre in supersampled space
   const localCy  = (cy - y) * SUPER
   const superArea = areaSize * SUPER   // effective draw area in supersampled space
+  const skipLiveInner = shouldSkipLiveInnerForPaintSession(icon.paintSession)
   const skipLiveLetters = shouldSkipLiveLettersForPaintSession(icon.paintSession)
 
   let iconShapeDrawSize = 0
@@ -708,6 +846,7 @@ export async function drawIcon(
   // Optical center Y for letters — stored so the border-stroke pass can reuse it.
   let iconLettersDrawY = localCy
 
+  if (!skipLiveInner) {
   switch (icon.sourceType) {
     case 'shape': {
       iconShapeDrawSize = superArea * (icon.shapeSizeRatio ?? 1.0)
@@ -784,12 +923,13 @@ export async function drawIcon(
       break
     }
   }
+  }
 
   // Content border / stroke (scaled for supersampling and DPR).
   // Shapes use clip-and-double so the full borderWidth is visible inside the
   // shape regardless of geometry (hexagon, star, triangle, etc.).
   const icbw = (icon.contentBorderWidth ?? 0) * dprScale * SUPER
-  if (icbw > 0 && !(skipLiveLetters && icon.sourceType === 'letters')) {
+  if (icbw > 0 && !skipLiveInner && !(skipLiveLetters && icon.sourceType === 'letters')) {
     const icbc = (icon.contentBorderColor ?? 'transparent') === 'transparent' ? '#000000' : icon.contentBorderColor
     cCtx.save()
     cCtx.strokeStyle = icbc
@@ -935,6 +1075,35 @@ export async function drawIcon(
     ctx.drawImage(contentCanvas, x, y, size, size)
   }
 
+  if (
+    !skipLiveInner &&
+    !(skipLiveLetters && icon.sourceType === 'letters') &&
+    icon.sourceType !== 'image' &&
+    wantsTransparentPunch(icon.transparentFillMode, iconInnerFillColor(icon)) &&
+    !sessionHasPunchMask(icon.paintSession, 'content')
+  ) {
+    const punchCanvas = takeCanvas(size * SUPER, size * SUPER)
+    try {
+      const pCtx = punchCanvas.getContext('2d')!
+      pCtx.imageSmoothingEnabled = true
+      pCtx.imageSmoothingQuality = 'high'
+      await drawIconContentSilhouette(
+        pCtx,
+        icon,
+        localCx,
+        localCy,
+        superArea,
+        dprScale * SUPER,
+        skipLiveLetters
+      )
+      destOutSilhouette(ctx, (c) => {
+        c.drawImage(punchCanvas, x, y, size, size)
+      })
+    } finally {
+      releaseCanvas(punchCanvas)
+    }
+  }
+
   if (clipContent) {
     ctx.restore()
   }
@@ -977,7 +1146,8 @@ export async function drawIcon(
 
   // Inner paint above live Inner; Outer paint already applied under content when layered.
   if (sessionUsesLayeredPaint(icon.paintSession)) {
-    await applyPaintLayerDecorations(
+    const innerShape = logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size
+    await applyPaintLayerDecorationsHiRes(
       ctx,
       icon.paintSession,
       x,
@@ -985,18 +1155,24 @@ export async function drawIcon(
       size,
       'content',
       innerContentDecorFromIcon(icon),
-      logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size
+      innerShape,
+      superSample
     )
+    await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'content', innerShape)
   } else if (icon.paintSession) {
     // Legacy single-plane decorations on top of Outer + Inner.
+    const legacyShape = logoPaintOuterLayout(icon, icon.paintSession.resolution || 512).size
     await applyPaintDecorations(
       ctx,
       icon.paintSession,
       x,
       y,
       size,
-      logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size
+      logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size,
+      innerContentDecorFromIcon(icon).contentSizeRatio
     )
+    await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'container', legacyShape)
+    await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'content', legacyShape)
   }
 }
 
@@ -1139,7 +1315,7 @@ async function drawSyncedFaviconIcon(
   y: number,
   displaySize: number
 ): Promise<void> {
-  const renderSize = Math.max(faviconConfig.size ?? 256, Math.ceil(displaySize))
+  const renderSize = Math.max(512, faviconConfig.size ?? 256, Math.ceil(displaySize))
   const off = document.createElement('canvas')
   off.width = renderSize
   off.height = renderSize
@@ -1420,6 +1596,22 @@ export async function renderLogo(
   ctx.shadowOffsetX = 0
   ctx.shadowOffsetY = 0
 
+  if (config.transparentFillMode === 'punch') {
+    destOutSilhouette(ctx, (c) => {
+      c.textAlign = textAlign
+      c.textBaseline = 'alphabetic'
+      c.fillStyle = '#000000'
+      for (const ln of lines) {
+        if (!wantsTransparentPunch(config.transparentFillMode, ln.color)) continue
+        c.font = ln.font
+        fillSpacedText(c, ln.text, textX, ln.baseline, ln.letterSpacing)
+        if (ln.underline) {
+          drawTextUnderline(c, ln.text, textX, ln.baseline, ln.sizePx, '#000000', textAlign === 'center' ? 'center' : 'left', 'alphabetic', ln.letterSpacing)
+        }
+      }
+    })
+  }
+
   return { width: totalW, height: totalH }
 }
 
@@ -1522,7 +1714,11 @@ async function renderFaviconInnerAt(
   ctx.clearRect(0, 0, size, size)
   // Linked Paint text is composited via decorationsPng — skip live letters.
   const skipLiveLetters = shouldSkipLiveLettersForPaintSession(config.paintSession)
+  const skipLiveInner = shouldSkipLiveInnerForPaintSession(config.paintSession)
   const layeredPaint = sessionUsesLayeredPaint(config.paintSession)
+  const innerPunchMode = sessionHasPunchMask(config.paintSession, 'content')
+    ? undefined
+    : config.transparentFillMode
   const paintShapeFallback = config.paintSession
     ? faviconInnerDrawSize(config, config.paintSession.resolution || 512)
     : undefined
@@ -1539,6 +1735,15 @@ async function renderFaviconInnerAt(
         paintShapeFallback
       )
     }
+    await applyPaintPunchMask(
+      ctx,
+      config.paintSession,
+      0,
+      0,
+      size,
+      'container',
+      paintShapeFallback
+    )
   }
   const paintInnerLayer = async () => {
     if (layeredPaint) {
@@ -1553,10 +1758,19 @@ async function renderFaviconInnerAt(
         paintShapeFallback
       )
     }
+    await applyPaintPunchMask(
+      ctx,
+      config.paintSession,
+      0,
+      0,
+      size,
+      'content',
+      paintShapeFallback
+    )
   }
 
   if (config.outerShape === 'none') {
-    await drawFaviconContent(ctx, config.content, 0, 0, size, size / 2, skipLiveLetters)
+    await drawFaviconContent(ctx, config.content, 0, 0, size, size / 2, skipLiveLetters, skipLiveInner, innerPunchMode)
     await paintInnerLayer()
     return
   }
@@ -1575,7 +1789,7 @@ async function renderFaviconInnerAt(
       if (img) ctx.drawImage(img, 0, 0, size, size)
     }
     await paintOuterLayer()
-    await drawFaviconContent(ctx, config.content, 0, 0, size, size / 2, skipLiveLetters)
+    await drawFaviconContent(ctx, config.content, 0, 0, size, size / 2, skipLiveLetters, skipLiveInner, innerPunchMode)
     await paintInnerLayer()
     if (imgRadFrac > 0) ctx.restore()
     return
@@ -1606,7 +1820,7 @@ async function renderFaviconInnerAt(
       await drawSvgOnCanvas(ctx, svgToDraw, dx, dy, svgSize, svgSize)
     }
     await paintOuterLayer()
-    await drawFaviconContent(ctx, config.content, 0, 0, size, size / 2, skipLiveLetters)
+    await drawFaviconContent(ctx, config.content, 0, 0, size, size / 2, skipLiveLetters, skipLiveInner, innerPunchMode)
     await paintInnerLayer()
     return
   }
@@ -1621,6 +1835,16 @@ async function renderFaviconInnerAt(
     const { contentX, contentY, contentSize } = await drawComplexOuterShape(
       ctx, config.outerShape, fillColor, size
     )
+    if (
+      !config.transparentBg &&
+      wantsTransparentPunch(config.transparentFillMode, config.backgroundColor) &&
+      !sessionHasPunchMask(config.paintSession, 'container')
+    ) {
+      destOutSilhouette(ctx, (c) => {
+        c.fillStyle = '#000000'
+        fillOuterShapeSilhouette(c, config.outerShape, 0, 0, size)
+      })
+    }
     await paintOuterLayer()
 
     // Use the FULL canvas as the content reference area so that icon size ratios
@@ -1637,7 +1861,7 @@ async function renderFaviconInnerAt(
       offsetX: (c.offsetX ?? 0) + shapeExtraOx,
       offsetY: (c.offsetY ?? 0) + shapeExtraOy,
     }
-    await drawFaviconContent(ctx, adjustedContent, 0, 0, size, size / 2, skipLiveLetters)
+    await drawFaviconContent(ctx, adjustedContent, 0, 0, size, size / 2, skipLiveLetters, skipLiveInner, innerPunchMode)
     await paintInnerLayer()
 
     // Border: use Path2D with clip-and-double so the stroke stays fully inside the shape.
@@ -1684,6 +1908,21 @@ async function renderFaviconInnerAt(
       ctx.fillStyle = resolveCanvasColor(ctx, config.backgroundColor, 0, 0, size, size)
       ctx.fill()
       ctx.restore()
+      if (
+        wantsTransparentPunch(config.transparentFillMode, config.backgroundColor) &&
+        !sessionHasPunchMask(config.paintSession, 'container')
+      ) {
+        destOutSilhouette(ctx, (c) => {
+          c.fillStyle = '#000000'
+          const punchInset = bw > 0 ? bw : 0
+          if (punchInset > 0) {
+            clipInsetShape(c, config.outerShape as ShapeType, 0, 0, size, fRadFrac, punchInset)
+            c.fill()
+          } else {
+            fillOuterShapeSilhouette(c, config.outerShape, 0, 0, size, fRadFrac)
+          }
+        })
+      }
     }
 
     ctx.save()
@@ -1694,7 +1933,7 @@ async function renderFaviconInnerAt(
       ctx.clip()
     }
     await paintOuterLayer()
-    await drawFaviconContent(ctx, config.content, 0, 0, size, size / 2, skipLiveLetters)
+    await drawFaviconContent(ctx, config.content, 0, 0, size, size / 2, skipLiveLetters, skipLiveInner, innerPunchMode)
     await paintInnerLayer()
     ctx.restore()
 
@@ -2028,14 +2267,18 @@ export async function renderFavicon(canvas: HTMLCanvasElement, config: FaviconCo
   // Legacy single-plane decorations only. Layered / overlay sessions are applied
   // inside renderFaviconInner (Outer under Inner).
   if (config.paintSession && !sessionUsesLayeredPaint(config.paintSession)) {
+    const legacyShape = faviconInnerDrawSize(config, config.paintSession.resolution || 512)
     await applyPaintDecorations(
       ctx,
       config.paintSession,
       decorX,
       decorY,
       decorSize,
-      faviconInnerDrawSize(config, config.paintSession.resolution || 512)
+      legacyShape,
+      innerContentDecorFromFavicon(config.content).contentSizeRatio
     )
+    await applyPaintPunchMask(ctx, config.paintSession, decorX, decorY, decorSize, 'container', legacyShape)
+    await applyPaintPunchMask(ctx, config.paintSession, decorX, decorY, decorSize, 'content', legacyShape)
   }
 }
 
@@ -2046,11 +2289,14 @@ async function drawFaviconContent(
   areaY: number,
   areaSize: number,
   canvasCenter: number,
-  skipLiveLetters = false
+  skipLiveLetters = false,
+  skipLiveInner = false,
+  punchMode?: 'see-through' | 'punch'
 ): Promise<void> {
+  const drawType = resolveFaviconDrawType(content)
   // Legacy svg-path (Path2D) case: coordinates live in the main canvas space,
   // so we cannot use the offscreen-canvas approach. Fall back to ctx.shadow*.
-  if (content.type === 'svg') {
+  if (drawType === 'svg') {
     if (content.contentShadowEnabled) {
       ctx.shadowColor   = firstSolidColor(content.contentShadowColor  ?? '#00000080')
       ctx.shadowBlur    = content.contentShadowBlur   ?? 8
@@ -2068,6 +2314,13 @@ async function drawFaviconContent(
     }
     if (content.contentShadowEnabled) {
       ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0
+    }
+    if (wantsTransparentPunch(punchMode, content.svgColor)) {
+      destOutSilhouette(ctx, (c) => {
+        if (!content.svgPath) return
+        c.fillStyle = '#000000'
+        c.fill(new Path2D(content.svgPath))
+      })
     }
     return
   }
@@ -2090,7 +2343,8 @@ async function drawFaviconContent(
   // without re-measuring the font a second time.
   let lettersDrawY = localCy
 
-  switch (content.type) {
+  if (!skipLiveInner) {
+  switch (drawType) {
     case 'letters': {
       // Whitespace-only = intentional blank (paint layer split). Skip draw so a
       // space + underline cannot leave a stray dash on the outer-shape layer.
@@ -2164,19 +2418,18 @@ async function drawFaviconContent(
       }
       break
     }
-    case 'canva':
-      break
+  }
   }
 
   // Content border / stroke.
   // Shapes use clip-and-double so the full borderWidth is visible inside the
   // shape for any geometry (hexagon, star, triangle, etc.).
   const cbw = (content.contentBorderWidth ?? 0) * (areaSize / 256)
-  if (cbw > 0 && !(skipLiveLetters && content.type === 'letters')) {
+  if (cbw > 0 && !skipLiveInner && !(skipLiveLetters && drawType === 'letters')) {
     const cbc = (content.contentBorderColor ?? 'transparent') === 'transparent' ? '#000000' : content.contentBorderColor
     offCtx.save()
     offCtx.strokeStyle = cbc
-    if (content.type === 'shape' && shapeDrawSize > 0) {
+    if (drawType === 'shape' && shapeDrawSize > 0) {
       const sx = localCx - shapeDrawSize / 2
       const sy = localCy - shapeDrawSize / 2
       const shapeRadFrac =
@@ -2188,7 +2441,7 @@ async function drawFaviconContent(
       offCtx.lineWidth = cbw * 2
       buildShapePath(offCtx, content.shape, sx, sy, shapeDrawSize, shapeRadFrac)
       offCtx.stroke()
-    } else if (content.type === 'letters') {
+    } else if (drawType === 'letters') {
       offCtx.lineWidth = cbw
       const fontSize = areaSize * content.fontSizeRatio
       const fontStyle = (content.fontItalic ?? false) ? 'italic ' : ''
@@ -2294,6 +2547,40 @@ async function drawFaviconContent(
   }
   } finally {
     releaseCanvas(offscreen)
+  }
+
+  const punchType = resolveFaviconDrawType(content)
+  if (
+    punchMode &&
+    !skipLiveInner &&
+    !(skipLiveLetters && punchType === 'letters') &&
+    punchType !== 'image' &&
+    wantsTransparentPunch(punchMode, faviconInnerFillColor(content, punchType))
+  ) {
+    const punch = takeCanvas(areaSize, areaSize)
+    try {
+      const pCtx = punch.getContext('2d')!
+      const black: FaviconConfig['content'] = {
+        ...content,
+        textColor: '#000000',
+        shapeColor: '#000000',
+        lucideColor: '#000000',
+        svgColor: '#000000',
+        svgMarkupUseOriginalColors: false,
+        svgMarkupSecondaryColor: '#000000',
+        svgMarkupTertiaryColor: '#000000',
+        svgMarkupColor4: '#000000',
+        svgMarkupColor5: '#000000',
+        contentShadowEnabled: false,
+        contentBorderWidth: 0
+      }
+      await drawFaviconContent(pCtx, black, 0, 0, areaSize, areaSize / 2, skipLiveLetters, skipLiveInner)
+      destOutSilhouette(ctx, (c) => {
+        c.drawImage(punch, areaX, areaY)
+      })
+    } finally {
+      releaseCanvas(punch)
+    }
   }
 }
 
@@ -2444,7 +2731,7 @@ export async function generateFaviconSvg(config: FaviconConfig): Promise<string>
   }
 
   let innerEl = ''
-  switch (content.type) {
+  switch (resolveFaviconDrawType(content)) {
     case 'letters': {
       const fs = size * content.fontSizeRatio
       const fStyle = (content.fontItalic ?? false) ? ' font-style="italic"' : ''
@@ -2497,8 +2784,6 @@ export async function generateFaviconSvg(config: FaviconConfig): Promise<string>
       }
       break
     }
-    case 'canva':
-      break
   }
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${outerEl}${innerEl}</svg>`

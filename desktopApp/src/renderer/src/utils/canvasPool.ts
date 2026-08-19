@@ -1,6 +1,6 @@
 /** Reusable 2D canvases so hot paths do not allocate a new bitmap every frame. */
 const pool: HTMLCanvasElement[] = []
-const MAX_POOL = 16
+const MAX_POOL = 24
 
 /** Resize only when needed. Setting width/height to the same values still reallocates. */
 export function fitCanvas(c: HTMLCanvasElement, w: number, h: number): boolean {
@@ -45,6 +45,26 @@ export function takeCanvas(w: number, h: number): HTMLCanvasElement {
 export function releaseCanvas(c: HTMLCanvasElement | null | undefined): void {
   if (!c || pool.length >= MAX_POOL) return
   pool.push(c)
+}
+
+/** Create or resize a long-lived canvas without clearing existing pixels. */
+export function ensureCanvas(
+  slot: { current: HTMLCanvasElement | null },
+  w: number,
+  h: number
+): HTMLCanvasElement {
+  const width = Math.max(1, Math.ceil(w))
+  const height = Math.max(1, Math.ceil(h))
+  let c = slot.current
+  if (!c) {
+    c = document.createElement('canvas')
+    slot.current = c
+  }
+  if (c.width !== width || c.height !== height) {
+    c.width = width
+    c.height = height
+  }
+  return c
 }
 
 /** Resize-or-clear a long-lived canvas (single-thread sequential reuse). */

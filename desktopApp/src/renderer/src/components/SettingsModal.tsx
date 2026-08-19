@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { X, Eye, EyeOff, Key } from './Icons'
-import { getStoredApiKey, storeApiKey, getStoredHFKey, storeHFKey } from '../utils/iconUtils'
+import { getStoredApiKey, storeApiKey } from '../utils/iconUtils'
 
 interface SettingsModalProps {
   onClose: () => void
@@ -8,14 +8,11 @@ interface SettingsModalProps {
 
 export function SettingsModal({ onClose }: SettingsModalProps): JSX.Element {
   const [apiKey, setApiKey] = useState(getStoredApiKey)
-  const [hfKey, setHfKey] = useState(getStoredHFKey)
   const [showKey, setShowKey] = useState(false)
-  const [showHfKey, setShowHfKey] = useState(false)
   const [saved, setSaved] = useState(false)
 
   const handleSave = () => {
     storeApiKey(apiKey.trim())
-    storeHFKey(hfKey.trim())
     setSaved(true)
     setTimeout(() => {
       setSaved(false)

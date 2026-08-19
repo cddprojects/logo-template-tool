@@ -1,6 +1,9 @@
-import { app, shell, BrowserWindow, ipcMain, dialog, session } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog, session, clipboard, nativeImage } from 'electron'
 import { join, dirname, basename } from 'path'
-import { writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync, watch, copyFileSync } from 'fs'
+import { writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync, watch, copyFileSync, mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import { get as httpsGet, request as httpsRequest, type IncomingMessage } from 'https'
 import { createServer, type IncomingMessage as HttpMsg, type ServerResponse } from 'http'
 
@@ -1195,7 +1198,351 @@ ipcMain.handle('iconify-fetch', async (_, id: string) => {
   return { success: true, svg }
 })
 
+const execFileAsync = promisify(execFile)
+
+function psQuote(value: string): string {
+  return "'" + value.replace(/'/g, "''") + "'"
+}
+
+function escapeHtmlForClip(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+function decodeClipboardPng(pngBase64: string): Buffer | null {
+  const raw = pngBase64.startsWith('data:')
+    ? pngBase64.replace(/^data:image\/png;base64,/, '')
+    : pngBase64
+  if (!raw) return null
+  const buf = Buffer.from(raw, 'base64')
+  return buf.length ? buf : null
+}
+
+function buildClipboardHtml(text: string, pngBase64: string | null): string {
+  const body = pngBase64
+    ? `<p>${escapeHtmlForClip(text)}</p><img src="data:image/png;base64,${pngBase64}" width="512" height="512" alt="reference">`
+    : `<p>${escapeHtmlForClip(text)}</p>`
+  return `<html><body><!--StartFragment-->${body}<!--EndFragment--></body></html>`
+}
+
+function writeClipboardElectron(text: string, pngBuffer: Buffer | null): { text: boolean; html: boolean } {
+  const pngBase64 = pngBuffer ? pngBuffer.toString('base64') : null
+  const html = buildClipboardHtml(text, pngBase64)
+  // Text + HTML only. A standalone PNG makes Canva paste the image and drop the prompt.
+  clipboard.write({ text, html })
+  const got = clipboard.readText().replace(/\r\n/g, '\n')
+  const want = text.replace(/\r\n/g, '\n')
+  const readHtml = clipboard.readHTML() || ''
+  return {
+    text: got === want,
+    html: pngBase64 ? readHtml.includes('data:image/png') : readHtml.length > 0
+  }
+}
+
+/** Windows: put Unicode text + PNG (Chrome/Canva) + bitmap + file drop on one clipboard. */
+async function writeClipboardWindows(text: string, pngBuffer: Buffer): Promise<boolean> {
+  const dir = mkdtempSync(join(tmpdir(), 'imggen-clip-'))
+  const pngPath = join(dir, 'reference.png')
+  const textPath = join(dir, 'prompt.txt')
+  const scriptPath = join(dir, 'set-clipboard.ps1')
+  const stablePng = join(app.getPath('temp'), 'image-generator-canva-ref.png')
+  try {
+    writeFileSync(pngPath, pngBuffer)
+    writeFileSync(stablePng, pngBuffer)
+    writeFileSync(textPath, text, { encoding: 'utf8' })
+    writeFileSync(
+      scriptPath,
+      [
+        'Add-Type -AssemblyName System.Windows.Forms',
+        'Add-Type -AssemblyName System.Drawing',
+        '$ErrorActionPreference = "Stop"',
+        `$pngPath = ${psQuote(stablePng)}`,
+        `$textPath = ${psQuote(textPath)}`,
+        '$text = [System.IO.File]::ReadAllText($textPath, [System.Text.UTF8Encoding]::new($false))',
+        '$img = [System.Drawing.Image]::FromFile($pngPath)',
+        'try {',
+        '  $data = New-Object System.Windows.Forms.DataObject',
+        '  $data.SetData([System.Windows.Forms.DataFormats]::UnicodeText, $true, $text)',
+        '  $data.SetImage($img)',
+        '  $ms = New-Object System.IO.MemoryStream',
+        '  $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)',
+        '  [void]$ms.Seek(0, "Begin")',
+        '  $data.SetData("PNG", $false, $ms)',
+        '  $files = New-Object System.Collections.Specialized.StringCollection',
+        '  [void]$files.Add($pngPath)',
+        '  $data.SetFileDropList($files)',
+        '  [System.Windows.Forms.Clipboard]::SetDataObject($data, $true)',
+        '} finally {',
+        '  $img.Dispose()',
+        '}'
+      ].join('\r\n'),
+      'utf8'
+    )
+    await execFileAsync(
+      'powershell.exe',
+      ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+      { windowsHide: true, timeout: 15000 }
+    )
+    const hasImage = !clipboard.readImage().isEmpty()
+    if (!text) return hasImage
+    const got = clipboard.readText().replace(/\r\n/g, '\n')
+    const want = text.replace(/\r\n/g, '\n')
+    return got === want && hasImage
+  } finally {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      /* temp cleanup is best-effort */
+    }
+  }
+}
+
+ipcMain.handle('clipboard-write-text-and-image', async (_, text: string, pngBase64: string) => {
+  try {
+    if (typeof text !== 'string' || typeof pngBase64 !== 'string') {
+      return { success: false, error: 'Invalid clipboard payload' }
+    }
+    const pngBuffer = decodeClipboardPng(pngBase64)
+    if (!pngBuffer) {
+      clipboard.writeText(text)
+      return { success: false, error: 'Empty image', text: true, image: false }
+    }
+    const written = writeClipboardElectron(text, pngBuffer)
+    return {
+      success: written.text && written.html,
+      text: written.text,
+      image: written.html,
+      error: written.html ? undefined : 'Clipboard HTML write failed'
+    }
+  } catch (err) {
+    return { success: false, error: String(err) }
+  }
+})
+
 // IPC: Save versions to file
+ipcMain.handle('clipboard-write-image', async (_, pngBase64: string) => {
+  try {
+    if (typeof pngBase64 !== 'string') {
+      return { success: false, error: 'Invalid clipboard payload' }
+    }
+    const pngBuffer = decodeClipboardPng(pngBase64)
+    if (!pngBuffer) return { success: false, error: 'Empty image' }
+    if (process.platform === 'win32') {
+      try {
+        if (await writeClipboardWindows('', pngBuffer)) {
+          return { success: true }
+        }
+      } catch {
+        // Fall through.
+      }
+    }
+    const image = nativeImage.createFromBuffer(pngBuffer)
+    if (image.isEmpty()) return { success: false, error: 'Empty image' }
+    clipboard.writeImage(image)
+    return { success: !clipboard.readImage().isEmpty() }
+  } catch (err) {
+    return { success: false, error: String(err) }
+  }
+})
+
+const CANVA_AI_URL = 'https://www.canva.com/ai'
+let canvaWindow: BrowserWindow | null = null
+let pendingCanvaFill: { prompt: string } | null = null
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function canvaComposerScript(prompt: string): string {
+  return `(() => {
+    const prompt = ${JSON.stringify(prompt)};
+    const snippet = prompt.slice(0, 32);
+    if (/login|signup|oauth/i.test(location.href)) return { ok: false, reason: 'login' };
+
+    function visible(el) {
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      const st = getComputedStyle(el);
+      return r.width > 80 && r.height > 16 && st.visibility !== 'hidden' && st.display !== 'none'
+        && r.bottom > 0 && r.top < innerHeight;
+    }
+    function collect(selector) {
+      const out = [];
+      const walk = (node) => {
+        if (!node || !node.querySelectorAll) return;
+        out.push(...node.querySelectorAll(selector));
+        node.querySelectorAll('*').forEach((el) => { if (el.shadowRoot) walk(el.shadowRoot); });
+      };
+      walk(document);
+      return out;
+    }
+    function readValue(el) {
+      return String(el.value || el.innerText || el.textContent || '');
+    }
+    function findComposer() {
+      const cands = [
+        ...collect('[contenteditable="true"]'),
+        ...collect('[role="textbox"]'),
+        ...collect('textarea'),
+        ...collect('[data-placeholder]'),
+        ...collect('[aria-label*="prompt" i]'),
+        ...collect('[aria-label*="message" i]'),
+        ...collect('[placeholder]')
+      ].filter(visible);
+      const scored = cands.map((el) => {
+        const ph = (el.getAttribute('placeholder') || el.getAttribute('aria-label')
+          || el.getAttribute('data-placeholder') || el.textContent || '').toLowerCase();
+        let score = el.getBoundingClientRect().width;
+        if (/prompt|message|ask|describe|generate|idea|type|chat|canva ai/i.test(ph)) score += 500;
+        if (el.closest('footer, form, [class*="composer" i], [class*="prompt" i], [class*="chat" i]')) score += 200;
+        return { el, score };
+      });
+      scored.sort((a, b) => b.score - a.score);
+      return scored[0] ? scored[0].el : null;
+    }
+    function setText(el, text) {
+      el.focus();
+      if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) {
+        const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value')?.set;
+        if (setter) setter.call(el, text); else el.value = text;
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return readValue(el).includes(snippet);
+      }
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      const ok = document.execCommand('insertText', false, text);
+      if (ok && readValue(el).includes(snippet)) return true;
+      el.textContent = text;
+      el.dispatchEvent(new InputEvent('input', { bubbles: true, data: text, inputType: 'insertText' }));
+      return readValue(el).includes(snippet);
+    }
+    const el = findComposer();
+    if (!el) return { ok: false, reason: 'no-composer' };
+    return { ok: readValue(el).includes(snippet) || setText(el, prompt) };
+  })()`
+}
+
+async function putPngOnClipboard(pngBase64: string): Promise<boolean> {
+  const pngBuffer = decodeClipboardPng(pngBase64)
+  if (!pngBuffer) return false
+  if (process.platform === 'win32') {
+    try {
+      if (await writeClipboardWindows('', pngBuffer)) return true
+    } catch {
+      /* fall through */
+    }
+  }
+  const image = nativeImage.createFromBuffer(pngBuffer)
+  if (image.isEmpty()) return false
+  clipboard.writeImage(image)
+  return !clipboard.readImage().isEmpty()
+}
+
+async function fillCanvaComposer(win: BrowserWindow, prompt: string): Promise<{
+  filled: boolean
+  login: boolean
+}> {
+  const deadline = Date.now() + 22000
+  let login = false
+  while (Date.now() < deadline && !win.isDestroyed()) {
+    try {
+      const result = await win.webContents.executeJavaScript(canvaComposerScript(prompt), true) as {
+        ok?: boolean
+        reason?: string
+      }
+      if (result?.reason === 'login') {
+        login = true
+        await delay(500)
+        continue
+      }
+      if (result?.ok) return { filled: true, login: false }
+    } catch {
+      /* page may still be loading */
+    }
+    await delay(400)
+  }
+  return { filled: false, login }
+}
+
+function attachCanvaFillRetry(win: BrowserWindow): void {
+  const retry = () => {
+    const pending = pendingCanvaFill
+    if (!pending || win.isDestroyed()) return
+    void fillCanvaComposer(win, pending.prompt).then((result) => {
+      if (result.filled) pendingCanvaFill = null
+    })
+  }
+  win.webContents.on('did-finish-load', retry)
+  win.webContents.on('did-navigate-in-page', retry)
+}
+
+function ensureCanvaWindow(): BrowserWindow {
+  if (canvaWindow && !canvaWindow.isDestroyed()) return canvaWindow
+  const win = new BrowserWindow({
+    width: 1280,
+    height: 860,
+    minWidth: 800,
+    minHeight: 600,
+    title: 'Canva AI',
+    autoHideMenuBar: true,
+    backgroundColor: '#ffffff',
+    webPreferences: {
+      partition: 'persist:canva',
+      nodeIntegration: false,
+      contextIsolation: true,
+      sandbox: true
+    }
+  })
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    if (/^https:\/\/([^/]+\.)?canva\.com\//i.test(url)) return { action: 'allow' }
+    void shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  attachCanvaFillRetry(win)
+  win.on('closed', () => {
+    if (canvaWindow === win) canvaWindow = null
+  })
+  canvaWindow = win
+  return win
+}
+
+ipcMain.handle(
+  'open-canva-ai',
+  async (_, payload?: { prompt?: string; pngBase64?: string }) => {
+    try {
+      const prompt = typeof payload?.prompt === 'string' ? payload.prompt : ''
+      const pngBase64 = typeof payload?.pngBase64 === 'string' ? payload.pngBase64 : ''
+      if (pngBase64) {
+        const imageOk = await putPngOnClipboard(pngBase64)
+        if (!imageOk) return { success: false, error: 'Could not copy the reference image' }
+      }
+
+      const win = ensureCanvaWindow()
+      pendingCanvaFill = prompt ? { prompt } : null
+      win.show()
+      win.focus()
+      const current = win.webContents.getURL()
+      if (!/canva\.com\/ai/i.test(current)) {
+        await win.loadURL(CANVA_AI_URL)
+      }
+      if (!prompt) return { success: true, filled: false, login: false }
+
+      const result = await fillCanvaComposer(win, prompt)
+      if (result.filled) pendingCanvaFill = null
+      return { success: true, filled: result.filled, login: result.login }
+    } catch (err) {
+      return { success: false, error: String(err) }
+    }
+  }
+)
+
 ipcMain.handle('save-versions', (_, data: unknown, history?: unknown) => {
   try {
     ensureDataDir()

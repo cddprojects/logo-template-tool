@@ -5,7 +5,7 @@ import { FAVICON_SHAPE_OPTIONS, faviconOuterCategory, DEFAULT_ICON_CONFIG } from
 import { bakeFaviconPaintContentLayer, renderFavicon, faviconInnerDrawSize } from '../utils/renderer'
 import { exportFaviconPng, exportFaviconSvg, exportFaviconIco, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
-import { Section, ColorRow, SliderRow, ToggleRow, SelectRow, FontSelect, WeightSelect, TextRow, TextareaRow, ShapeGrid, NumberInputRow, AiImageGenPanel, RemoveBgButton, OuterCategoryTabs, ExportNameStyleToggle, ImageRecolorControls } from './Controls'
+import { Section, ColorRow, TransparentFillModeContext, SliderRow, ToggleRow, SelectRow, FontSelect, WeightSelect, TextRow, TextareaRow, ShapeGrid, NumberInputRow, AiImageGenPanel, RemoveBgButton, OuterCategoryTabs, ExportNameStyleToggle, ImageRecolorControls } from './Controls'
 import { IconPicker } from './IconPicker'
 import { PreviewStage } from './PreviewStage'
 import { lazyWithRetry } from '../utils/lazyWithRetry'
@@ -15,9 +15,10 @@ const IconPaintEditor = lazyWithRetry(() =>
   import('./IconPaintEditor').then((m) => ({ default: m.IconPaintEditor }))
 )
 import { hasMultipleColors } from '../utils/iconUtils'
-import { emptyImageRecolorFields, recolorFieldsAfterImageChange } from '../utils/imageRecolor'
+import { recolorFieldsAfterImageChange } from '../utils/imageRecolor'
 import {
   applyPaintSaveToFavicon,
+  clearFaviconUploadedImage,
   mapFaviconStashToIconStash,
   outsideContentFromFavicon,
   switchFaviconContentType,
@@ -264,7 +265,9 @@ export function FaviconEditor({
   const [paintVectors, setPaintVectors] = useState<PaintVector[]>([])
   const [paintHasContainer, setPaintHasContainer] = useState(false)
   const [paintLayerOrder, setPaintLayerOrder] = useState<PaintLayerId[]>(['content', 'container'])
+  const [paintPunchMasks, setPaintPunchMasks] = useState<{ layer: PaintLayerId; png: string }[]>([])
   const [paintOutsideContent, setPaintOutsideContent] = useState<OutsideContentSettings | null>(null)
+  const imageChangeGen = useRef(0)
 
   const hasOuterShape = !!config && config.outerShape !== 'none'
 
@@ -277,7 +280,12 @@ export function FaviconEditor({
 
     // Drop any persisted contentBound proxies (Paint-ephemeral only).
     const session = sanitizePaintSessionProxies(config.paintSession) ?? null
-    const bakeConfig = { ...config, paintSession: null as null }
+    // Full unpunched live shape — session punchMasks restore the exact hole in Paint.
+    const bakeConfig = {
+      ...config,
+      paintSession: null as null,
+      transparentFillMode: 'see-through' as const
+    }
 
     const containerCanvas = document.createElement('canvas')
     const contentCanvas = document.createElement('canvas')
@@ -332,6 +340,7 @@ export function FaviconEditor({
         ? session!.layerOrder
         : ['content', 'container']
     )
+    setPaintPunchMasks(hasSession ? session!.punchMasks ?? [] : [])
     setShowPaint(true)
   }, [config])
 
@@ -356,7 +365,11 @@ export function FaviconEditor({
       contentDecorationsPng: result.contentDecorationsPng,
       // Linked letters stay as live outside settings (not baked into decorations).
       linkedTextInDecorations: result.linkedTextInDecorations ?? false,
-      paintShapeSize: result.paintShapeSize
+      contentBakedInDecorations: result.contentBakedInDecorations ?? false,
+      paintShapeSize: result.paintShapeSize,
+      paintContentDrawSize: result.paintContentDrawSize,
+      paintContentSizeRatio: result.paintContentSizeRatio,
+      punchMasks: result.punchMasks
     })!
     const favIds = new Set(targets.faviconIds)
     const logoIds = new Set(targets.logoIds)
@@ -720,6 +733,12 @@ export function FaviconEditor({
   )
 
   return (
+    <TransparentFillModeContext.Provider
+      value={{
+        mode: config.transparentFillMode ?? 'see-through',
+        setMode: (mode) => updateConfig({ transparentFillMode: mode })
+      }}
+    >
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
       {showPaint && (
         <Suspense
@@ -736,12 +755,15 @@ export function FaviconEditor({
             contentOverlayImage={paintContentOverlay}
             hasContainer={paintHasContainer || hasOuterShape}
             innerDrawSize={faviconInnerDrawSize(config, 512)}
+            paintOuterSize={faviconInnerDrawSize(config, 512)}
             outerBorderWidthPx={config.borderWidth ?? 0}
             outerBorderColor={config.borderColor}
             outerShadowColor={config.shadowColor}
             outerFillColor={config.backgroundColor}
             initialVectors={paintVectors}
+            initialPunchMasks={paintPunchMasks}
             initialLayerOrder={paintLayerOrder}
+            initialPaintShapeSize={config.paintSession?.paintShapeSize}
             outsideContentSettings={paintOutsideContent}
             syncOuterFillColor={config.outerShape !== 'image'}
             title="Edit favicon icon"
@@ -868,7 +890,10 @@ export function FaviconEditor({
             }
           >
             <div className="flex flex-col items-center gap-8">
-              <div className="rounded-xl overflow-hidden shadow-2xl" style={{ background: config.outerShape === 'none' ? 'repeating-conic-gradient(#2d2d42 0% 25%, #1a1a24 0% 50%) 0 0 / 16px 16px' : undefined }}>
+              <div
+                className="rounded-xl overflow-hidden shadow-2xl"
+                style={{ background: 'repeating-conic-gradient(#2d2d42 0% 25%, #1a1a24 0% 50%) 0 0 / 16px 16px' }}
+              >
                 <canvas ref={canvasRef} style={{ display: 'block', width: previewSize, height: previewSize }} />
               </div>
               <div className="flex items-end gap-4">
@@ -1216,11 +1241,13 @@ export function FaviconEditor({
                   imageDataUrl={config.content.imageDataUrl}
                   imageSizeRatio={config.content.imageSizeRatio ?? 0.8}
                   onImageChange={async (dataUrl) => {
+                    const gen = ++imageChangeGen.current
                     if (!dataUrl) {
-                      setContent({ imageDataUrl: '', ...emptyImageRecolorFields() })
+                      updateConfig(clearFaviconUploadedImage(config))
                       return
                     }
                     const paletteFields = await recolorFieldsAfterImageChange(dataUrl, config.content)
+                    if (gen !== imageChangeGen.current) return
                     setContent({ imageDataUrl: dataUrl, ...paletteFields })
                   }}
                   onSizeChange={(ratio) => setContent({ imageSizeRatio: ratio })}
@@ -1288,6 +1315,7 @@ export function FaviconEditor({
         </div>
       </div>
     </div>
+    </TransparentFillModeContext.Provider>
   )
 }
 
@@ -1312,7 +1340,12 @@ const SizeThumbnail = React.memo(function SizeThumbnail({ config, size }: { conf
   }, [config])
   return (
     <div className="flex flex-col items-center gap-1">
-      <canvas ref={canvasRef} style={{ display: 'block', width: size, height: size, imageRendering: 'auto' }} />
+      <div
+        className="rounded-sm overflow-hidden"
+        style={{ background: 'repeating-conic-gradient(#2d2d42 0% 25%, #1a1a24 0% 50%) 0 0 / 8px 8px' }}
+      >
+        <canvas ref={canvasRef} style={{ display: 'block', width: size, height: size, imageRendering: 'auto' }} />
+      </div>
       <span className="text-[9px] text-muted">{size}px</span>
     </div>
   )
@@ -1371,7 +1404,13 @@ function ImageUploadContent({ imageDataUrl, imageSizeRatio, onImageChange, onSiz
             className="w-full h-24 object-contain rounded-lg bg-surface3 border border-border"
           />
           <button
-            onClick={() => onImageChange('')}
+            type="button"
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              if (fileInputRef.current) fileInputRef.current.value = ''
+              onImageChange('')
+            }}
             className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
           >
             <X size={10} />
@@ -1445,7 +1484,16 @@ function FaviconImageUpload({ imageDataUrl, onChange }: FaviconImageUploadProps)
       {imageDataUrl && (
         <div className="relative group w-full h-24 rounded-lg overflow-hidden border border-border bg-checkerboard">
           <img src={imageDataUrl} alt="outer shape bg" className="w-full h-full object-cover" />
-          <button onClick={() => onChange('')} className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><X size={10} /></button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              if (fileInputRef.current) fileInputRef.current.value = ''
+              onChange('')
+            }}
+            className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+          ><X size={10} /></button>
         </div>
       )}
       {!imageDataUrl && (

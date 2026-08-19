@@ -258,7 +258,12 @@ export default function App(): JSX.Element {
 
       const result = await window.api.exportGroup(files, sel.name)
       if (result.success) {
-        showToast(`Exported ${files.length} files to folder`, 'success')
+        showToast(
+          isWebApp
+            ? `Downloaded ${files.length} files as zip`
+            : `Exported ${files.length} files to folder`,
+          'success'
+        )
       } else if (result.error) {
         showToast(`Export failed: ${result.error}`, 'error')
         console.error('Group export error:', result.error)
@@ -457,7 +462,7 @@ export default function App(): JSX.Element {
                     <button
                       onClick={handleGroupExport}
                       disabled={!selected || groupExporting}
-                      title="Export all variants to a folder"
+                      title={isWebApp ? 'Export all variants as a zip' : 'Export all variants to a folder'}
                       className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-muted hover:text-text hover:bg-surface3 disabled:hover:bg-transparent disabled:hover:text-muted"
                     >
                       {groupExporting

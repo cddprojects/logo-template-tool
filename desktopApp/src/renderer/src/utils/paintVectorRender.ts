@@ -1,5 +1,6 @@
 import type { PaintVector } from '../types'
 import { reuseCanvas, takeCanvas, releaseCanvas } from './canvasPool'
+import { alphaBoundsFromCanvas, drawReshapedCanvas, reshapeIsApplied } from './paintReshape'
 
 type Pt = { x: number; y: number }
 
@@ -14,44 +15,86 @@ function firstSolidColor(color: string): string {
   return color.length >= 7 ? color.slice(0, 7) : color
 }
 
+function isTransparentPaintColor(color: string): boolean {
+  if (!color || color === 'transparent' || color === 'none') return true
+  if (color.startsWith('linear-gradient') || color.startsWith('radial-gradient')) return false
+  if (/^#[0-9a-fA-F]{8}$/.test(color) && color.slice(7, 9).toLowerCase() === '00') return true
+  return false
+}
+
+/** Same as live renderer: keep #RRGGBBAA so Paint and preview match. */
+function cssShadowColor(color: string): string {
+  if (!color || color === 'transparent' || color === 'none') return ''
+  if (color.startsWith('linear-gradient') || color.startsWith('radial-gradient')) return '#888888'
+  const hex = color.trim()
+  if (/^#[0-9a-fA-F]{8}$/.test(hex) && hex.slice(7, 9).toLowerCase() === '00') return ''
+  return color
+}
+
+export type BakedDropShadow = { canvas: HTMLCanvasElement; inset: number }
+
 /**
- * CSS drop-shadow on an identity canvas. Bake first, then rotate/flip the
- * result so Offset X/Y stays attached to the letter. Applying `filter` after
- * rotate / negative scale drops the shadow in Chromium.
+ * Same composite as live Inner: CSS drop-shadow on a glyph bitmap (alpha),
+ * then the clean source once. Do not fillText twice (that fringes a "border").
+ * Bake on identity so rotate/flip can run after without Chromium dropping the shadow.
  */
 export function bakeCanvasDropShadow(
   src: HTMLCanvasElement,
-  opts: { blur?: number; ox?: number; oy?: number; spread?: number; color: string }
-): HTMLCanvasElement {
+  opts: { blur?: number; ox?: number; oy?: number; spread?: number; color: string; shadowOnly?: boolean }
+): BakedDropShadow {
   const W = Math.max(1, src.width)
   const H = Math.max(1, src.height)
-  const out = reuseCanvas(bakeOutSlot, W, H)
-  const ctx = out.getContext('2d')!
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
   const blur = opts.blur ?? 0
   const ox = opts.ox ?? 0
   const oy = opts.oy ?? 0
   const spread = Math.max(0, opts.spread ?? 0)
-  const color = firstSolidColor(opts.color)
+  const color = cssShadowColor(opts.color)
+  const shadowOnly = !!opts.shadowOnly
+  const inset = Math.max(8, Math.ceil(blur * 3 + spread + Math.abs(ox) + Math.abs(oy) + 16))
+  const out = reuseCanvas(bakeOutSlot, W + inset * 2, H + inset * 2)
+  const ctx = out.getContext('2d')!
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  if (!color) {
+    if (!shadowOnly) ctx.drawImage(src, inset, inset)
+    return { canvas: out, inset }
+  }
+
   if (spread > 0) {
-    const HUGE = 10000
-    const spreadSize = Math.max(W, H) + spread * 2
+    // Live: uniform scale of a square, HUGE so only the coloured shadow lands.
+    const side = Math.max(W, H)
+    const spreadSize = side + spread * 2
+    const square = takeCanvas(side, side)
     const sc = reuseCanvas(bakeSpreadSlot, spreadSize, spreadSize)
-    const s = sc.getContext('2d')!
-    s.imageSmoothingEnabled = true
-    s.imageSmoothingQuality = 'high'
-    s.drawImage(src, 0, 0, spreadSize, spreadSize)
+    try {
+      const sq = square.getContext('2d')!
+      sq.drawImage(src, (side - W) / 2, (side - H) / 2)
+      const s = sc.getContext('2d')!
+      s.imageSmoothingEnabled = true
+      s.imageSmoothingQuality = 'high'
+      s.drawImage(square, 0, 0, spreadSize, spreadSize)
+      const HUGE = 10000
+      const dx = inset - (spreadSize - W) / 2
+      const dy = inset - (spreadSize - H) / 2
+      ctx.filter = `drop-shadow(${ox + HUGE}px ${oy + HUGE}px ${blur}px ${color})`
+      ctx.drawImage(sc, dx - HUGE, dy - HUGE)
+      ctx.filter = 'none'
+      if (!shadowOnly) ctx.drawImage(src, inset, inset)
+    } finally {
+      releaseCanvas(square)
+    }
+  } else if (shadowOnly) {
+    const HUGE = 10000
     ctx.filter = `drop-shadow(${ox + HUGE}px ${oy + HUGE}px ${blur}px ${color})`
-    ctx.drawImage(sc, -spread - HUGE, -spread - HUGE)
+    ctx.drawImage(src, inset - HUGE, inset - HUGE)
     ctx.filter = 'none'
-    ctx.drawImage(src, 0, 0)
   } else {
+    // Live no-spread: one filtered drawImage — source + shadow, no second fill.
     ctx.filter = `drop-shadow(${ox}px ${oy}px ${blur}px ${color})`
-    ctx.drawImage(src, 0, 0)
+    ctx.drawImage(src, inset, inset)
     ctx.filter = 'none'
   }
-  return out
+  return { canvas: out, inset }
 }
 
 type CtxLetterSpacing = CanvasRenderingContext2D & { letterSpacing?: string }
@@ -163,6 +206,20 @@ function textInkBBox(v: PaintVector): { x: number; y: number; w: number; h: numb
   }
 }
 
+function unionTextBounds(
+  a: { x: number; y: number; w: number; h: number },
+  b: { x: number; y: number; w: number; h: number }
+): { x: number; y: number; w: number; h: number } {
+  const x = Math.min(a.x, b.x)
+  const y = Math.min(a.y, b.y)
+  return {
+    x,
+    y,
+    w: Math.max(1, Math.max(a.x + a.w, b.x + b.w) - x),
+    h: Math.max(1, Math.max(a.y + a.h, b.y + b.h) - y)
+  }
+}
+
 function objCenter(v: PaintVector): Pt {
   if (v.type === 'text') {
     const b = textInkBBox(v)
@@ -198,6 +255,8 @@ export interface InnerContentDecor {
   contentShadowSpread?: number
   contentShadowOffsetX?: number
   contentShadowOffsetY?: number
+  /** Live Inner sizeRatio (0–1.5) so content decorations can follow Size %. */
+  contentSizeRatio?: number
 }
 
 function paintTextBorderWidth(v: PaintVector, decor?: InnerContentDecor, sessionRes?: number): number {
@@ -247,22 +306,25 @@ function renderPaintText(
   const { lineH } = textMetrics(v)
   const spacing = v.letterSpacing ?? 0
   const font = textFontStr(v)
-  const b = textBBox(v)
+  const b = unionTextBounds(textBBox(v), textInkBBox(v))
   const borderW = paintTextBorderWidth(v, decor, sessionRes)
   const borderColor = (decor?.contentBorderColor ?? 'transparent') === 'transparent'
     ? '#000000'
     : (decor?.contentBorderColor ?? '#000000')
 
-  const transformed = needsDisplayTransform(v) || !!(v.reshapeQuad && v.reshapeQuad.length === 4)
+  const hideFill = isTransparentPaintColor(v.color)
+  const transformed = needsDisplayTransform(v) || reshapeIsApplied(v.reshapeQuad, v.reshapeSrc)
   const bakeLinked =
     !!v.linkedOutsideText &&
     transformed &&
     !!(v.shadow || decor?.contentShadowEnabled) &&
     !decor?.contentShadowInset
-  const bakeOwn = !v.linkedOutsideText && !!v.shadow
+  const bakeOwn = !v.linkedOutsideText && !!v.shadow && !isTransparentPaintColor(v.shadowColor ?? '')
 
   if (!bakeLinked && !bakeOwn) {
-    drawPaintGlyphs(ctx, v, rows, p, lineH, spacing, font, 0, 0, borderW, borderColor)
+    if (!hideFill) {
+      drawPaintGlyphs(ctx, v, rows, p, lineH, spacing, font, 0, 0, borderW, borderColor)
+    }
     return
   }
 
@@ -271,27 +333,48 @@ function renderPaintText(
   const sox = v.shadowOffsetX ?? Math.round((decor?.contentShadowOffsetX ?? 0) * scale)
   const soy = v.shadowOffsetY ?? Math.round((decor?.contentShadowOffsetY ?? 3) * scale)
   const spread = v.shadowSpread ?? Math.round((decor?.contentShadowSpread ?? 0) * scale)
-  const padL = Math.ceil(Math.max(0, blur * 2 + spread - sox) + 4)
-  const padR = Math.ceil(Math.max(0, blur * 2 + spread + sox) + 4)
-  const padT = Math.ceil(Math.max(0, blur * 2 + spread - soy) + 4)
-  const padB = Math.ceil(Math.max(0, blur * 2 + spread + soy) + 4)
-  const tw = Math.max(1, Math.ceil(b.w) + padL + padR)
-  const th = Math.max(1, Math.ceil(b.h) + padT + padB)
+  const pad = 8
+  const tw = Math.max(1, Math.ceil(b.w) + pad * 2)
+  const th = Math.max(1, Math.ceil(b.h) + pad * 2)
   const off = reuseCanvas(textOffSlot, tw, th)
   const o = off.getContext('2d')!
   drawPaintGlyphs(
-    o, v, rows, p, lineH, spacing, font,
-    -b.x + padL, -b.y + padT,
-    borderW, borderColor
+    o,
+    hideFill ? { ...v, color: '#000000' } : v,
+    rows, p, lineH, spacing, font,
+    -b.x + pad, -b.y + pad,
+    hideFill ? 0 : borderW,
+    borderColor
   )
-  const src = bakeCanvasDropShadow(off, {
+  const baked = bakeCanvasDropShadow(off, {
     blur,
     ox: sox,
     oy: soy,
     spread,
-    color: v.shadowColor ?? decor?.contentShadowColor ?? '#00000080'
+    color: v.shadowColor ?? decor?.contentShadowColor ?? '#00000080',
+    shadowOnly: hideFill
   })
-  ctx.drawImage(src, b.x - padL, b.y - padT)
+  ctx.drawImage(baked.canvas, b.x - pad - baked.inset, b.y - pad - baked.inset)
+}
+
+function renderPaintTextUnwarped(
+  ctx: CanvasRenderingContext2D,
+  v: PaintVector,
+  decor?: InnerContentDecor,
+  sessionRes?: number
+): void {
+  if (needsDisplayTransform(v)) {
+    const c = objCenter(v)
+    ctx.save()
+    ctx.translate(c.x, c.y)
+    ctx.rotate(v.rot ?? 0)
+    ctx.scale(v.scaleX ?? 1, v.scaleY ?? 1)
+    ctx.translate(-c.x, -c.y)
+    renderPaintText(ctx, v, decor, sessionRes)
+    ctx.restore()
+    return
+  }
+  renderPaintText(ctx, v, decor, sessionRes)
 }
 
 function renderPaintTextVector(
@@ -301,27 +384,30 @@ function renderPaintTextVector(
   sessionRes?: number
 ): void {
   if (v.type !== 'text') return
-  const c = objCenter(v)
-  const rot = v.rot ?? 0
-  const sx = v.scaleX ?? 1
-  const sy = v.scaleY ?? 1
-  if (needsDisplayTransform(v)) {
-    ctx.save()
-    ctx.translate(c.x, c.y)
-    ctx.rotate(rot)
-    ctx.scale(sx, sy)
-    ctx.translate(-c.x, -c.y)
-    renderPaintText(ctx, v, decor, sessionRes)
-    ctx.restore()
+  const quad = v.reshapeQuad
+  if (quad?.length === 4) {
+    const W = Math.max(1, ctx.canvas.width)
+    const H = Math.max(1, ctx.canvas.height)
+    const temp = takeCanvas(W, H)
+    try {
+      const tctx = temp.getContext('2d')!
+      renderPaintTextUnwarped(tctx, v, decor, sessionRes)
+      const src = v.reshapeSrc ?? alphaBoundsFromCanvas(temp)
+      if (!src || !drawReshapedCanvas(ctx, temp, src, quad)) {
+        renderPaintTextUnwarped(ctx, v, decor, sessionRes)
+      }
+    } finally {
+      releaseCanvas(temp)
+    }
     return
   }
-  renderPaintText(ctx, v, decor, sessionRes)
+  renderPaintTextUnwarped(ctx, v, decor, sessionRes)
 }
 
 /** True when linked letters were warped in Paint (not driven by live outside typography). */
 export function linkedTextHasPaintTransform(v: PaintVector): boolean {
   if (v.type !== 'text' || !v.linkedOutsideText) return false
-  if (v.reshapeQuad?.length === 4) return true
+  if (reshapeIsApplied(v.reshapeQuad, v.reshapeSrc)) return true
   if (Math.abs(v.rot ?? 0) > 0.001) return true
   if (Math.abs((v.scaleX ?? 1) - 1) > 0.001) return true
   if (Math.abs((v.scaleY ?? 1) - 1) > 0.001) return true
@@ -373,7 +459,7 @@ export function compositeInnerContentDecor(
   const csx = (decor.contentShadowOffsetX ?? 0) * cScale
   const csy = (decor.contentShadowOffsetY ?? 3) * cScale
   const csb = (decor.contentShadowBlur ?? 8) * cScale
-  const csc = firstSolidColor(decor.contentShadowColor ?? '#00000080')
+  const csc = cssShadowColor(decor.contentShadowColor ?? '#00000080')
   const isInset = decor.contentShadowInset ?? false
 
   if (!decor.contentShadowEnabled) {

@@ -72,9 +72,17 @@ export function paintCompositeResolution(
 export function shouldSkipLiveLettersForPaintSession(
   session: PaintSession | null | undefined
 ): boolean {
+  if (shouldSkipLiveInnerForPaintSession(session)) return true
   if (!session || !sessionHasLinkedOutsideText(session)) return false
   if (session.linkedTextInDecorations) return true
   return (session.vectors ?? []).some(linkedTextHasPaintTransform)
+}
+
+/** True when Paint baked a warped Inner proxy into decorations — skip live Inner. */
+export function shouldSkipLiveInnerForPaintSession(
+  session: PaintSession | null | undefined
+): boolean {
+  return !!session?.contentBakedInDecorations
 }
 
 function shouldRenderContentVectorsLive(session: PaintSession): boolean {
@@ -101,7 +109,7 @@ export function syncOutsideLettersIntoPaintSession(
   const weight = parseInt(String(letters.fontWeight ?? '700'), 10)
   const w = Number.isFinite(weight) ? Math.max(100, Math.min(900, weight)) : 700
   const fontSize = Math.max(4, Math.round(drawArea * (letters.fontSizeRatio ?? 0.52)))
-  const letterSpacing = (letters.letterSpacing ?? 0) * (res / 256)
+  const letterSpacing = (letters.letterSpacing ?? 0) * (drawArea / 256)
 
   const vectors: PaintVector[] = (session.vectors ?? []).map((v) => {
     if (v.type !== 'text' || !v.linkedOutsideText) return v
@@ -146,6 +154,47 @@ export function resolvePaintShapeSize(
   const shape = Math.max(1, Math.min(res, Math.round(raw)))
   const origin = (res - shape) / 2
   return { res, shape, origin }
+}
+
+export function sessionHasPunchMask(
+  session: PaintSession | null | undefined,
+  layer: PaintLayerId
+): boolean {
+  return !!session?.punchMasks?.some((m) => m.layer === layer)
+}
+
+/** Punch-through mask for one paint layer (opaque = hole through live pixels below). */
+export async function applyPaintPunchMask(
+  ctx: CanvasRenderingContext2D,
+  session: PaintSession | null | undefined,
+  x: number,
+  y: number,
+  size: number,
+  layer: PaintLayerId,
+  shapeFallback?: number
+): Promise<void> {
+  if (!session || size <= 0) return
+  const png = session.punchMasks?.find((m) => m.layer === layer)?.png
+  if (!png) return
+  ctx.save()
+  ctx.globalCompositeOperation = 'destination-out'
+  await drawScaledPng(ctx, png, x, y, size, session, shapeFallback)
+  ctx.restore()
+}
+
+/** Apply every punch mask after the full Outer+Inner stack so a fill hole is not covered by Inner. */
+export async function applyAllPaintPunchMasks(
+  ctx: CanvasRenderingContext2D,
+  session: PaintSession | null | undefined,
+  x: number,
+  y: number,
+  size: number,
+  shapeFallback?: number
+): Promise<void> {
+  if (!session?.punchMasks?.length || size <= 0) return
+  for (const layer of ['container', 'content'] as PaintLayerId[]) {
+    await applyPaintPunchMask(ctx, session, x, y, size, layer, shapeFallback)
+  }
 }
 
 async function drawScaledPng(
@@ -261,6 +310,36 @@ export async function applyPaintLayerDecorations(
   }
 }
 
+/** Draw a paint layer at `superSample`× then downscale so logo icons stay sharp. */
+export async function applyPaintLayerDecorationsHiRes(
+  ctx: CanvasRenderingContext2D,
+  session: PaintSession | null | undefined,
+  x: number,
+  y: number,
+  size: number,
+  layer: PaintLayerId,
+  innerDecor: InnerContentDecor | undefined,
+  shapeFallback: number | undefined,
+  superSample: number
+): Promise<void> {
+  const s = Math.max(1, Math.round(superSample))
+  if (s <= 1 || size <= 0) {
+    await applyPaintLayerDecorations(ctx, session, x, y, size, layer, innerDecor, shapeFallback)
+    return
+  }
+  const dim = Math.max(1, Math.round(size * s))
+  const off = takeCanvas(dim, dim)
+  try {
+    const octx = off.getContext('2d')!
+    octx.imageSmoothingEnabled = true
+    octx.imageSmoothingQuality = 'high'
+    await applyPaintLayerDecorations(octx, session, 0, 0, dim, layer, innerDecor, shapeFallback)
+    ctx.drawImage(off, x, y, size, size)
+  } finally {
+    releaseCanvas(off)
+  }
+}
+
 /**
  * Draw paint decorations (overlays + vectors flatten) on top of a live-rendered
  * icon/favicon. Prefers layered planes when present; else legacy `decorationsPng`.
@@ -273,7 +352,8 @@ export async function applyPaintDecorations(
   x: number,
   y: number,
   size: number,
-  shapeFallback?: number
+  shapeFallback?: number,
+  _contentSizeRatio?: number
 ): Promise<void> {
   if (!session || size <= 0) return
 
@@ -318,6 +398,7 @@ export function sanitizePaintSessionProxies(
     // Drop flatten that may still include the proxy raster.
     decorationsPng: undefined,
     containerDecorationsPng: undefined,
-    contentDecorationsPng: undefined
+    contentDecorationsPng: undefined,
+    punchMasks: session.punchMasks
   }
 }

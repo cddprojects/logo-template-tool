@@ -14,6 +14,7 @@ import type {
 } from '../types'
 import { DEFAULT_FAVICON_CONFIG } from '../types'
 import { contentTypeFromIcon } from './contentTypeSync'
+import { emptyImageRecolorFields } from './imageRecolor'
 import type { InnerContentDecor } from './paintVectorRender'
 import { iconOuterShadowPad, measureSpacedText } from './renderer'
 
@@ -86,7 +87,7 @@ const FAVICON_TYPE_KEYS: Record<ContentType, readonly string[]> = {
   svg: ['svgPath', 'svgColor', ...SHARED_CONTENT_KEYS],
   canva: [
     'canvaBusinessType', 'canvaDesignType', 'canvaPrimaryColor', 'canvaSecondaryColor',
-    'canvaImageReference',
+    'canvaImageReference', 'canvaSourceType',
     ...SHARED_CONTENT_KEYS
   ]
 }
@@ -232,11 +233,25 @@ export function logoPaintOuterLayout(
 }
 
 /**
- * Logo icon inner drawable size at paint resolution (outer shadow inset).
- * Matches LogoEditor paint bakes where the content layer disables the container.
+ * Logo icon outer-shape size at paint resolution (outer shadow inset).
+ * Used to crop decorations onto the live icon rect.
  */
 export function logoPaintInnerDrawSize(icon: IconConfig, canvasSize = 512): number {
   return logoPaintOuterLayout(icon, canvasSize).size
+}
+
+/**
+ * Logo Inner content box at paint resolution.
+ * Live drawIcon shrinks Inner by containerPadding; Paint must use the same
+ * box or library / lucide content looks larger in Paint than in preview.
+ */
+export function logoPaintContentDrawSize(icon: IconConfig, canvasSize = 512): number {
+  const outer = logoPaintInnerDrawSize(icon, canvasSize)
+  const pad =
+    icon.containerEnabled && icon.containerShape !== 'none'
+      ? (icon.containerPadding ?? 0.18)
+      : 0
+  return Math.max(16, Math.round(outer * (1 - 2 * pad)))
 }
 
 /**
@@ -512,7 +527,8 @@ export function innerContentDecorFromFavicon(content: FaviconContent): InnerCont
     contentShadowBlur: content.contentShadowBlur ?? 8,
     contentShadowSpread: content.contentShadowSpread ?? 0,
     contentShadowOffsetX: content.contentShadowOffsetX ?? 0,
-    contentShadowOffsetY: content.contentShadowOffsetY ?? 3
+    contentShadowOffsetY: content.contentShadowOffsetY ?? 3,
+    contentSizeRatio: faviconSizeRatio(content)
   }
 }
 
@@ -528,7 +544,8 @@ export function innerContentDecorFromIcon(icon: IconConfig): InnerContentDecor {
     contentShadowBlur: toDesign(icon.contentShadowBlur ?? 8),
     contentShadowSpread: toDesign(icon.contentShadowSpread ?? 0),
     contentShadowOffsetX: toDesign(icon.contentShadowOffsetX ?? 0),
-    contentShadowOffsetY: toDesign(icon.contentShadowOffsetY ?? 3)
+    contentShadowOffsetY: toDesign(icon.contentShadowOffsetY ?? 3),
+    contentSizeRatio: iconSizeRatio(icon)
   }
 }
 
@@ -630,7 +647,7 @@ export function outsideTextAnchorPt(
 ): { x: number; y: number } {
   const drawArea = Math.max(1, innerDrawSize)
   const fontSize = Math.max(4, Math.round(drawArea * (settings.fontSizeRatio ?? 0.52)))
-  const letterSpacing = (settings.letterSpacing ?? 0) * (resolution / 256)
+  const letterSpacing = (settings.letterSpacing ?? 0) * (drawArea / 256)
   const weight = parseInt(String(settings.fontWeight ?? '700'), 10)
   const w = Number.isFinite(weight) ? Math.max(100, Math.min(900, weight)) : 700
   const scale = resolution / 256
@@ -1035,9 +1052,86 @@ export function emptyOverlayPng(resolution = 512): string {
   return c.toDataURL('image/png')
 }
 
+const CANVA_PROMPT_KEYS = [
+  'canvaBusinessType',
+  'canvaDesignType',
+  'canvaPrimaryColor',
+  'canvaSecondaryColor',
+  'canvaImageReference'
+] as const
+
+function blankPaintContentOverlay(session: PaintSession): PaintSession {
+  const empty = emptyOverlayPng(session.resolution)
+  return {
+    ...session,
+    contentPng: empty,
+    contentDecorationsPng: empty,
+    decorationsPng: undefined,
+    contentBakedInDecorations: false
+  }
+}
+
+/** Remove the uploaded inner image from live content, stash, and Inner paint. */
+export function clearFaviconUploadedImage(config: FaviconConfig): Partial<FaviconConfig> {
+  const stash = { ...(config.contentTypeStash ?? {}) }
+  const imageEntry = stash.image
+  if (imageEntry) {
+    stash.image = {
+      ...imageEntry,
+      fields: {
+        ...imageEntry.fields,
+        imageDataUrl: '',
+        ...emptyImageRecolorFields()
+      },
+      contentOverlayPng: undefined
+    }
+  }
+  let paintSession = config.paintSession ?? null
+  if (paintSession && config.content.type === 'image') {
+    paintSession = blankPaintContentOverlay(paintSession)
+  }
+  return {
+    content: {
+      ...config.content,
+      imageDataUrl: '',
+      ...emptyImageRecolorFields()
+    },
+    contentTypeStash: stash,
+    paintSession
+  }
+}
+
+/** Remove the uploaded icon image from live icon, stash, and Inner paint. */
+export function clearIconUploadedImage(icon: IconConfig): Partial<IconConfig> {
+  const stash = { ...(icon.contentTypeStash ?? {}) }
+  const imageEntry = stash.image
+  if (imageEntry) {
+    stash.image = {
+      ...imageEntry,
+      fields: {
+        ...imageEntry.fields,
+        imageDataUrl: '',
+        ...emptyImageRecolorFields()
+      },
+      contentOverlayPng: undefined
+    }
+  }
+  let paintSession = icon.paintSession ?? null
+  if (paintSession && icon.sourceType === 'image') {
+    paintSession = blankPaintContentOverlay(paintSession)
+  }
+  return {
+    imageDataUrl: '',
+    ...emptyImageRecolorFields(),
+    contentTypeStash: stash,
+    paintSession
+  }
+}
+
 /**
  * On content-type switch: stash old type, strip Inner overlay + content-bound
  * vectors from the live session, restore the new type’s stash (or blank Inner).
+ * Switching to Canva keeps the last inner content so reference images still work.
  */
 export function switchFaviconContentType(
   config: FaviconConfig,
@@ -1049,6 +1143,29 @@ export function switchFaviconContentType(
   const session = config.paintSession
   const stash = { ...(config.contentTypeStash ?? {}) }
   stash[prevType] = buildFaviconTypeStash(config.content, session)
+
+  // Canva is prompt-only UI: keep the last inner content + paint so reference
+  // images (favicon / favicon-inner) still have something to render.
+  if (nextType === 'canva') {
+    const incoming = stash.canva
+    const canvaFields = pickKeys(
+      (incoming?.fields ?? {}) as Record<string, unknown>,
+      CANVA_PROMPT_KEYS
+    )
+    return {
+      ...config,
+      contentTypeStash: stash,
+      paintSession: session ?? null,
+      content: {
+        ...config.content,
+        ...canvaFields,
+        type: 'canva',
+        canvaSourceType: prevType === 'canva'
+          ? (config.content.canvaSourceType ?? 'letters')
+          : prevType
+      }
+    }
+  }
 
   const incoming = stash[nextType]
   let nextSession: PaintSession | null | undefined = session
@@ -1309,6 +1426,11 @@ export function iconConfigToFaviconConfig(
     content: {
       ...shell.content,
       type,
+      canvaSourceType: icon.canvaMode
+        ? (icon.sourceType === 'svg'
+          ? ((icon.svgMarkup ?? '').trim().startsWith('<') ? 'svg-markup' : 'svg')
+          : icon.sourceType)
+        : shell.content.canvaSourceType,
       text: icon.text ?? '',
       textColor: icon.textColor || fill,
       fontFamily: icon.fontFamily ?? 'Inter',

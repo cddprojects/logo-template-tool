@@ -37,8 +37,21 @@ export function isSvgMarkupString(markup: string): boolean {
   return m.startsWith('<') && /<svg[\s>]/i.test(m)
 }
 
+/** Inner type to draw when content.type is Canva (last choice before Canva). */
+export function resolveFaviconDrawType(content: FaviconContent): ContentType {
+  if (content.type !== 'canva') return content.type
+  const src = content.canvaSourceType
+  if (src && src !== 'canva') return src
+  if (content.imageDataUrl) return 'image'
+  if (content.svgMarkup) return 'svg-markup'
+  if (content.svgPath) return 'svg'
+  if ((content.text ?? '').trim()) return 'letters'
+  return 'letters'
+}
+
 /** Map a logo icon config to the favicon content-type it represents. */
 export function contentTypeFromIcon(icon: IconConfig): ContentType {
+  if (icon.canvaMode) return 'canva'
   switch (icon.sourceType) {
     case 'letters':
       return icon.text === ' ' ? 'canva' : 'letters'
@@ -64,6 +77,7 @@ export function iconPatchForContentType(
   switch (type) {
     case 'letters':
       return {
+        canvaMode: false,
         sourceType: 'letters',
         text: icon.text ?? faviconContent?.text ?? 'A',
         textColor: icon.textColor ?? faviconContent?.textColor ?? icon.primaryColor ?? '#ffffff',
@@ -76,6 +90,7 @@ export function iconPatchForContentType(
       }
     case 'shape':
       return {
+        canvaMode: false,
         sourceType: 'shape',
         shape: icon.shape === 'none' ? (faviconContent?.shape ?? 'rounded') : icon.shape,
         primaryColor: icon.primaryColor ?? faviconContent?.shapeColor ?? '#6366f1',
@@ -84,6 +99,7 @@ export function iconPatchForContentType(
       }
     case 'lucide':
       return {
+        canvaMode: false,
         sourceType: 'lucide',
         lucideIconName: icon.lucideIconName || faviconContent?.lucideIconName || 'Layers',
         primaryColor: icon.primaryColor ?? faviconContent?.lucideColor ?? '#ffffff',
@@ -92,6 +108,7 @@ export function iconPatchForContentType(
       }
     case 'svg-markup':
       return {
+        canvaMode: false,
         sourceType: 'svg',
         svgMarkup: icon.svgMarkup || faviconContent?.svgMarkup || '',
         primaryColor: icon.primaryColor ?? faviconContent?.lucideColor ?? '#ffffff',
@@ -107,6 +124,7 @@ export function iconPatchForContentType(
       const color = icon.primaryColor ?? faviconContent?.svgColor ?? '#ffffff'
       const path = unwrapSvgPath(icon.svgMarkup ?? '') || faviconContent?.svgPath || ''
       return {
+        canvaMode: false,
         sourceType: 'svg',
         primaryColor: color,
         svgMarkup: wrapSvgPath(path, color),
@@ -116,6 +134,7 @@ export function iconPatchForContentType(
     }
     case 'image':
       return {
+        canvaMode: false,
         sourceType: 'image',
         imageDataUrl: icon.imageDataUrl || faviconContent?.imageDataUrl || '',
         imageSizeRatio: icon.imageSizeRatio ?? faviconContent?.imageSizeRatio ?? 0.8,
@@ -128,12 +147,8 @@ export function iconPatchForContentType(
         imageColor5: icon.imageColor5 ?? faviconContent?.imageColor5 ?? ''
       }
     case 'canva':
-      return {
-        sourceType: 'letters',
-        text: ' ',
-        textColor: faviconContent?.canvaPrimaryColor ?? icon.textColor ?? icon.primaryColor ?? '#6366f1',
-        fontSizeRatio: 0.52
-      }
+      // Keep the last icon so Canva image references (and the preview) still work.
+      return { canvaMode: true }
     default:
       return { sourceType: 'shape' }
   }

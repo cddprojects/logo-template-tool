@@ -559,11 +559,6 @@ export const getStoredApiKey = (): string =>
   localStorage.getItem(KEY_STORE) ?? localStorage.getItem('imggen:openai_key') ?? ''
 export const storeApiKey = (key: string): void => {
   localStorage.removeItem('imggen:openai_key') // remove old key if present
+  localStorage.removeItem('imggen:hf_key')
   key ? localStorage.setItem(KEY_STORE, key) : localStorage.removeItem(KEY_STORE)
-}
-
-const HF_KEY_STORE = 'imggen:hf_key'
-export const getStoredHFKey = (): string => localStorage.getItem(HF_KEY_STORE) ?? ''
-export const storeHFKey = (key: string): void => {
-  key ? localStorage.setItem(HF_KEY_STORE, key) : localStorage.removeItem(HF_KEY_STORE)
 }

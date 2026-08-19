@@ -7,13 +7,15 @@ import { sanitizePaintSessionProxies, syncOutsideLettersIntoPaintSession } from 
 import { exportLogoPng, exportLogoSvg, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
 import { hasMultipleColors } from '../utils/iconUtils'
-import { emptyImageRecolorFields, recolorFieldsAfterImageChange } from '../utils/imageRecolor'
+import { recolorFieldsAfterImageChange } from '../utils/imageRecolor'
 import {
   applyPaintSaveToFavicon,
   applyPaintSaveToIcon,
+  clearIconUploadedImage,
   iconConfigToFaviconConfig,
   mapFaviconStashToIconStash,
   updateIconStashAfterSave,
+  logoPaintContentDrawSize,
   logoPaintInnerDrawSize,
   logoPaintOuterLayout,
   outsideContentFromIcon,
@@ -23,12 +25,14 @@ import {
   contentTypeFromIcon,
   FAVICON_CONTENT_TYPE_OPTIONS,
   iconPatchForContentType,
+  resolveFaviconDrawType,
   unwrapSvgPath,
   wrapSvgPath
 } from '../utils/contentTypeSync'
 import {
   Section,
   ColorRow,
+  TransparentFillModeContext,
   SliderRow,
   TextRow,
   TextareaRow,
@@ -69,6 +73,7 @@ function syncedIconNeedsUpdate(
   if ((pa?.containerPng ?? '') !== (pb?.containerPng ?? '')) return true
   if ((pa?.contentPng ?? '') !== (pb?.contentPng ?? '')) return true
   if (!!(pa?.linkedTextInDecorations) !== !!(pb?.linkedTextInDecorations)) return true
+  if (!!(pa?.contentBakedInDecorations) !== !!(pb?.contentBakedInDecorations)) return true
   if ((pa?.vectors?.length ?? 0) !== (pb?.vectors?.length ?? 0)) return true
   if (JSON.stringify(pa?.vectors ?? null) !== JSON.stringify(pb?.vectors ?? null)) return true
   const strip = (icon: IconConfig) => {
@@ -103,6 +108,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const renderIdRef = useRef(0)
+  const imageChangeGen = useRef(0)
   const [exporting, setExporting] = useState<string | null>(null)
   const [exportScale, setExportScale] = useState<number>(4)
   const [exportNameStyle, setExportNameStyle] = useState<ExportNameStyle>(() => getStoredExportNameStyle())
@@ -338,7 +344,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             contentShadowSpread: next.contentShadowSpread ?? 0,
             contentShadowOffsetX: next.contentShadowOffsetX ?? 0,
             contentShadowOffsetY: next.contentShadowOffsetY ?? 3
-          }, logoPaintInnerDrawSize(next, 512)) ?? null
+          }, logoPaintContentDrawSize(next, 512)) ?? null
         }
       }
       updateConfig({
@@ -361,6 +367,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   const [paintContentOverlay, setPaintContentOverlay] = useState<string | null>(null)
   const [paintHasContainer, setPaintHasContainer] = useState(false)
   const [paintLayerOrder, setPaintLayerOrder] = useState<PaintLayerId[]>(['content', 'container'])
+  const [paintPunchMasks, setPaintPunchMasks] = useState<{ layer: PaintLayerId; png: string }[]>([])
   const [paintOutsideContent, setPaintOutsideContent] = useState<OutsideContentSettings | null>(null)
 
   // Match favicon: Outer shape is available when the icon has a real container
@@ -397,11 +404,20 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
 
     const SIZE = 512
     const { x: drawX, y: drawY, size: drawSize } = logoPaintOuterLayout(effectiveIcon, SIZE)
+    const contentPad =
+      effectiveIcon.containerEnabled && effectiveIcon.containerShape !== 'none'
+        ? (effectiveIcon.containerPadding ?? 0.18)
+        : 0
+    const contentDraw = Math.max(16, Math.round(drawSize * (1 - 2 * contentPad)))
+    const contentX = drawX + Math.floor((drawSize - contentDraw) / 2)
+    const contentY = drawY + Math.floor((drawSize - contentDraw) / 2)
 
     const baseIcon: IconConfig = {
       ...effectiveIcon,
       visible: true,
-      paintSession: null
+      paintSession: null,
+      // Full unpunched live shape — session punchMasks restore the exact hole in Paint.
+      transparentFillMode: 'see-through'
     }
 
     const containerCanvas = document.createElement('canvas')
@@ -456,7 +472,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             }
           : {})
       },
-      drawX, drawY, drawSize, 2
+      contentX, contentY, contentDraw, 2
     ).catch(() => {})
 
     setPaintContainer(containerCanvas.toDataURL('image/png'))
@@ -471,6 +487,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
         ? session!.layerOrder
         : ['content', 'container']
     )
+    setPaintPunchMasks(hasSession ? session!.punchMasks ?? [] : [])
     setShowPaint(true)
   }, [safeConfig, effectiveIcon, matchingFaviconVariant, hasIconContainer, isSyncedWithFavicon])
 
@@ -489,7 +506,11 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       contentDecorationsPng: result.contentDecorationsPng,
       // Linked letters stay as live outside settings (not baked into decorations).
       linkedTextInDecorations: result.linkedTextInDecorations ?? false,
-      paintShapeSize: result.paintShapeSize
+      contentBakedInDecorations: result.contentBakedInDecorations ?? false,
+      paintShapeSize: result.paintShapeSize,
+      paintContentDrawSize: result.paintContentDrawSize,
+      paintContentSizeRatio: result.paintContentSizeRatio,
+      punchMasks: result.punchMasks
     })!
     const logoIds = new Set(targets.logoIds)
     const favIds = new Set(targets.faviconIds)
@@ -641,7 +662,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
 
     const doRender = () => {
       if (renderId !== renderIdRef.current) return
-      renderLogo(canvasRef.current!, renderConfig, 2, false, faviconForIconRender).catch(() => {})
+      renderLogo(canvasRef.current!, renderConfig, 4, true, faviconForIconRender).catch(() => {})
     }
 
     const rafId = requestAnimationFrame(doRender)
@@ -886,6 +907,15 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   if (!safeConfig) return <div className="flex-1 flex items-center justify-center text-muted text-sm">No variants</div>
 
   return (
+    <TransparentFillModeContext.Provider
+      value={{
+        mode: safeConfig.transparentFillMode ?? effectiveIcon.transparentFillMode ?? 'see-through',
+        setMode: (mode) => {
+          updateConfig({ transparentFillMode: mode })
+          setIcon({ transparentFillMode: mode })
+        }
+      }}
+    >
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
       {showPaint && (
         <Suspense
@@ -901,7 +931,8 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             containerOverlayImage={paintContainerOverlay}
             contentOverlayImage={paintContentOverlay}
             hasContainer={paintHasContainer || hasIconContainer}
-            innerDrawSize={logoPaintInnerDrawSize(effectiveIcon, 512)}
+            innerDrawSize={logoPaintContentDrawSize(effectiveIcon, 512)}
+            paintOuterSize={logoPaintInnerDrawSize(effectiveIcon, 512)}
             outerBorderWidthPx={
               (effectiveIcon.containerBorderWidth ?? 0) *
               (logoPaintInnerDrawSize(effectiveIcon, 512) /
@@ -911,7 +942,13 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             outerShadowColor={effectiveIcon.shadowColor}
             outerFillColor={effectiveIcon.containerColor}
             initialVectors={paintVectors}
+            initialPunchMasks={paintPunchMasks}
             initialLayerOrder={paintLayerOrder}
+            initialPaintShapeSize={
+              (isSyncedWithFavicon
+                ? matchingFaviconVariant?.config?.paintSession
+                : effectiveIcon.paintSession)?.paintShapeSize
+            }
             outsideContentSettings={paintOutsideContent}
             syncOuterFillColor={(effectiveIcon.containerType ?? 'color') !== 'image'}
             title={isSyncedWithFavicon ? 'Edit icon (choose variants to save)' : 'Edit logo icon'}
@@ -1062,11 +1099,9 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             }
           >
             <div
-              className="rounded-xl shadow-2xl"
+              className="rounded-xl shadow-2xl overflow-hidden"
               style={{
-                background: safeConfig.transparentBg
-                  ? 'repeating-conic-gradient(#2d2d42 0% 25%, #1a1a24 0% 50%) 0 0 / 16px 16px'
-                  : undefined
+                background: 'repeating-conic-gradient(#2d2d42 0% 25%, #1a1a24 0% 50%) 0 0 / 16px 16px'
               }}
             >
               <canvas ref={canvasRef} style={{ display: 'block' }} />
@@ -1414,11 +1449,13 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                       imageDataUrl={safeConfig.icon.imageDataUrl ?? ''}
                       imageSizeRatio={safeConfig.icon.imageSizeRatio ?? 0.8}
                       onImageChange={async (v) => {
+                        const gen = ++imageChangeGen.current
                         if (!v) {
-                          setIcon({ imageDataUrl: '', ...emptyImageRecolorFields() })
+                          setIcon(clearIconUploadedImage(safeConfig.icon))
                           return
                         }
                         const paletteFields = await recolorFieldsAfterImageChange(v, safeConfig.icon)
+                        if (gen !== imageChangeGen.current) return
                         setIcon({ imageDataUrl: v, ...paletteFields })
                       }}
                       onSizeChange={(v) => setIcon({ imageSizeRatio: v })}
@@ -1727,6 +1764,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
         </div>
       </div>
     </div>
+    </TransparentFillModeContext.Provider>
   )
 }
 
@@ -1795,6 +1833,7 @@ export function resolveLogoEffectiveIcon(
 }
 
 export function faviconContentToIconConfig(content: FaviconContent, base: IconConfig, faviconCfg?: FaviconConfig): IconConfig {
+  const renderType = resolveFaviconDrawType(content)
   const sourceMap: Record<string, IconConfig['sourceType']> = {
     letters: 'letters',
     shape: 'shape',
@@ -1871,20 +1910,20 @@ export function faviconContentToIconConfig(content: FaviconContent, base: IconCo
 
   return {
     ...base,
-    sourceType: (sourceMap[content.type] ?? 'shape') as IconConfig['sourceType'],
+    sourceType: (sourceMap[renderType] ?? 'shape') as IconConfig['sourceType'],
+    canvaMode: content.type === 'canva',
     shape: content.shape,
-    primaryColor: content.type === 'lucide' ? content.lucideColor
-      : content.type === 'svg-markup' ? content.lucideColor
-      : content.type === 'svg' ? content.svgColor
-      : content.type === 'shape' ? content.shapeColor
-      : content.type === 'letters' ? content.textColor
-      : content.type === 'canva' ? content.canvaPrimaryColor
+    primaryColor: renderType === 'lucide' ? content.lucideColor
+      : renderType === 'svg-markup' ? content.lucideColor
+      : renderType === 'svg' ? content.svgColor
+      : renderType === 'shape' ? content.shapeColor
+      : renderType === 'letters' ? content.textColor
       : base.primaryColor,
     lucideIconName: content.lucideIconName,
     lucideStrokeWidth: content.lucideStrokeWidth,
     lucideSizeRatio: content.lucideSizeRatio ?? 0.6,
-    svgMarkup: content.type === 'svg-markup' ? content.svgMarkup
-      : content.type === 'svg'
+    svgMarkup: renderType === 'svg-markup' ? content.svgMarkup
+      : renderType === 'svg'
         ? wrapSvgPath(content.svgPath ?? '', content.svgColor ?? base.primaryColor ?? '#ffffff')
         : base.svgMarkup,
     svgMarkupSizeRatio: content.svgMarkupSizeRatio ?? 0.7,
@@ -1895,8 +1934,8 @@ export function faviconContentToIconConfig(content: FaviconContent, base: IconCo
     svgMarkupColor5: content.svgMarkupColor5 ?? '',
     shapeSizeRatio: content.shapeSizeRatio ?? 0.5,
     shapeBorderRadius: Math.round((content.shapeBorderRadius ?? 0) * base.size / 256),
-    text: content.type === 'canva' ? ' ' : content.text,
-    textColor: content.type === 'canva' ? content.canvaPrimaryColor : content.textColor,
+    text: content.text,
+    textColor: content.textColor,
     fontFamily: content.fontFamily,
     fontWeight: content.fontWeight,
     fontItalic: content.fontItalic ?? false,
@@ -1981,7 +2020,16 @@ function IconImageUpload({ imageDataUrl, imageSizeRatio, onImageChange, onSizeCh
       {imageDataUrl ? (
         <div className="relative group">
           <img src={imageDataUrl} alt="Icon" className="w-full h-16 object-contain rounded-lg bg-surface3 border border-border" />
-          <button onClick={() => onImageChange('')} className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><X size={10} /></button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              if (fileInputRef.current) fileInputRef.current.value = ''
+              onImageChange('')
+            }}
+            className="absolute top-1 right-1 w-5 h-5 rounded-full bg-black/60 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+          ><X size={10} /></button>
         </div>
       ) : (
         <div onClick={() => fileInputRef.current?.click()} className="flex flex-col items-center justify-center gap-1.5 h-16 rounded-lg border-2 border-dashed border-border hover:border-accent/50 hover:bg-surface3 cursor-pointer transition-colors">
@@ -2032,7 +2080,16 @@ function ContainerImageUpload({ imageDataUrl, onChange }: ContainerImageUploadPr
       {imageDataUrl && (
         <div className="flex items-center gap-2">
           <img src={imageDataUrl} className="w-10 h-10 rounded object-cover border border-border" />
-          <button onClick={() => onChange('')} className="text-xs text-muted hover:text-red-400 transition-colors">Remove</button>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.preventDefault()
+              e.stopPropagation()
+              if (fileInputRef.current) fileInputRef.current.value = ''
+              onChange('')
+            }}
+            className="text-xs text-muted hover:text-red-400 transition-colors"
+          >Remove</button>
         </div>
       )}
       {imageDataUrl && <RemoveBgButton imageDataUrl={imageDataUrl} onResult={onChange} />}

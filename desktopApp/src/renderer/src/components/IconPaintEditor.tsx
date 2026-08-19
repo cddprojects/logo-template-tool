@@ -10,7 +10,7 @@ import {
 import { FONT_FAMILY_GROUPS, FONT_WEIGHTS } from '../types'
 import type { PaintSaveResult, PaintVector, PaintLayerId, PaintSaveTargets, PaintVariantOption, OutsideTextSettings, OutsideContentSettings } from '../types'
 import { loadFont } from '../utils/fontLoader'
-import { ColorPickerPopup, isGradientColor, firstSolidColor } from './Controls'
+import { ColorPickerPopup, isGradientColor, firstSolidColor, TransparentFillModeContext, TransparentFillToggle } from './Controls'
 import { resolveCanvasColor, roundedRect, measureSpacedText, fillSpacedText, strokeSpacedText } from '../utils/renderer'
 import { removeImageBackground, applySvgColor, drawSvgOnCanvas, renderLucideToSvg } from '../utils/iconUtils'
 import { PreviewStage } from './PreviewStage'
@@ -28,7 +28,14 @@ import {
   stripContentProxyVectors
 } from '../utils/paintSettingsSync'
 import { bakeCanvasDropShadow } from '../utils/paintVectorRender'
-import { reuseCanvas, takeCanvas, releaseCanvas, reset2dState } from '../utils/canvasPool'
+import {
+  drawImageAxisRect,
+  drawImageHomographyQuad,
+  quadIsAxisAlignedRect,
+  reshapeIsApplied,
+  reshapeQuadMatchesSource
+} from '../utils/paintReshape'
+import { reuseCanvas, takeCanvas, releaseCanvas, reset2dState, ensureCanvas } from '../utils/canvasPool'
 
 type Tool = 'pointer' | 'brush' | 'eraser' | 'fill' | 'eyedropper' | 'line' | 'shape' | 'freepoly' | 'polygon' | 'select' | 'text' | 'reshape'
 
@@ -255,17 +262,27 @@ interface IconPaintEditorProps {
   /** Working resolution (square). */
   resolution?: number
   /**
-   * Inner drawable area at paint resolution (smaller than resolution when outer
-   * shadow insets the shape). Used for content size ratios vs the outer shape.
+   * Inner content box at paint resolution (outer-shadow inset, then container
+   * padding). Used for letters / contentBound / library stamp size ratios.
    */
   innerDrawSize?: number
+  /**
+   * Outer-shape size at paint resolution (shadow inset only, no content pad).
+   * Saved as paintShapeSize so preview crops decorations onto the container.
+   * Defaults to innerDrawSize when the content box is the full outer shape.
+   */
+  paintOuterSize?: number
   title?: string
   /** Whether the icon actually has an outer shape / container to edit. */
   hasContainer?: boolean
   /** Restore session vectors when reopening an editable paint session. */
   initialVectors?: PaintVector[]
+  /** Saved punch-through silhouettes so reopen / Save keep the same holes. */
+  initialPunchMasks?: { layer: PaintLayerId; png: string }[]
   /** Restore paint-layer stacking order (topmost first). */
   initialLayerOrder?: PaintLayerId[]
+  /** Outer-shape size at last Save — rescale stamps if the container inset changed. */
+  initialPaintShapeSize?: number
   /**
    * Live Inner settings from outside Paint (letters → linked text; other types
    * → contentBound stamp for move/resize/shadow).
@@ -398,10 +415,222 @@ interface LineObj {
   reshapeQuad?: Pt[]
   /** Quad at reshape init — used for symmetric snap distances. */
   reshapeBaseQuad?: Pt[]
+  /** Transparent fill cuts a hole through every layer below this object. */
+  punchThrough?: boolean
+  /** Invisible flood-fill mask used only for punch-through compositing. */
+  punchMask?: boolean
 }
 
 /** Cache decoded stamp images so undo/redo redraws stay sync after the first load. */
 const stampImgCache = new Map<string, HTMLImageElement>()
+/** Sync punch-mask bitmaps so dest-out does not wait on image decode. */
+const punchMaskCanvases = new Map<string, HTMLCanvasElement>()
+/** Exact flood-fill hole bits (W*H) for punch-through dest-out. */
+const punchMaskBits = new Map<string, Uint8Array>()
+
+function mergePunchBits(prev: Uint8Array | undefined, region: Uint8Array): Uint8Array {
+  if (!prev || prev.length !== region.length) return region.slice()
+  const merged = prev.slice()
+  for (let i = 0; i < region.length; i++) {
+    if (region[i]) merged[i] = 1
+  }
+  return merged
+}
+
+function clonePunchBitsMap(): Record<string, Uint8Array> {
+  const out: Record<string, Uint8Array> = {}
+  for (const [id, bits] of punchMaskBits) out[id] = bits.slice()
+  return out
+}
+
+function punchBitsEqual(a?: Uint8Array, b?: Uint8Array): boolean {
+  if (a === b) return true
+  if (!a || !b || a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+function bitsFromAlpha(data: Uint8ClampedArray, w: number, h: number): Uint8Array {
+  const bits = new Uint8Array(w * h)
+  const n = Math.min(bits.length, (data.length / 4) | 0)
+  for (let p = 0; p < n; p++) {
+    if (data[p * 4 + 3] > 8) bits[p] = 1
+  }
+  return bits
+}
+
+function loadPaintImage(src: string): Promise<HTMLImageElement | null> {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => resolve(img)
+    img.onerror = () => resolve(null)
+    img.src = src
+  })
+}
+
+function punchStampFromFilled(
+  filled: Uint8Array,
+  layerId: PaintLayerId,
+  W: number,
+  H: number
+): LineObj | null {
+  let minX = W, minY = H, maxX = -1, maxY = -1
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (!filled[y * W + x]) continue
+      if (x < minX) minX = x
+      if (y < minY) minY = y
+      if (x > maxX) maxX = x
+      if (y > maxY) maxY = y
+    }
+  }
+  if (maxX < minX || maxY < minY) return null
+  const bw = maxX - minX + 1
+  const bh = maxY - minY + 1
+  // 1px-thin remnants read as a "-" on the canvas after punch/see-through.
+  if (Math.min(bw, bh) <= 1 && Math.max(bw, bh) >= 8) return null
+  const canvas = document.createElement('canvas')
+  canvas.width = bw
+  canvas.height = bh
+  const img = canvas.getContext('2d')!.createImageData(bw, bh)
+  const d = img.data
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      if (!filled[y * W + x]) continue
+      const i = ((y - minY) * bw + (x - minX)) * 4
+      d[i] = 255
+      d[i + 1] = 255
+      d[i + 2] = 255
+      d[i + 3] = 255
+    }
+  }
+  canvas.getContext('2d')!.putImageData(img, 0, 0)
+  const dataUrl = canvas.toDataURL('image/png')
+  const id = genId()
+  punchMaskCanvases.set(id, canvas)
+  ensureStampImage(dataUrl)
+  return {
+    id,
+    type: 'stamp',
+    pts: [{ x: minX, y: minY }, { x: minX + bw, y: minY + bh }],
+    startCap: 'none',
+    endCap: 'none',
+    dash: 'solid',
+    thickness: 0,
+    color: '#00000000',
+    fill: true,
+    punchThrough: true,
+    punchMask: true,
+    imageDataUrl: dataUrl,
+    stampSource: 'image',
+    visible: true,
+    layer: layerId
+  }
+}
+
+async function restorePunchMasks(
+  lines: LineObj[],
+  masks: { layer: PaintLayerId; png: string }[] | undefined,
+  W: number,
+  H: number
+): Promise<LineObj[]> {
+  const next = [...lines]
+  const layerBits = new Map<PaintLayerId, Uint8Array>()
+  for (const m of masks ?? []) {
+    const img = await loadPaintImage(m.png)
+    if (!img) continue
+    const c = document.createElement('canvas')
+    c.width = W
+    c.height = H
+    const x = c.getContext('2d')!
+    x.drawImage(img, 0, 0, W, H)
+    layerBits.set(m.layer, bitsFromAlpha(x.getImageData(0, 0, W, H).data, W, H))
+  }
+
+  for (const l of next) {
+    if (l.type === 'stamp' && l.punchMask && l.imageDataUrl && l.pts.length >= 2) {
+      const img = await loadPaintImage(l.imageDataUrl)
+      if (!img) continue
+      const a = l.pts[0]
+      const b = l.pts[1]
+      const x = Math.min(a.x, b.x)
+      const y = Math.min(a.y, b.y)
+      const w = Math.max(1, Math.abs(b.x - a.x))
+      const h = Math.max(1, Math.abs(b.y - a.y))
+      const c = document.createElement('canvas')
+      c.width = w
+      c.height = h
+      c.getContext('2d')!.drawImage(img, 0, 0, w, h)
+      punchMaskCanvases.set(l.id, c)
+      ensureStampImage(l.imageDataUrl)
+      continue
+    }
+    if (l.punchThrough && !punchMaskCanvases.has(l.id)) {
+      const bits = layerBits.get((l.layer ?? 'content') as PaintLayerId)
+      if (bits) setLocalPunchFromFilled(l, bits, W, H)
+    }
+  }
+
+  for (const [layer, bits] of layerBits) {
+    const hasOp = next.some((l) =>
+      (l.layer ?? 'content') === layer &&
+      (l.punchMask || (l.punchThrough && punchMaskBits.has(l.id)))
+    )
+    if (hasOp) continue
+    const stamp = punchStampFromFilled(bits, layer, W, H)
+    if (stamp) next.push(stamp)
+  }
+  return next
+}
+
+function destOutFilledMask(
+  ctx: CanvasRenderingContext2D,
+  filled: Uint8Array,
+  w: number,
+  h: number
+): void {
+  let minX = w
+  let minY = h
+  let maxX = -1
+  let maxY = -1
+  const n = Math.min(filled.length, w * h)
+  for (let p = 0; p < n; p++) {
+    if (!filled[p]) continue
+    const x = p % w
+    const y = (p / w) | 0
+    if (x < minX) minX = x
+    if (y < minY) minY = y
+    if (x > maxX) maxX = x
+    if (y > maxY) maxY = y
+  }
+  if (maxX < minX) return
+  const bw = maxX - minX + 1
+  const bh = maxY - minY + 1
+  const mask = takeCanvas(bw, bh)
+  try {
+    const mctx = mask.getContext('2d')!
+    const img = mctx.createImageData(bw, bh)
+    const d = img.data
+    for (let y = minY; y <= maxY; y++) {
+      for (let x = minX; x <= maxX; x++) {
+        if (!filled[y * w + x]) continue
+        const i = ((y - minY) * bw + (x - minX)) * 4
+        d[i] = 255
+        d[i + 1] = 255
+        d[i + 2] = 255
+        d[i + 3] = 255
+      }
+    }
+    mctx.putImageData(img, 0, 0)
+    ctx.save()
+    ctx.globalCompositeOperation = 'destination-out'
+    ctx.imageSmoothingEnabled = false
+    ctx.drawImage(mask, minX, minY)
+    ctx.restore()
+  } finally {
+    releaseCanvas(mask)
+  }
+}
 const textOffSlot: { current: HTMLCanvasElement | null } = { current: null }
 const strokeScratchSlot: { current: HTMLCanvasElement | null } = { current: null }
 function ensureStampImage(dataUrl: string, onReady?: () => void): HTMLImageElement | null {
@@ -479,9 +708,53 @@ function floodFillConnected(
   return visited
 }
 
-function stampRenderDataUrl(l: LineObj, _width: number, _height: number): string {
+/** Empty pixels reachable from the canvas border (not enclosed holes). */
+function floodOutsideEmpty(ink: Uint8Array, w: number, h: number): Uint8Array {
+  const outside = new Uint8Array(w * h)
+  const stack: number[] = []
+  const tryPush = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= w || y >= h) return
+    const p = y * w + x
+    if (outside[p] || ink[p]) return
+    outside[p] = 1
+    stack.push(p)
+  }
+  for (let x = 0; x < w; x++) {
+    tryPush(x, 0)
+    tryPush(x, h - 1)
+  }
+  for (let y = 0; y < h; y++) {
+    tryPush(0, y)
+    tryPush(w - 1, y)
+  }
+  while (stack.length) {
+    const p = stack.pop()!
+    const x = p % w
+    const y = (p / w) | 0
+    tryPush(x + 1, y)
+    tryPush(x - 1, y)
+    tryPush(x, y + 1)
+    tryPush(x, y - 1)
+  }
+  return outside
+}
+
+function stampRenderDataUrl(l: LineObj, width: number, height: number): string {
   if (!l.keepStrokeOnResize || !l.sourceSvgMarkup || !l.sourceStampSize) {
     return l.imageDataUrl ?? ''
+  }
+  const dw = Math.max(1, Math.round(width))
+  const dh = Math.max(1, Math.round(height))
+  // Placement raster is already drawn at the authored size via drawSvgOnCanvas.
+  // Re-decoding the SVG as an <img> would use Lucide's intrinsic 100×100 (or
+  // viewBox-only 300×150) and bake a much thicker non-scaling stroke — that
+  // reads as a border once the 512 paint flatten is scaled onto a small logo.
+  if (
+    l.imageDataUrl &&
+    Math.abs(dw - l.sourceStampSize) < 1 &&
+    Math.abs(dh - l.sourceStampSize) < 1
+  ) {
+    return l.imageDataUrl
   }
   // A numeric inverse scale only preserves strokes while width and height scale
   // equally. Free corner-resizing is anisotropic, so horizontal and vertical
@@ -504,6 +777,14 @@ function stampRenderDataUrl(l: LineObj, _width: number, _height: number): string
     /<(path|line|polyline|polygon|circle|ellipse|rect)\b(?![^>]*\bvector-effect=)/gi,
     '<$1 vector-effect="non-scaling-stroke"'
   )
+  // Rasterize at the current box so non-scaling-stroke is in display pixels,
+  // not the SVG's tiny intrinsic size.
+  svg = svg.replace(/<svg([^>]*)>/i, (_match, attrs: string) => {
+    const cleaned = String(attrs)
+      .replace(/\s+width\s*=\s*["'][^"']*["']/gi, '')
+      .replace(/\s+height\s*=\s*["'][^"']*["']/gi, '')
+    return `<svg${cleaned} width="${dw}" height="${dh}">`
+  })
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
 }
 
@@ -648,6 +929,20 @@ function textInkBBox(l: LineObj): { x: number; y: number; w: number; h: number }
     y: inkTop,
     w: Math.max(1, inkRight - inkLeft),
     h: Math.max(1, inkBottom - inkTop)
+  }
+}
+
+function unionTextBounds(
+  a: { x: number; y: number; w: number; h: number },
+  b: { x: number; y: number; w: number; h: number }
+): { x: number; y: number; w: number; h: number } {
+  const x = Math.min(a.x, b.x)
+  const y = Math.min(a.y, b.y)
+  return {
+    x,
+    y,
+    w: Math.max(1, Math.max(a.x + a.w, b.x + b.w) - x),
+    h: Math.max(1, Math.max(a.y + a.h, b.y + b.h) - y)
   }
 }
 
@@ -859,206 +1154,7 @@ function applyReshapeCornerSnap(
   return { pt: { x: nx, y: ny }, verticalGuides, horizontalGuides, label }
 }
 
-function quadIsAxisAlignedRect(quad: Pt[], eps = 0.75): boolean {
-  const [tl, tr, br, bl] = quad
-  return (
-    Math.abs(tl.y - tr.y) < eps &&
-    Math.abs(bl.y - br.y) < eps &&
-    Math.abs(tl.x - bl.x) < eps &&
-    Math.abs(tr.x - br.x) < eps
-  )
-}
 
-function reshapeQuadMatchesSource(
-  quad: Pt[],
-  src: { x: number; y: number; w: number; h: number },
-  eps = 1.5
-): boolean {
-  return (
-    Math.abs(quad[0].x - src.x) < eps &&
-    Math.abs(quad[0].y - src.y) < eps &&
-    Math.abs(quad[1].x - (src.x + src.w)) < eps &&
-    Math.abs(quad[1].y - src.y) < eps &&
-    Math.abs(quad[2].x - (src.x + src.w)) < eps &&
-    Math.abs(quad[2].y - (src.y + src.h)) < eps &&
-    Math.abs(quad[3].x - src.x) < eps &&
-    Math.abs(quad[3].y - (src.y + src.h)) < eps
-  )
-}
-
-function drawImageAxisRect(
-  ctx: CanvasRenderingContext2D,
-  img: CanvasImageSource,
-  sx: number, sy: number, sw: number, sh: number,
-  quad: [Pt, Pt, Pt, Pt]
-): void {
-  const x = Math.min(quad[0].x, quad[3].x)
-  const y = Math.min(quad[0].y, quad[1].y)
-  const w = Math.max(1, Math.max(quad[1].x, quad[2].x) - x)
-  const h = Math.max(1, Math.max(quad[2].y, quad[3].y) - y)
-  ctx.imageSmoothingEnabled = true
-  ctx.imageSmoothingQuality = 'high'
-  ctx.drawImage(img, sx, sy, sw, sh, x, y, w, h)
-}
-
-function homographyUnitSquareToQuad(quad: [Pt, Pt, Pt, Pt]): number[] {
-  const x0 = quad[0].x
-  const y0 = quad[0].y
-  const x1 = quad[1].x
-  const y1 = quad[1].y
-  const x2 = quad[2].x
-  const y2 = quad[2].y
-  const x3 = quad[3].x
-  const y3 = quad[3].y
-  const dx3 = x0 - x1 + x2 - x3
-  const dy3 = y0 - y1 + y2 - y3
-  let h20 = 0
-  let h21 = 0
-  if (Math.abs(dx3) > 1e-8 || Math.abs(dy3) > 1e-8) {
-    const dx1 = x1 - x2
-    const dy1 = y1 - y2
-    const dx2 = x3 - x2
-    const dy2 = y3 - y2
-    const denom = dx1 * dy2 - dx2 * dy1
-    if (Math.abs(denom) > 1e-12) {
-      h20 = (dx3 * dy2 - dx2 * dy3) / denom
-      h21 = (dx1 * dy3 - dx3 * dy1) / denom
-    }
-  }
-  return [
-    x1 - x0 + h20 * x1,
-    x3 - x0 + h21 * x3,
-    x0,
-    y1 - y0 + h20 * y1,
-    y3 - y0 + h21 * y3,
-    y0,
-    h20,
-    h21,
-    1
-  ]
-}
-
-function invert3x3(m: number[]): number[] | null {
-  const [a, b, c, d, e, f, g, h, i] = m
-  const A = e * i - f * h
-  const B = -(d * i - f * g)
-  const C = d * h - e * g
-  const D = -(b * i - c * h)
-  const E = a * i - c * g
-  const F = -(a * h - b * g)
-  const G = b * f - c * e
-  const H = -(a * f - c * d)
-  const I = a * e - b * d
-  const det = a * A + b * B + c * C
-  if (Math.abs(det) < 1e-12) return null
-  const invDet = 1 / det
-  return [
-    A * invDet, D * invDet, G * invDet,
-    B * invDet, E * invDet, H * invDet,
-    C * invDet, F * invDet, I * invDet
-  ]
-}
-
-function applyHomography(H: number[], x: number, y: number): Pt {
-  const w = H[6] * x + H[7] * y + H[8]
-  if (Math.abs(w) < 1e-12) return { x: 0, y: 0 }
-  return {
-    x: (H[0] * x + H[1] * y + H[2]) / w,
-    y: (H[3] * x + H[4] * y + H[5]) / w
-  }
-}
-
-function sampleBilinear(
-  data: Uint8ClampedArray,
-  w: number,
-  h: number,
-  fx: number,
-  fy: number
-): [number, number, number, number] {
-  const x = Math.max(0, Math.min(w - 1.001, fx))
-  const y = Math.max(0, Math.min(h - 1.001, fy))
-  const x0 = Math.floor(x)
-  const y0 = Math.floor(y)
-  const x1 = Math.min(w - 1, x0 + 1)
-  const y1 = Math.min(h - 1, y0 + 1)
-  const tx = x - x0
-  const ty = y - y0
-  const i00 = (y0 * w + x0) * 4
-  const i10 = (y0 * w + x1) * 4
-  const i01 = (y1 * w + x0) * 4
-  const i11 = (y1 * w + x1) * 4
-  const out: [number, number, number, number] = [0, 0, 0, 0]
-  for (let c = 0; c < 4; c++) {
-    const v00 = data[i00 + c]
-    const v10 = data[i10 + c]
-    const v01 = data[i01 + c]
-    const v11 = data[i11 + c]
-    out[c] = Math.round(
-      v00 * (1 - tx) * (1 - ty) +
-      v10 * tx * (1 - ty) +
-      v01 * (1 - tx) * ty +
-      v11 * tx * ty
-    )
-  }
-  return out
-}
-
-/** Seamless projective quad warp — no triangle-mesh seam lines. */
-function drawImageHomographyQuad(
-  ctx: CanvasRenderingContext2D,
-  img: CanvasImageSource,
-  sx: number,
-  sy: number,
-  sw: number,
-  sh: number,
-  quad: [Pt, Pt, Pt, Pt]
-): void {
-  const swi = Math.max(1, Math.ceil(sw))
-  const shi = Math.max(1, Math.ceil(sh))
-  const srcCanvas = document.createElement('canvas')
-  srcCanvas.width = swi
-  srcCanvas.height = shi
-  const sctx = srcCanvas.getContext('2d')!
-  sctx.imageSmoothingEnabled = true
-  sctx.imageSmoothingQuality = 'high'
-  sctx.drawImage(img, sx, sy, sw, sh, 0, 0, swi, shi)
-  const srcData = sctx.getImageData(0, 0, swi, shi).data
-
-  const H = homographyUnitSquareToQuad(quad)
-  const Hinv = invert3x3(H)
-  if (!Hinv) {
-    drawImageAxisRect(ctx, img, sx, sy, sw, sh, quad)
-    return
-  }
-
-  const xs = quad.map((p) => p.x)
-  const ys = quad.map((p) => p.y)
-  const minX = Math.max(0, Math.floor(Math.min(...xs)))
-  const minY = Math.max(0, Math.floor(Math.min(...ys)))
-  const maxX = Math.min(ctx.canvas.width, Math.ceil(Math.max(...xs)))
-  const maxY = Math.min(ctx.canvas.height, Math.ceil(Math.max(...ys)))
-  const dw = maxX - minX
-  const dh = maxY - minY
-  if (dw <= 0 || dh <= 0) return
-
-  const out = ctx.createImageData(dw, dh)
-  const outData = out.data
-  for (let py = 0; py < dh; py++) {
-    const y = minY + py
-    for (let px = 0; px < dw; px++) {
-      const x = minX + px
-      const uv = applyHomography(Hinv, x, y)
-      if (uv.x < 0 || uv.x > 1 || uv.y < 0 || uv.y > 1) continue
-      const rgba = sampleBilinear(srcData, swi, shi, uv.x * (swi - 1), uv.y * (shi - 1))
-      const oi = (py * dw + px) * 4
-      outData[oi] = rgba[0]
-      outData[oi + 1] = rgba[1]
-      outData[oi + 2] = rgba[2]
-      outData[oi + 3] = rgba[3]
-    }
-  }
-  ctx.putImageData(out, minX, minY)
-}
 
 function resolveReshapeSource(
   temp: HTMLCanvasElement,
@@ -1246,8 +1342,7 @@ function lineFromOutsideText(
 ): LineObj {
   const drawArea = Math.max(1, innerDrawSize)
   const fontSize = Math.max(4, Math.round(drawArea * (settings.fontSizeRatio ?? 0.52)))
-  // Favicon renderer scales letterSpacing by areaSize/256; paint uses full resolution.
-  const letterSpacing = (settings.letterSpacing ?? 0) * (resolution / 256)
+  const letterSpacing = (settings.letterSpacing ?? 0) * (drawArea / 256)
   const weight = parseFontWeightNum(settings.fontWeight)
   const off = outsideOffsetToPaint(settings, resolution)
   const shadow = outsideShadowToPaint(settings, resolution, innerDrawSize)
@@ -1321,7 +1416,7 @@ function applyOutsideTextToLine(
 ): LineObj {
   const drawArea = Math.max(1, innerDrawSize)
   const fontSize = Math.max(4, Math.round(drawArea * (settings.fontSizeRatio ?? 0.52)))
-  const letterSpacing = (settings.letterSpacing ?? 0) * (resolution / 256)
+  const letterSpacing = (settings.letterSpacing ?? 0) * (drawArea / 256)
   const weight = parseFontWeightNum(settings.fontWeight)
   const off = outsideOffsetToPaint(settings, resolution)
   const shadow = outsideShadowToPaint(settings, resolution, innerDrawSize)
@@ -1343,6 +1438,36 @@ function applyOutsideTextToLine(
     next.pts = [opticalTopLeftForText(next, resolution / 2 + off.x, resolution / 2 + off.y)]
   }
   return next
+}
+
+/** Scale a paint object around the canvas center (icon Size / Size % after Save). */
+function scalePaintLineAround(l: LineObj, cx: number, cy: number, s: number): LineObj {
+  if (!Number.isFinite(s) || Math.abs(s - 1) < 0.001) return l
+  const map = (p: Pt): Pt => ({ x: cx + (p.x - cx) * s, y: cy + (p.y - cy) * s })
+  const scaleN = (n: number | undefined) => (n == null ? undefined : n * s)
+  return {
+    ...l,
+    pts: l.pts.map(map),
+    fontSize: scaleN(l.fontSize),
+    thickness: l.thickness * s,
+    borderWidth: scaleN(l.borderWidth),
+    letterSpacing: scaleN(l.letterSpacing),
+    shadowBlur: scaleN(l.shadowBlur),
+    shadowSpread: scaleN(l.shadowSpread),
+    shadowOffsetX: scaleN(l.shadowOffsetX),
+    shadowOffsetY: scaleN(l.shadowOffsetY),
+    sourceStampSize: scaleN(l.sourceStampSize),
+    reshapeQuad: l.reshapeQuad?.map(map),
+    reshapeBaseQuad: l.reshapeBaseQuad?.map(map),
+    reshapeSrc: l.reshapeSrc
+      ? {
+          x: cx + (l.reshapeSrc.x - cx) * s,
+          y: cy + (l.reshapeSrc.y - cy) * s,
+          w: l.reshapeSrc.w * s,
+          h: l.reshapeSrc.h * s
+        }
+      : l.reshapeSrc
+  }
 }
 
 /** Stamp proxy for non-letter Inner content (move / resize / shadow in Paint). */
@@ -1433,7 +1558,7 @@ function renderText(ctx: CanvasRenderingContext2D, l: LineObj): void {
   const { lineH } = textMetrics(l)
   const spacing = l.letterSpacing ?? 0
   const font = textFontStr(l)
-  const b = textBBox(l)
+  const b = unionTextBounds(textBBox(l), textInkBBox(l))
 
   const drawGlyphs = (target: CanvasRenderingContext2D, ox: number, oy: number, fillStyle: string | CanvasGradient) => {
     target.font = font
@@ -1443,8 +1568,11 @@ function renderText(ctx: CanvasRenderingContext2D, l: LineObj): void {
     rows.forEach((r, i) => { if (r) fillSpacedText(target, r, p.x + ox, p.y + i * lineH + oy, spacing) })
   }
 
-  if (!l.shadow) {
-    drawGlyphs(ctx, 0, 0, resolveCanvasColor(ctx, l.color, b.x, b.y, Math.max(1, b.w), Math.max(1, b.h)))
+  const hideFill = isTransparentPaintColor(l.color)
+  if (!shouldDrawObjectShadow(l)) {
+    if (!hideFill) {
+      drawGlyphs(ctx, 0, 0, resolveCanvasColor(ctx, l.color, b.x, b.y, Math.max(1, b.w), Math.max(1, b.h)))
+    }
     return
   }
 
@@ -1452,28 +1580,30 @@ function renderText(ctx: CanvasRenderingContext2D, l: LineObj): void {
   const sox = l.shadowOffsetX ?? 0
   const soy = l.shadowOffsetY ?? 0
   const spread = l.shadowSpread ?? 0
-  const padL = Math.ceil(Math.max(0, blur * 2 + spread - sox) + 4)
-  const padR = Math.ceil(Math.max(0, blur * 2 + spread + sox) + 4)
-  const padT = Math.ceil(Math.max(0, blur * 2 + spread - soy) + 4)
-  const padB = Math.ceil(Math.max(0, blur * 2 + spread + soy) + 4)
-  const tw = Math.max(1, Math.ceil(b.w) + padL + padR)
-  const th = Math.max(1, Math.ceil(b.h) + padT + padB)
+  const pad = 8
+  const tw = Math.max(1, Math.ceil(b.w) + pad * 2)
+  const th = Math.max(1, Math.ceil(b.h) + pad * 2)
   const off = reuseCanvas(textOffSlot, tw, th)
   const o = off.getContext('2d')!
+  // Whole-object see-through hides the glyphs; bake the drop-shadow from an
+  // opaque silhouette so the hole does not take the shadow with it.
   drawGlyphs(
     o,
-    -b.x + padL,
-    -b.y + padT,
-    resolveCanvasColor(o, l.color, padL, padT, Math.max(1, b.w), Math.max(1, b.h))
+    -b.x + pad,
+    -b.y + pad,
+    hideFill
+      ? '#000000'
+      : resolveCanvasColor(o, l.color, pad, pad, Math.max(1, b.w), Math.max(1, b.h))
   )
-  const src = bakeCanvasDropShadow(off, {
+  const baked = bakeCanvasDropShadow(off, {
     blur,
     ox: sox,
     oy: soy,
     spread,
-    color: l.shadowColor ?? '#00000080'
+    color: l.shadowColor ?? '#00000080',
+    shadowOnly: hideFill
   })
-  ctx.drawImage(src, b.x - padL, b.y - padT)
+  ctx.drawImage(baked.canvas, b.x - pad - baked.inset, b.y - pad - baked.inset)
 }
 
 // Sample a line into a flat polyline for rendering / hit-testing.
@@ -1512,23 +1642,52 @@ function flattenLine(l: LineObj): Pt[] {
 }
 
 /** Sample whether a canvas point hits the glyph ink, its shadow, or neither. */
+function sampleLineAlphaAt(l: LineObj, x: number, y: number, withShadow: boolean): number {
+  const pad = withShadow
+    ? Math.max(8, Math.ceil((l.shadowBlur ?? 0) * 3 + (l.shadowSpread ?? 0) + Math.abs(l.shadowOffsetX ?? 0) + Math.abs(l.shadowOffsetY ?? 0) + 16))
+    : 1
+  const side = pad * 2 + 1
+  const c = takeCanvas(side, side)
+  try {
+    const ctx = c.getContext('2d')
+    if (!ctx) return 0
+    ctx.setTransform(1, 0, 0, 1, -x + pad, -y + pad)
+    renderLine(ctx, withShadow ? l : { ...l, shadow: false })
+    return ctx.getImageData(pad, pad, 1, 1).data[3]
+  } finally {
+    releaseCanvas(c)
+  }
+}
+
 function textFillHit(l: LineObj, canvasPt: Pt, canvasW: number, canvasH: number): 'glyph' | 'shadow' | null {
   if (l.type !== 'text' || !l.text) return null
   const w = Math.max(1, Math.ceil(canvasW))
   const h = Math.max(1, Math.ceil(canvasH))
   const x = Math.max(0, Math.min(w - 1, Math.floor(canvasPt.x)))
   const y = Math.max(0, Math.min(h - 1, Math.floor(canvasPt.y)))
-  const sample = (withShadow: boolean): number => {
-    const c = document.createElement('canvas')
-    c.width = w
-    c.height = h
-    const ctx = c.getContext('2d')
-    if (!ctx) return 0
-    renderLineBase(ctx, withShadow ? l : { ...l, shadow: false })
-    return ctx.getImageData(x, y, 1, 1).data[3]
+  if (sampleLineAlphaAt(l, x, y, false) > 12) return 'glyph'
+  if (l.shadow && sampleLineAlphaAt(l, x, y, true) > 12) return 'shadow'
+  return null
+}
+
+/** Fill vs live drop-shadow for stamps / shapes (same idea as textFillHit). */
+function paintObjectHit(
+  l: LineObj,
+  canvasPt: Pt,
+  canvasW: number,
+  canvasH: number
+): 'fill' | 'shadow' | null {
+  if (l.type === 'text') {
+    const hit = textFillHit(l, canvasPt, canvasW, canvasH)
+    return hit === 'glyph' ? 'fill' : hit
   }
-  if (sample(false) > 12) return 'glyph'
-  if (l.shadow && sample(true) > 12) return 'shadow'
+  if (l.type !== 'stamp' && l.type !== 'shape' && l.type !== 'poly') return null
+  const w = Math.max(1, Math.ceil(canvasW))
+  const h = Math.max(1, Math.ceil(canvasH))
+  const x = Math.max(0, Math.min(w - 1, Math.floor(canvasPt.x)))
+  const y = Math.max(0, Math.min(h - 1, Math.floor(canvasPt.y)))
+  if (sampleLineAlphaAt(l, x, y, false) > 12) return 'fill'
+  if (l.shadow && sampleLineAlphaAt(l, x, y, true) > 12) return 'shadow'
   return null
 }
 
@@ -1781,55 +1940,295 @@ function renderLineBase(ctx: CanvasRenderingContext2D, l: LineObj): void {
   renderLineBody(ctx, l)
 }
 
-function renderLine(ctx: CanvasRenderingContext2D, l: LineObj): void {
-  if (l.reshapeQuad?.length === 4) {
-    renderLineWithReshape(ctx, l)
-    return
+function punchLocalBox(l: LineObj): { x: number; y: number; w: number; h: number } | null {
+  if (l.type === 'text') {
+    const b = textInkBBox(l)
+    return b.w > 0 && b.h > 0 ? b : null
   }
-  const supportsObjectPaint = (l.type === 'shape' || l.type === 'stamp') && !!l.paintStrokes?.length && l.pts.length >= 2
-  if (!supportsObjectPaint) {
-    renderLineBase(ctx, l)
-    return
-  }
-  // Composite this layer in isolation so destination-out eraser strokes never
-  // punch through layers below it.
-  const canvas = reuseCanvas(strokeScratchSlot, ctx.canvas.width, ctx.canvas.height)
-  const layerCtx = canvas.getContext('2d')!
-  renderLineBase(layerCtx, l)
-
+  if (l.pts.length < 2) return null
   const a = l.pts[0], b = l.pts[1]
-  const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
-  const w = Math.max(1, Math.abs(b.x - a.x)), h = Math.max(1, Math.abs(b.y - a.y))
-  const c = objCenter(l)
-  const rot = l.rot ?? 0
-  const sx = l.scaleX ?? 1
-  const sy = l.scaleY ?? 1
-  layerCtx.save()
-  if (lineNeedsDisplayTransform(l)) {
-    layerCtx.translate(c.x, c.y)
-    layerCtx.rotate(rot)
-    layerCtx.scale(sx, sy)
-    layerCtx.translate(-c.x, -c.y)
+  return {
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    w: Math.max(1, Math.abs(b.x - a.x)),
+    h: Math.max(1, Math.abs(b.y - a.y))
   }
-  for (const stroke of l.paintStrokes!) {
-    const points = stroke.pts.map((p) => ({ x: x + p.x * w, y: y + p.y * h }))
-    if (!points.length) continue
-    const brushSize = Math.max(0.5, stroke.size * Math.min(w, h))
-    if (points.length === 1) {
-      stampBrushTip(layerCtx, stroke.tip, points[0].x, points[0].y, brushSize, stroke.color, stroke.tool === 'eraser')
-      continue
+}
+
+function objectRenderPad(l: LineObj): number {
+  const stroke = Math.ceil(lineBorderWidth(l) / 2) + 2
+  if (!shouldDrawObjectShadow(l)) return Math.max(8, stroke)
+  return Math.ceil(
+    (l.shadowBlur ?? 0) * 3 +
+      (l.shadowSpread ?? 0) +
+      Math.abs(l.shadowOffsetX ?? 0) +
+      Math.abs(l.shadowOffsetY ?? 0) +
+      16 +
+      stroke
+  )
+}
+
+function objectRenderBox(l: LineObj, W: number, H: number): { x: number; y: number; w: number; h: number } {
+  const pad = objectRenderPad(l)
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  const add = (p: Pt) => {
+    const d = mapObjDisplayPt(p, l)
+    minX = Math.min(minX, d.x)
+    minY = Math.min(minY, d.y)
+    maxX = Math.max(maxX, d.x)
+    maxY = Math.max(maxY, d.y)
+  }
+  if (l.reshapeQuad?.length === 4) {
+    for (const p of l.reshapeQuad) add(p)
+  } else if (l.type === 'text') {
+    const b = textInkBBox(l)
+    add({ x: b.x, y: b.y })
+    add({ x: b.x + b.w, y: b.y })
+    add({ x: b.x + b.w, y: b.y + b.h })
+    add({ x: b.x, y: b.y + b.h })
+  } else if (l.pts.length >= 2) {
+    for (const p of l.pts) add(p)
+    const box = punchLocalBox(l)
+    if (box) {
+      add({ x: box.x, y: box.y })
+      add({ x: box.x + box.w, y: box.y })
+      add({ x: box.x + box.w, y: box.y + box.h })
+      add({ x: box.x, y: box.y + box.h })
     }
-    for (let i = 1; i < points.length; i++) {
-      strokeBrushTip(
-        layerCtx, stroke.tip,
-        points[i - 1].x, points[i - 1].y,
-        points[i].x, points[i].y,
-        brushSize, stroke.color, stroke.tool === 'eraser'
-      )
+  } else {
+    return { x: 0, y: 0, w: W, h: H }
+  }
+  if (!Number.isFinite(minX)) return { x: 0, y: 0, w: W, h: H }
+  const x = Math.max(0, Math.floor(minX) - pad)
+  const y = Math.max(0, Math.floor(minY) - pad)
+  const x1 = Math.min(W, Math.ceil(maxX) + pad)
+  const y1 = Math.min(H, Math.ceil(maxY) + pad)
+  return { x, y, w: Math.max(1, x1 - x), h: Math.max(1, y1 - y) }
+}
+
+function rewritePunchBitsFromLocal(item: LineObj, W: number, H: number): void {
+  const box = punchLocalBox(item)
+  const src = punchMaskCanvases.get(item.id)
+  if (!box || !src) return
+  const cw = src.width
+  const ch = src.height
+  const img = src.getContext('2d')!.getImageData(0, 0, cw, ch).data
+  const bits = new Uint8Array(W * H)
+  for (let ly = 0; ly < ch; ly++) {
+    for (let lx = 0; lx < cw; lx++) {
+      if (img[(ly * cw + lx) * 4 + 3] <= 8) continue
+      const local = {
+        x: box.x + ((lx + 0.5) * box.w) / cw,
+        y: box.y + ((ly + 0.5) * box.h) / ch
+      }
+      const display = mapObjDisplayPt(local, item)
+      const px = Math.floor(display.x)
+      const py = Math.floor(display.y)
+      if (px < 0 || py < 0 || px >= W || py >= H) continue
+      bits[py * W + px] = 1
     }
   }
-  layerCtx.restore()
-  ctx.drawImage(canvas, 0, 0)
+  punchMaskBits.set(item.id, bits)
+}
+
+function destOutLocalPunch(ctx: CanvasRenderingContext2D, item: LineObj): boolean {
+  const hasLocalHole = item.punchMask || item.punchThrough || punchMaskCanvases.has(item.id)
+  if (!hasLocalHole) return false
+  const box = punchLocalBox(item)
+  if (!box) return false
+  const sync = punchMaskCanvases.get(item.id)
+  const cached = item.punchMask && item.imageDataUrl ? stampImgCache.get(item.imageDataUrl) : null
+  const src = sync ?? (cached && cached.complete && cached.naturalWidth > 0 ? cached : null)
+  if (!src) return false
+  const paint = () => {
+    ctx.save()
+    ctx.imageSmoothingEnabled = false
+    ctx.globalCompositeOperation = 'destination-out'
+    ctx.drawImage(src, box.x, box.y, box.w, box.h)
+    ctx.restore()
+  }
+  if (lineNeedsDisplayTransform(item)) {
+    const c = objCenter(item)
+    ctx.save()
+    ctx.translate(c.x, c.y)
+    ctx.rotate(item.rot ?? 0)
+    ctx.scale(item.scaleX ?? 1, item.scaleY ?? 1)
+    ctx.translate(-c.x, -c.y)
+    paint()
+    ctx.restore()
+    return true
+  }
+  paint()
+  return true
+}
+
+function setLocalPunchFromFilled(item: LineObj, filled: Uint8Array, W: number, H: number): void {
+  const box = punchLocalBox(item)
+  if (!box) {
+    punchMaskBits.set(item.id, mergePunchBits(punchMaskBits.get(item.id), filled))
+    return
+  }
+  const cw = Math.max(1, Math.round(box.w))
+  const ch = Math.max(1, Math.round(box.h))
+  const canvas = document.createElement('canvas')
+  canvas.width = cw
+  canvas.height = ch
+  const ctx = canvas.getContext('2d')!
+  const prev = punchMaskCanvases.get(item.id)
+  if (prev) ctx.drawImage(prev, 0, 0, cw, ch)
+  const img = ctx.getImageData(0, 0, cw, ch)
+  const d = img.data
+  let minX = W, minY = H, maxX = -1, maxY = -1
+  for (let p = 0; p < filled.length; p++) {
+    if (!filled[p]) continue
+    const x = p % W
+    const y = (p / W) | 0
+    if (x < minX) minX = x
+    if (y < minY) minY = y
+    if (x > maxX) maxX = x
+    if (y > maxY) maxY = y
+  }
+  if (maxX >= minX) {
+    for (let py = minY; py <= maxY; py++) {
+      for (let px = minX; px <= maxX; px++) {
+        if (!filled[py * W + px]) continue
+        const local = unmapObjDisplayPt({ x: px + 0.5, y: py + 0.5 }, item)
+        const lx = Math.floor(((local.x - box.x) / box.w) * cw)
+        const ly = Math.floor(((local.y - box.y) / box.h) * ch)
+        if (lx < 0 || ly < 0 || lx >= cw || ly >= ch) continue
+        const i = (ly * cw + lx) * 4
+        d[i] = 255
+        d[i + 1] = 255
+        d[i + 2] = 255
+        d[i + 3] = 255
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0)
+  punchMaskCanvases.set(item.id, canvas)
+  rewritePunchBitsFromLocal(item, W, H)
+}
+
+function objectHasFillHole(l: LineObj): boolean {
+  if (l.punchMask) return false
+  return !!l.punchThrough || punchMaskCanvases.has(l.id) || punchMaskBits.has(l.id)
+}
+
+function destOutObjectPunch(ctx: CanvasRenderingContext2D, l: LineObj): void {
+  if (l.punchMask || !objectHasFillHole(l)) return
+  if (destOutLocalPunch(ctx, l)) return
+  // Canvas-fixed bits stay at the punch origin. After a move they leave a ghost
+  // of Outer fill between the object and its shadow. Local-box objects skip them.
+  if (punchLocalBox(l)) return
+  const bits = punchMaskBits.get(l.id)
+  if (!bits) return
+  destOutFilledMask(ctx, bits, ctx.canvas.width, ctx.canvas.height)
+}
+
+function renderLineBodyThenHole(ctx: CanvasRenderingContext2D, l: LineObj, drawBody: (c: CanvasRenderingContext2D) => void): void {
+  // `drawBody` paints fill / border / glyph with no drop-shadow.
+  const destW = ctx.canvas.width
+  const destH = ctx.canvas.height
+  const clip = objectRenderBox(l, destW, destH)
+  const bw = Math.max(16, Math.ceil(clip.w / 16) * 16)
+  const bh = Math.max(16, Math.ceil(clip.h / 16) * 16)
+  const paintClipped = (target: CanvasRenderingContext2D) => {
+    target.save()
+    target.translate(-clip.x, -clip.y)
+    drawBody(target)
+    target.restore()
+  }
+  if (shouldDrawObjectShadow(l)) {
+    const sil = takeCanvas(bw, bh)
+    try {
+      paintClipped(sil.getContext('2d')!)
+      const hole = objectHasFillHole(l)
+      const baked = bakeCanvasDropShadow(sil, {
+        blur: l.shadowBlur ?? 0,
+        ox: l.shadowOffsetX ?? 0,
+        oy: l.shadowOffsetY ?? 0,
+        spread: l.shadowSpread ?? 0,
+        color: l.shadowColor ?? '#00000080',
+        shadowOnly: hole
+      })
+      ctx.drawImage(baked.canvas, clip.x - baked.inset, clip.y - baked.inset)
+      if (!hole) return
+    } finally {
+      releaseCanvas(sil)
+    }
+    const body = takeCanvas(bw, bh)
+    try {
+      const bctx = body.getContext('2d')!
+      paintClipped(bctx)
+      bctx.save()
+      bctx.translate(-clip.x, -clip.y)
+      destOutObjectPunch(bctx, l)
+      bctx.restore()
+      ctx.drawImage(body, clip.x, clip.y)
+    } finally {
+      releaseCanvas(body)
+    }
+    return
+  }
+  drawBody(ctx)
+  destOutObjectPunch(ctx, l)
+}
+
+function renderLine(ctx: CanvasRenderingContext2D, l: LineObj, opts?: { skipHole?: boolean }): void {
+  // Punch-mask stamps are hole operators, not visible pixels.
+  if (l.punchMask) return
+  const paintBody = (c: CanvasRenderingContext2D) => {
+    const prevShadow = l.shadow
+    l.shadow = false
+    try {
+    if (l.reshapeQuad?.length === 4) {
+      renderLineWithReshape(c, l)
+      return
+    }
+    renderLineBase(c, l)
+    const supportsObjectPaint = (l.type === 'shape' || l.type === 'stamp') && !!l.paintStrokes?.length && l.pts.length >= 2
+    if (!supportsObjectPaint) return
+    const a = l.pts[0], b = l.pts[1]
+    const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
+    const w = Math.max(1, Math.abs(b.x - a.x)), h = Math.max(1, Math.abs(b.y - a.y))
+    c.save()
+    if (lineNeedsDisplayTransform(l)) {
+      const center = objCenter(l)
+      c.translate(center.x, center.y)
+      c.rotate(l.rot ?? 0)
+      c.scale(l.scaleX ?? 1, l.scaleY ?? 1)
+      c.translate(-center.x, -center.y)
+    }
+    for (const stroke of l.paintStrokes!) {
+      const points = stroke.pts.map((p) => ({ x: x + p.x * w, y: y + p.y * h }))
+      if (!points.length) continue
+      const brushSize = Math.max(0.5, stroke.size * Math.min(w, h))
+      if (points.length === 1) {
+        stampBrushTip(c, stroke.tip, points[0].x, points[0].y, brushSize, stroke.color, stroke.tool === 'eraser')
+        continue
+      }
+      for (let i = 1; i < points.length; i++) {
+        strokeBrushTip(
+          c, stroke.tip,
+          points[i - 1].x, points[i - 1].y,
+          points[i].x, points[i].y,
+          brushSize, stroke.color, stroke.tool === 'eraser'
+        )
+      }
+    }
+    c.restore()
+    } finally {
+      l.shadow = prevShadow
+    }
+  }
+  if (opts?.skipHole) {
+    paintBody(ctx)
+    return
+  }
+  renderLineBodyThenHole(ctx, l, paintBody)
 }
 
 function renderGroup(
@@ -1901,6 +2300,186 @@ function renderObjectTree(
   }
 }
 
+/** Opaque silhouette used as a destination-out mask (ignores the object's transparent fill). */
+function renderPunchSilhouette(
+  ctx: CanvasRenderingContext2D,
+  item: LineObj,
+  all: LineObj[],
+  visible: (l: LineObj) => boolean
+): void {
+  if (item.type === 'group') {
+    for (const child of all) {
+      if (child.parentId !== item.id) continue
+      renderPunchSilhouette(ctx, child, all, visible)
+    }
+    return
+  }
+  if (!visible(item)) return
+  if (!item.punchThrough && !item.punchMask) return
+  const draw = () => {
+    ctx.fillStyle = '#000000'
+    const stampPunchBits = (bits: Uint8Array) => {
+      const img = ctx.getImageData(0, 0, ctx.canvas.width, ctx.canvas.height)
+      const d = img.data
+      for (let p = 0; p < bits.length; p++) {
+        if (!bits[p]) continue
+        const i = p * 4
+        d[i] = 0
+        d[i + 1] = 0
+        d[i + 2] = 0
+        d[i + 3] = 255
+      }
+      ctx.putImageData(img, 0, 0)
+    }
+    if (item.type === 'shape' && item.shape && item.pts.length >= 2) {
+      const sync = punchMaskCanvases.get(item.id)
+      if (sync) {
+        const a = item.pts[0], b = item.pts[1]
+        ctx.drawImage(
+          sync,
+          Math.min(a.x, b.x),
+          Math.min(a.y, b.y),
+          Math.max(1, Math.abs(b.x - a.x)),
+          Math.max(1, Math.abs(b.y - a.y))
+        )
+        return
+      }
+      const bits = punchMaskBits.get(item.id)
+      if (bits && bits.length === ctx.canvas.width * ctx.canvas.height) {
+        stampPunchBits(bits)
+        return
+      }
+      const a = item.pts[0], b = item.pts[1]
+      const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
+      const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y)
+      ctx.beginPath()
+      traceShape(ctx, item.shape, x, y, w, h, shapeSupportsRadius(item.shape) ? lineBorderRadius(item) : 0)
+      ctx.fill()
+      return
+    }
+    if (item.type === 'poly') {
+      const sync = punchMaskCanvases.get(item.id)
+      const box = punchLocalBox(item)
+      if (sync && box) {
+        ctx.drawImage(sync, box.x, box.y, box.w, box.h)
+        return
+      }
+      const bits = punchMaskBits.get(item.id)
+      if (bits && bits.length === ctx.canvas.width * ctx.canvas.height) {
+        stampPunchBits(bits)
+        return
+      }
+      const poly = flattenLine(item)
+      const verts = poly.length > 1 && dist(poly[0], poly[poly.length - 1]) < 1e-6
+        ? poly.slice(0, -1)
+        : poly
+      ctx.beginPath()
+      pathRoundedPolygon(ctx, verts, lineBorderRadius(item))
+      ctx.fill()
+      return
+    }
+    if (item.type === 'stamp' && item.pts.length >= 2) {
+      const a = item.pts[0], b = item.pts[1]
+      const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
+      const w = Math.max(1, Math.abs(b.x - a.x)), h = Math.max(1, Math.abs(b.y - a.y))
+      const sync = punchMaskCanvases.get(item.id)
+      if (sync) {
+        ctx.drawImage(sync, x, y, w, h)
+        return
+      }
+      // punchMask stamps ARE the hole silhouette — draw at the stamp's current box
+      // so the hole travels with the layer.
+      if (item.punchMask && item.imageDataUrl) {
+        const img = stampImgCache.get(item.imageDataUrl)
+        if (img && img.complete && img.naturalWidth > 0) {
+          ctx.drawImage(img, x, y, w, h)
+        }
+        return
+      }
+      const cw = ctx.canvas.width
+      const ch = ctx.canvas.height
+      const bits = punchMaskBits.get(item.id)
+      if (bits && bits.length === cw * ch) {
+        const img = ctx.getImageData(0, 0, cw, ch)
+        const d = img.data
+        for (let p = 0; p < bits.length; p++) {
+          if (!bits[p]) continue
+          const i = p * 4
+          d[i] = 0
+          d[i + 1] = 0
+          d[i + 2] = 0
+          d[i + 3] = 255
+        }
+        ctx.putImageData(img, 0, 0)
+        return
+      }
+      // Partial punches store punchMaskBits. Never fall back to the leftover
+      // stamp image — that would hole every remaining section.
+      return
+    }
+    if (item.type === 'text') {
+      renderText(ctx, { ...item, color: '#000000', shadow: false })
+    }
+  }
+  if (lineNeedsDisplayTransform(item)) {
+    const c = objCenter(item)
+    ctx.save()
+    ctx.translate(c.x, c.y)
+    ctx.rotate(item.rot ?? 0)
+    ctx.scale(item.scaleX ?? 1, item.scaleY ?? 1)
+    ctx.translate(-c.x, -c.y)
+    draw()
+    ctx.restore()
+    return
+  }
+  draw()
+}
+
+function punchObjectFromComposite(
+  ctx: CanvasRenderingContext2D,
+  item: LineObj,
+  all: LineObj[],
+  visible: (l: LineObj) => boolean
+): void {
+  if (item.type !== 'group' && (!item.punchThrough || !visible(item))) return
+  const w = ctx.canvas.width
+  const h = ctx.canvas.height
+  if (destOutLocalPunch(ctx, item)) return
+  if (!item.punchMask && punchLocalBox(item)) return
+  const bits = punchMaskBits.get(item.id)
+  if (bits && bits.length === w * h) {
+    destOutFilledMask(ctx, bits, w, h)
+    return
+  }
+  const tmp = takeCanvas(w, h)
+  try {
+    const tctx = tmp.getContext('2d')!
+    renderPunchSilhouette(tctx, item, all, visible)
+    const mask = tctx.getImageData(0, 0, w, h).data
+    let any = false
+    for (let i = 3; i < mask.length; i += 16) {
+      if (mask[i] > 8) { any = true; break }
+    }
+    if (!any && item.pts.length >= 2 && item.type !== 'stamp' && item.type !== 'text') {
+      const xs = item.pts.map((p) => p.x)
+      const ys = item.pts.map((p) => p.y)
+      const x0 = Math.max(0, Math.floor(Math.min(...xs)))
+      const y0 = Math.max(0, Math.floor(Math.min(...ys)))
+      const x1 = Math.min(w, Math.ceil(Math.max(...xs)))
+      const y1 = Math.min(h, Math.ceil(Math.max(...ys)))
+      tctx.fillStyle = '#000000'
+      tctx.fillRect(x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0))
+    }
+    ctx.save()
+    ctx.globalCompositeOperation = 'destination-out'
+    ctx.imageSmoothingEnabled = false
+    ctx.drawImage(tmp, 0, 0)
+    ctx.restore()
+  } finally {
+    releaseCanvas(tmp)
+  }
+}
+
 function renderLineBody(ctx: CanvasRenderingContext2D, l: LineObj): void {
   if (l.type === 'text') { renderText(ctx, l); return }
   // Library / SVG stamp: draw the raster into the bounding box.
@@ -1916,12 +2495,14 @@ function renderLineBody(ctx: CanvasRenderingContext2D, l: LineObj): void {
       ctx.save()
       ctx.imageSmoothingEnabled = true
       ctx.imageSmoothingQuality = 'high'
-      if (l.shadow) {
+      if (shouldDrawObjectShadow(l)) {
         const blur = l.shadowBlur ?? 0
         const ox = l.shadowOffsetX ?? 0
         const oy = l.shadowOffsetY ?? 0
         const sColor = firstSolidColor(l.shadowColor ?? '#00000080')
-        ctx.filter = `drop-shadow(${ox}px ${oy}px ${blur}px ${sColor})`
+        if (!isTransparentPaintColor(sColor)) {
+          ctx.filter = `drop-shadow(${ox}px ${oy}px ${blur}px ${sColor})`
+        }
       }
       ctx.drawImage(img, x, y, w, h)
       ctx.restore()
@@ -2141,43 +2722,84 @@ function transformTextLine(l: LineObj, mode: CanvasXform, S: number, opts: Xform
   }
 }
 
+/** Orthogonal remap — no drawImage resampling (that clips AA and shrinks ink). */
 function transformCanvasPixels(src: HTMLCanvasElement, mode: CanvasXform): void {
   const w = src.width
   const h = src.height
-  const tmp = document.createElement('canvas')
-  tmp.width = w
-  tmp.height = h
-  const tCtx = tmp.getContext('2d')!
-  tCtx.imageSmoothingEnabled = true
-  tCtx.imageSmoothingQuality = 'high'
-  tCtx.save()
-  switch (mode) {
-    case 'cw90':
-      tCtx.translate(w, 0)
-      tCtx.rotate(Math.PI / 2)
-      break
-    case 'ccw90':
-      tCtx.translate(0, h)
-      tCtx.rotate(-Math.PI / 2)
-      break
-    case '180':
-      tCtx.translate(w, h)
-      tCtx.rotate(Math.PI)
-      break
-    case 'flipH':
-      tCtx.translate(w, 0)
-      tCtx.scale(-1, 1)
-      break
-    case 'flipV':
-      tCtx.translate(0, h)
-      tCtx.scale(1, -1)
-      break
+  if (w < 1 || h < 1) return
+  const ctx = src.getContext('2d')
+  if (!ctx) return
+  const srcData = ctx.getImageData(0, 0, w, h)
+  const s = srcData.data
+  const out = ctx.createImageData(w, h)
+  const d = out.data
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let nx = x
+      let ny = y
+      switch (mode) {
+        case 'cw90': nx = w - 1 - y; ny = x; break
+        case 'ccw90': nx = y; ny = h - 1 - x; break
+        case '180': nx = w - 1 - x; ny = h - 1 - y; break
+        case 'flipH': nx = w - 1 - x; ny = y; break
+        case 'flipV': nx = x; ny = h - 1 - y; break
+      }
+      const si = (y * w + x) * 4
+      const di = (ny * w + nx) * 4
+      d[di] = s[si]
+      d[di + 1] = s[si + 1]
+      d[di + 2] = s[si + 2]
+      d[di + 3] = s[si + 3]
+    }
   }
-  tCtx.drawImage(src, 0, 0)
-  tCtx.restore()
-  const ctx = src.getContext('2d')!
-  ctx.clearRect(0, 0, w, h)
-  ctx.drawImage(tmp, 0, 0)
+  ctx.putImageData(out, 0, 0)
+}
+
+function moveBoxCenterTo(l: LineObj, target: Pt): LineObj {
+  const c = objCenter(l)
+  const dx = target.x - c.x
+  const dy = target.y - c.y
+  if (Math.abs(dx) < 1e-6 && Math.abs(dy) < 1e-6) return l
+  return {
+    ...l,
+    pts: l.pts.map((p) => ({ x: p.x + dx, y: p.y + dy }))
+  }
+}
+
+/**
+ * Keep stamp / Inner-proxy box size and accumulate rot/scale.
+ * Baking a 90° turn into a new AABB + raster used to clip non-square ink
+ * and shrink anti-aliased edges on every click.
+ */
+function transformOrientedBox(l: LineObj, mode: CanvasXform, S: number, opts: XformOpts): LineObj {
+  const canvasSpace = opts.canvasSpace ?? false
+  const groupTransform = opts.groupTransform ?? false
+  const rot = l.rot ?? 0
+  const center = objCenter(l)
+  const displayCenter = mapObjDisplayPt(center, l)
+  const pivot = opts.pivot ?? center
+  const pivotDisplay: Pt = canvasSpace
+    ? { x: S / 2, y: S / 2 }
+    : groupTransform
+      ? pivot
+      : displayCenter
+  const inPlace = !canvasSpace && !groupTransform &&
+    Math.hypot(displayCenter.x - pivotDisplay.x, displayCenter.y - pivotDisplay.y) < 0.5
+  const mapDisplayPt = (p: Pt): Pt =>
+    canvasSpace ? mapCanvasPt(p, mode, S) : mapLocalPt(p, mode, pivotDisplay)
+  const target = mapDisplayPt(displayCenter)
+  const reflect = (base: LineObj): LineObj => {
+    const sx = base.scaleX ?? 1
+    const sy = base.scaleY ?? 1
+    if (mode === 'flipH') return { ...base, scaleX: -sx, scaleY: sy }
+    return { ...base, scaleX: sx, scaleY: -sy }
+  }
+  let next = l
+  if (mode === 'flipH' || mode === 'flipV') next = reflect(l)
+  else next = { ...l, rot: normalizeRot(composeCanvasRot(rot, mode)) }
+  next = { ...next, ...mapReshapeFields(l, mapDisplayPt) }
+  if (inPlace) return next
+  return moveBoxCenterTo(next, target)
 }
 
 function transformLineObj(l: LineObj, mode: CanvasXform, S: number, opts?: XformOpts): LineObj {
@@ -2222,28 +2844,12 @@ function transformLineObj(l: LineObj, mode: CanvasXform, S: number, opts?: Xform
   return { ...l, pts, rot: 0, ...mapReshapeFields(l, mapPt) }
 }
 
-/** Also rotate/flip stamp pixels — bbox mapping alone does not mirror raster content. */
+/** Rotate / flip stamps and Inner proxies without resampling their pixels. */
 function transformStampLineObj(l: LineObj, mode: CanvasXform, S: number, opts?: XformOpts): LineObj {
-  let next = transformLineObj(l, mode, S, opts)
-  if (l.type !== 'stamp' || !l.imageDataUrl) return next
-  const img = ensureStampImage(l.imageDataUrl)
-  if (!img || !img.complete || img.naturalWidth <= 0) return next
-  const c = document.createElement('canvas')
-  c.width = img.naturalWidth
-  c.height = img.naturalHeight
-  const ctx = c.getContext('2d')!
-  ctx.drawImage(img, 0, 0)
-  transformCanvasPixels(c, mode)
-  const imageDataUrl = c.toDataURL('image/png')
-  ensureStampImage(imageDataUrl)
-  return {
-    ...next,
-    scaleX: 1,
-    scaleY: 1,
-    imageDataUrl,
-    sourceSvgMarkup: undefined,
-    sourceStampSize: undefined
+  if (l.type === 'stamp' || (l.type === 'shape' && l.contentBound && l.pts.length === 2)) {
+    return transformOrientedBox(l, mode, S, opts ?? { canvasSpace: false })
   }
+  return transformLineObj(l, mode, S, opts)
 }
 
 function collectTransformSubtree(rootId: string, all: LineObj[]): Set<string> {
@@ -2709,6 +3315,8 @@ interface Snap {
   baseContent: ImageData
   lines: LineObj[]
   layerOrder: PaintLayerId[]
+  /** Punch-hole bitmasks keyed by object id (not stored on LineObj). */
+  punchBits: Record<string, Uint8Array>
 }
 
 interface HistoryEntry {
@@ -2725,6 +3333,7 @@ const normalizeLayerOrder = (order?: PaintLayerId[]): PaintLayerId[] =>
 
 const CHECKER =
   'repeating-conic-gradient(#3a3a4a 0% 25%, #2a2a36 0% 50%) 0 0 / 20px 20px'
+const PAINT_LAYER_MIME = 'application/x-ig-paint-layer'
 
 // Inline -webkit-app-region (Vite strips the prefix from stylesheets).
 // Overlay sits below the h-10 TitleBar so the window stays draggable; the rest
@@ -2760,6 +3369,17 @@ function pixelColor(color: string): string {
   const s = firstSolidColor(color)
   if (/^#[0-9a-fA-F]{6}$/.test(s)) return s + 'ff'
   return s
+}
+function isTransparentPaintColor(color: string): boolean {
+  if (!color || color === 'transparent' || color === 'none') return true
+  if (isGradientColor(color)) return false
+  return hexAlpha(color) <= 0
+}
+
+function shouldDrawObjectShadow(l: LineObj): boolean {
+  if (!l.shadow) return false
+  if (isTransparentPaintColor(l.shadowColor ?? '')) return false
+  return true
 }
 function ptsBounds(pts: Pt[]): { x: number; y: number; w: number; h: number } {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
@@ -2975,10 +3595,13 @@ export function IconPaintEditor({
   contentOverlayImage = null,
   resolution = 512,
   innerDrawSize,
+  paintOuterSize,
   title = 'Edit icon',
   hasContainer = true,
   initialVectors,
+  initialPunchMasks,
   initialLayerOrder,
+  initialPaintShapeSize,
   outsideContentSettings = null,
   outsideTextSettings = null,
   syncOuterFillColor = true,
@@ -3000,6 +3623,7 @@ export function IconPaintEditor({
       : null)
   const lettersOutside: OutsideTextSettings | null =
     outsideContent?.kind === 'letters' ? outsideContent : null
+  const inheritedFillMode = React.useContext(TransparentFillModeContext)
   const showSaveTargets = logoVariantOptions.length > 0 || faviconVariantOptions.length > 0
   const [saveLogoIds, setSaveLogoIds] = useState<Set<string>>(
     () => new Set(initialSaveTargets?.logoIds ?? [])
@@ -3026,6 +3650,12 @@ export function IconPaintEditor({
   const displayCompositeRef = useRef<HTMLCanvasElement>(null)
   const previewRef = useRef<HTMLCanvasElement>(null)
   const paintFrameRef = useRef<HTMLCanvasElement | null>(null)
+  const slotCacheContentRef = useRef<HTMLCanvasElement | null>(null)
+  const slotCacheContainerRef = useRef<HTMLCanvasElement | null>(null)
+  const slotCacheReadyRef = useRef<{ content: boolean; container: boolean }>({
+    content: false,
+    container: false
+  })
   /** Last Outer Fill click: fill / border / shadow — used on Save to sync live settings. */
   const lastOuterFillTargetRef = useRef<'fill' | 'border' | 'shadow' | null>(null)
   const lastOuterFillColorRef = useRef<string | null>(null)
@@ -3053,6 +3683,12 @@ export function IconPaintEditor({
   const [fillCleanEdges, setFillCleanEdges] = useState(true)
   /** Recolor every non-transparent pixel on target layers (ignores click colour / flood region). */
   const [fillAllOpaque, setFillAllOpaque] = useState(false)
+  /** When fill colour is fully transparent: hide this layer, or punch through layers below. */
+  const [transparentFillMode, setTransparentFillMode] = useState<'see-through' | 'punch'>(
+    () => inheritedFillMode?.mode ?? 'see-through'
+  )
+  const transparentFillModeRef = useRef(transparentFillMode)
+  transparentFillModeRef.current = transparentFillMode
   const [hexText, setHexText] = useState('#000000ff')
   const [colorPopupOpen, setColorPopupOpen] = useState(false)
   const [colorPopupRect, setColorPopupRect] = useState<DOMRect | null>(null)
@@ -3244,6 +3880,8 @@ export function IconPaintEditor({
   const baseTransformRef = useRef<{
     kind: 'move' | 'resize' | 'rotate'
     source: HTMLCanvasElement
+    baseSource?: HTMLCanvasElement
+    punchStamps?: { id: string; pts: Pt[]; rot?: number }[]
     bounds: { x: number; y: number; w: number; h: number }
     grab?: Pt
     fixed?: Pt
@@ -3270,6 +3908,8 @@ export function IconPaintEditor({
   const W = resolution
   const H = resolution
   const innerDraw = Math.max(16, innerDrawSize ?? W)
+  /** Visible container on the paint canvas (shadow inset only — not Size % / content pad). */
+  const containerDraw = Math.max(16, paintOuterSize ?? innerDraw)
   const displayNeedsResetRef = useRef(false)
   const paintDropLockRef = useRef(false)
 
@@ -3301,22 +3941,105 @@ export function IconPaintEditor({
    * vectors. Overlay sits on top of Inner letters/icons so brush cuts and Fill
    * are visible on the content (session drawings stay above the overlay).
    */
+  const liveDirtyLayers = (): Set<PaintLayerId> | null => {
+    const dirty = new Set<PaintLayerId>()
+    const addTree = (root: LineObj) => {
+      dirty.add(vectorLayerOf(root))
+      for (const child of linesRef.current) {
+        if (child.parentId === root.id) addTree(child)
+      }
+    }
+    const dr = lineDragRef.current
+    if (dr) {
+      const l = linesRef.current.find((item) => item.id === dr.id)
+      if (l) addTree(l)
+    }
+    if (baseTransformRef.current) dirty.add('content')
+    const stroke = objectPaintStrokeRef.current
+    if (stroke) {
+      const l = linesRef.current.find((item) => item.id === stroke.id)
+      if (l) dirty.add(vectorLayerOf(l))
+    }
+    if (drawing.current) {
+      for (const layerId of layerOrderRef.current) {
+        if (layerIsEditable(layerId)) dirty.add(layerId)
+      }
+    }
+    return dirty.size ? dirty : null
+  }
   const paintStackSlot = (
     ctx: CanvasRenderingContext2D,
     id: PaintLayerId,
-    opts?: { base?: boolean; overlay?: boolean; skipId?: string | null }
+    opts?: { base?: boolean; overlay?: boolean; skipId?: string | null; preview?: boolean }
   ) => {
+    if (opts?.preview && slotHiddenInPreview(id)) return
     const skipId = opts?.skipId
     const skip = (l: LineObj) => !!(skipId && l.id === skipId && l.type === 'text')
-    if (opts?.base !== false) ctx.drawImage(baseCanvas(id), 0, 0)
-    for (const l of linesRef.current) {
-      if (l.parentId || vectorLayerOf(l) !== id || !isLiveInnerVector(l) || skip(l)) continue
-      renderObjectTree(ctx, l, linesRef.current, isVectorVisible)
+    const vis = (l: LineObj) =>
+      isVectorVisible(l) && (!opts?.preview || !objectHiddenInPreview(l))
+    const hideObjects = !!(opts?.preview && objectsHiddenOnBase(id))
+    const liveDirty = liveDirtyLayers()
+    const useSlotCache = !!(liveDirty && !liveDirty.has(id))
+    const cacheSlot = id === 'content' ? slotCacheContentRef : slotCacheContainerRef
+    if (useSlotCache && slotCacheReadyRef.current[id]) {
+      const cached = cacheSlot.current
+      if (cached && cached.width === W && cached.height === H) {
+        ctx.drawImage(cached, 0, 0)
+        for (const l of linesRef.current) {
+          if (l.parentId || vectorLayerOf(l) !== id || skip(l)) continue
+          if (l.punchMask && !l.punchThrough) continue
+          if (hideObjects && !l.punchMask) continue
+          punchObjectFromComposite(ctx, l, linesRef.current, vis)
+        }
+        return
+      }
     }
-    if (opts?.overlay !== false) ctx.drawImage(layerCanvas(id), 0, 0)
+    const isolateSeeThrough = linesRef.current.some(
+      (l) => vectorLayerOf(l) === id && !!l.punchMask && !l.punchThrough && vis(l)
+    )
+    const paintSlot = (t: CanvasRenderingContext2D) => {
+      if (opts?.base !== false) t.drawImage(baseCanvas(id), 0, 0)
+      if (!hideObjects) {
+        for (const l of linesRef.current) {
+          if (l.parentId || vectorLayerOf(l) !== id || !isLiveInnerVector(l) || skip(l)) continue
+          renderObjectTree(t, l, linesRef.current, vis)
+        }
+      }
+      if (opts?.overlay !== false) t.drawImage(layerCanvas(id), 0, 0)
+      if (!hideObjects) {
+        for (const l of linesRef.current) {
+          if (l.parentId || vectorLayerOf(l) !== id || isLiveInnerVector(l) || skip(l)) continue
+          renderObjectTree(t, l, linesRef.current, vis)
+        }
+      }
+      for (const l of linesRef.current) {
+        if (vectorLayerOf(l) !== id || skip(l) || !vis(l)) continue
+        if (!l.punchMask) continue
+        if (!l.punchThrough) destOutLocalPunch(t, l)
+      }
+    }
+    if (isolateSeeThrough || useSlotCache) {
+      const tmp = useSlotCache ? ensureCanvas(cacheSlot, W, H) : takeCanvas(W, H)
+      try {
+        const t = tmp.getContext('2d')!
+        if (useSlotCache) {
+          reset2dState(t)
+          t.clearRect(0, 0, W, H)
+        }
+        paintSlot(t)
+        ctx.drawImage(tmp, 0, 0)
+        if (useSlotCache) slotCacheReadyRef.current[id] = true
+      } finally {
+        if (!useSlotCache) releaseCanvas(tmp)
+      }
+    } else {
+      paintSlot(ctx)
+    }
     for (const l of linesRef.current) {
-      if (l.parentId || vectorLayerOf(l) !== id || isLiveInnerVector(l) || skip(l)) continue
-      renderObjectTree(ctx, l, linesRef.current, isVectorVisible)
+      if (l.parentId || vectorLayerOf(l) !== id || skip(l)) continue
+      if (l.punchMask && !l.punchThrough) continue
+      if (hideObjects && !l.punchMask) continue
+      punchObjectFromComposite(ctx, l, linesRef.current, vis)
     }
   }
 
@@ -3344,11 +4067,12 @@ export function IconPaintEditor({
     for (const root of linesRef.current) {
       if (root.parentId || vectorLayerOf(root) !== id) continue
       if (!isVectorVisible(root)) continue
-      const probe = takeCanvas(W, H)
+      const probe = takeCanvas(3, 3)
       try {
         const pctx = probe.getContext('2d')!
+        pctx.setTransform(1, 0, 0, 1, -px + 1, -py + 1)
         renderObjectTree(pctx, root, linesRef.current, isVectorVisible)
-        alpha = Math.max(alpha, pctx.getImageData(px, py, 1, 1).data[3] ?? 0)
+        alpha = Math.max(alpha, pctx.getImageData(1, 1, 1, 1).data[3] ?? 0)
       } finally {
         releaseCanvas(probe)
       }
@@ -3357,7 +4081,7 @@ export function IconPaintEditor({
     return alpha
   }
 
-  /** Fill the topmost layer that already has ink at the click — never empty-flood Inner over Outer. */
+  /** Fill the topmost visible layer that already has ink at the click — never empty-flood Inner over Outer. */
   const floodFillTargetLayer = (x: number, y: number): PaintLayerId | null => {
     for (const id of layerOrderRef.current) {
       if (!layerIsEditable(id)) continue
@@ -3416,6 +4140,91 @@ export function IconPaintEditor({
     return (l.visible ?? l.editable ?? true) !== false
   }
 
+  /** Panel list, top to bottom. First = highest, last = lowest. */
+  const panelStackKeys = (): string[] => {
+    const keys: string[] = []
+    const list = linesRef.current
+    const appendChildren = (parentId: string) => {
+      for (const child of [...list].filter((l) => l.parentId === parentId).reverse()) {
+        keys.push(`object:${child.id}`)
+        if (child.type === 'group') appendChildren(child.id)
+      }
+    }
+    for (const id of layerOrderRef.current) {
+      const roots = [...list]
+        .filter((l) => vectorLayerOf(l) === id && !l.marqueeItem && !l.punchMask && !l.parentId)
+        .reverse()
+      for (const root of roots) {
+        keys.push(`object:${root.id}`)
+        if (root.type === 'group') appendChildren(root.id)
+      }
+      keys.push(`base:${id}`)
+    }
+    return keys
+  }
+
+  const previewPanelCacheRef = useRef<{ keys: string[]; rank: number | null; token: string } | null>(null)
+  const previewPanel = () => {
+    const token = `${selectedBaseLayerRef.current ?? ''}:${[...selectedLayerIdsRef.current].join(',')}`
+    if (previewPanelCacheRef.current?.token === token) return previewPanelCacheRef.current
+    const keys = panelStackKeys()
+    const base = selectedBaseLayerRef.current
+    let rank: number | null = null
+    if (base && layerIsEditable(base)) {
+      const i = keys.indexOf(`base:${base}`)
+      rank = i >= 0 ? i : null
+    } else {
+      const ids = selectedLayerIdsRef.current
+      if (ids.size) {
+        for (const id of ids) {
+          const item = linesRef.current.find((l) => l.id === id)
+          if (!item || item.punchMask || item.marqueeItem) continue
+          const i = keys.indexOf(`object:${item.id}`)
+          if (i < 0) continue
+          if (rank == null || i < rank) rank = i
+        }
+      }
+    }
+    const cached = { keys, rank, token }
+    previewPanelCacheRef.current = cached
+    return cached
+  }
+
+  /** Rank of the selected row in the panel (0 = top / highest). */
+  const panelSelectionRank = (): number | null => previewPanel().rank
+
+  const slotHiddenInPreview = (id: PaintLayerId): boolean => {
+    const { keys, rank } = previewPanel()
+    if (rank == null) return false
+    const baseRank = keys.indexOf(`base:${id}`)
+    return baseRank >= 0 && baseRank < rank
+  }
+
+  /** Selecting a base row hides every object sitting above that overlay. */
+  const objectsHiddenOnBase = (id: PaintLayerId): boolean => {
+    const { keys, rank } = previewPanel()
+    if (rank == null) return false
+    return keys[rank] === `base:${id}`
+  }
+
+  const objectHiddenInPreview = (l: LineObj): boolean => {
+    const { keys, rank } = previewPanel()
+    if (rank == null) return false
+    let cur: LineObj | undefined = l
+    while (cur) {
+      const i = keys.indexOf(`object:${cur.id}`)
+      if (i >= 0) return i < rank
+      cur = cur.parentId
+        ? linesRef.current.find((item) => item.id === cur!.parentId)
+        : undefined
+    }
+    const baseRank = keys.indexOf(`base:${vectorLayerOf(l)}`)
+    return baseRank >= 0 && baseRank < rank
+  }
+
+  const isPaintHitVisible = (l: LineObj): boolean =>
+    !l.punchMask && isVectorVisible(l) && !objectHiddenInPreview(l)
+
   /** A checked ancestor group owns edits; otherwise the item edits itself. */
   const checkedGroupTarget = (l: LineObj): LineObj | null => {
     let parentId = l.parentId
@@ -3444,13 +4253,17 @@ export function IconPaintEditor({
     const bcc = baseCanvas('container').getContext('2d')
     const bct = baseCanvas('content').getContext('2d')
     if (!cc || !ct || !bcc || !bct) return null
+    for (const l of linesRef.current) {
+      if (punchMaskCanvases.has(l.id)) rewritePunchBitsFromLocal(l, W, H)
+    }
     return {
       container: cc.getImageData(0, 0, W, H),
       content: ct.getImageData(0, 0, W, H),
       baseContainer: bcc.getImageData(0, 0, W, H),
       baseContent: bct.getImageData(0, 0, W, H),
       lines: cloneLines(linesRef.current),
-      layerOrder: [...layerOrderRef.current]
+      layerOrder: [...layerOrderRef.current],
+      punchBits: clonePunchBitsMap()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [W, H])
@@ -3504,6 +4317,14 @@ export function IconPaintEditor({
           if (l.parentId) tags.add(`object:${l.parentId}`)
         }
       })
+    }
+    const bitIds = new Set([
+      ...Object.keys(before.punchBits ?? {}),
+      ...Object.keys(after.punchBits ?? {})
+    ])
+    for (const id of bitIds) {
+      if (punchBitsEqual(before.punchBits?.[id], after.punchBits?.[id])) continue
+      tags.add(`object:${id}`)
     }
     return [...tags]
   }
@@ -3565,7 +4386,7 @@ export function IconPaintEditor({
       loadInto(baseCt, contentImage),
       loadInto(cc, containerOverlayImage),
       loadInto(ct, contentOverlayImage)
-    ]).then(() => {
+    ]).then(async () => {
       const restoredOrder = normalizeLayerOrder(initialLayerOrder)
       layerOrderRef.current = restoredOrder
       setLayerOrder(restoredOrder)
@@ -3690,6 +4511,30 @@ export function IconPaintEditor({
         }
       }
 
+      const savedOuter = Math.max(1, initialPaintShapeSize ?? containerDraw)
+      const reopenScale = containerDraw / savedOuter
+      if (Number.isFinite(reopenScale) && Math.abs(reopenScale - 1) > 0.001) {
+        restored = restored.map((l) => {
+          if (l.contentBound || l.linkedOutsideText) return l
+          if ((l.layer ?? 'content') !== 'content') return l
+          return scalePaintLineAround(l, W / 2, H / 2, reopenScale)
+        })
+        const overlay = document.createElement('canvas')
+        overlay.width = W
+        overlay.height = H
+        overlay.getContext('2d')!.drawImage(ct.canvas, 0, 0)
+        ct.clearRect(0, 0, W, H)
+        ct.save()
+        ct.translate(W / 2, H / 2)
+        ct.scale(reopenScale, reopenScale)
+        ct.translate(-W / 2, -H / 2)
+        ct.drawImage(overlay, 0, 0)
+        ct.restore()
+      }
+
+      punchMaskBits.clear()
+      punchMaskCanvases.clear()
+      restored = await restorePunchMasks(restored, initialPunchMasks, W, H)
       linesRef.current = restored
       setLines(restored)
 
@@ -3701,7 +4546,7 @@ export function IconPaintEditor({
       paintBasesLoadedRef.current = true
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [containerImage, contentImage, containerOverlayImage, contentOverlayImage, hasContainer, initialVectors, initialLayerOrder, innerDrawSize])
+  }, [containerImage, contentImage, containerOverlayImage, contentOverlayImage, hasContainer, initialVectors, initialPunchMasks, initialLayerOrder, innerDrawSize, paintOuterSize, initialPaintShapeSize])
 
   const restoreTaggedSnapshot = (snap: Snap, tags: string[]) => {
     const cc = containerCtx()
@@ -3747,6 +4592,18 @@ export function IconPaintEditor({
     }
     linesRef.current = restored
     setLines(restored)
+    for (const id of ids) {
+      const bits = snap.punchBits?.[id]
+      if (bits && bits.length) {
+        punchMaskBits.set(id, bits.slice())
+        punchMaskCanvases.delete(id)
+        const line = restored.find((l) => l.id === id)
+        if (line) setLocalPunchFromFilled(line, bits, W, H)
+      } else {
+        punchMaskBits.delete(id)
+        punchMaskCanvases.delete(id)
+      }
+    }
     const restoredIds = new Set(restored.map((l) => l.id))
     setSelectedLayerIds((prev) => new Set([...prev].filter((id) => restoredIds.has(id))))
     redrawLinesRef.current()
@@ -4525,6 +5382,9 @@ export function IconPaintEditor({
   const redrawLines = useCallback(() => {
     const displayEl = displayCompositeRef.current
     if (!displayEl) return
+    if (!liveDirtyLayers()) {
+      slotCacheReadyRef.current = { content: false, container: false }
+    }
 
     const skipId = textEditIdRef.current
     const showContent = !!editContentRef.current
@@ -4534,7 +5394,7 @@ export function IconPaintEditor({
     const frameCtx = frame.getContext('2d')!
 
     for (const item of linesRef.current) {
-      if (item.type === 'stamp' && item.imageDataUrl && isVectorVisible(item)) {
+      if (item.type === 'stamp' && item.imageDataUrl && (isVectorVisible(item) || item.punchMask || item.punchThrough)) {
         const a = item.pts[0], b = item.pts[1]
         const width = a && b ? Math.max(1, Math.abs(b.x - a.x)) : 1
         const height = a && b ? Math.max(1, Math.abs(b.y - a.y)) : 1
@@ -4549,9 +5409,9 @@ export function IconPaintEditor({
     for (const id of [...layerOrderRef.current].reverse()) {
       const baseVisible = id === 'content' ? showContent : showContainer
       if (baseVisible) {
-        paintStackSlot(frameCtx, id, { skipId })
+        paintStackSlot(frameCtx, id, { skipId, preview: true })
       } else {
-        paintStackSlot(frameCtx, id, { base: false, overlay: false, skipId })
+        paintStackSlot(frameCtx, id, { base: false, overlay: false, skipId, preview: true })
       }
     }
 
@@ -4875,6 +5735,8 @@ export function IconPaintEditor({
       selectedIdRef.current
     ) as unknown as LineObj[]
     linesRef.current = normalized
+    previewPanelCacheRef.current = null
+    slotCacheReadyRef.current = { content: false, container: false }
     setLines(normalized)
   }, [])
 
@@ -5095,9 +5957,10 @@ export function IconPaintEditor({
   const paintContentFromSnapshot = (
     source: HTMLCanvasElement,
     sourceBounds: { x: number; y: number; w: number; h: number },
-    targetBounds: { x: number; y: number; w: number; h: number }
+    targetBounds: { x: number; y: number; w: number; h: number },
+    dest?: HTMLCanvasElement
   ) => {
-    const canvas = ensureOffscreenCanvas(contentCanvasRef)
+    const canvas = dest ?? ensureOffscreenCanvas(contentCanvasRef)
     const ctx = canvas.getContext('2d')!
     ctx.clearRect(0, 0, W, H)
     ctx.imageSmoothingEnabled = true
@@ -5108,6 +5971,29 @@ export function IconPaintEditor({
       targetBounds.x, targetBounds.y, targetBounds.w, targetBounds.h
     )
   }
+
+  const mapPunchStampsToBounds = (
+    stamps: { id: string; pts: Pt[]; rot?: number }[] | undefined,
+    sourceBounds: { x: number; y: number; w: number; h: number },
+    targetBounds: { x: number; y: number; w: number; h: number }
+  ) => {
+    if (!stamps?.length) return
+    const sx = targetBounds.w / Math.max(1, sourceBounds.w)
+    const sy = targetBounds.h / Math.max(1, sourceBounds.h)
+    for (const snap of stamps) {
+      const l = linesRef.current.find((item) => item.id === snap.id)
+      if (!l) continue
+      l.pts = snap.pts.map((p) => ({
+        x: targetBounds.x + (p.x - sourceBounds.x) * sx,
+        y: targetBounds.y + (p.y - sourceBounds.y) * sy
+      }))
+    }
+  }
+
+  const snapshotContentPunchStamps = () =>
+    linesRef.current
+      .filter((l) => l.punchMask && vectorLayerOf(l) === 'content')
+      .map((l) => ({ id: l.id, pts: l.pts.map((p) => ({ ...p })), rot: l.rot }))
 
   const beginContentTransform = (pt: Pt): boolean => {
     if (selectedBaseLayerRef.current !== 'content' || !editContentRef.current) return false
@@ -5121,12 +6007,16 @@ export function IconPaintEditor({
       { corner: 'sw', point: { x: bounds.x, y: bounds.y + bounds.h }, fixed: { x: bounds.x + bounds.w, y: bounds.y } }
     ]
     const source = cloneCanvas(canvas)
+    const baseSource = cloneCanvas(baseCanvas('content'))
+    const punchStamps = snapshotContentPunchStamps()
     const pin = { x: bounds.x + bounds.w / 2, y: bounds.y - ROTATE_PIN_LEN }
     if (dist(pin, pt) <= 12) {
       const center = { x: bounds.x + bounds.w / 2, y: bounds.y + bounds.h / 2 }
       baseTransformRef.current = {
         kind: 'rotate',
         source,
+        baseSource,
+        punchStamps,
         bounds,
         center,
         startAng: Math.atan2(pt.y - center.y, pt.x - center.x)
@@ -5138,6 +6028,8 @@ export function IconPaintEditor({
       baseTransformRef.current = {
         kind: 'resize',
         source,
+        baseSource,
+        punchStamps,
         bounds,
         fixed: handle.fixed,
         corner: handle.corner
@@ -5148,7 +6040,14 @@ export function IconPaintEditor({
       pt.x >= bounds.x && pt.x <= bounds.x + bounds.w &&
       pt.y >= bounds.y && pt.y <= bounds.y + bounds.h
     ) {
-      baseTransformRef.current = { kind: 'move', source, bounds, grab: pt }
+      baseTransformRef.current = {
+        kind: 'move',
+        source,
+        baseSource,
+        punchStamps,
+        bounds,
+        grab: pt
+      }
       return true
     }
     return false
@@ -5251,7 +6150,7 @@ export function IconPaintEditor({
 
       // 2. Selecting / moving an existing visible object (topmost first).
       const hit = [...linesRef.current].reverse().find((l) => {
-        if (!isVectorVisible(l)) return false
+        if (!isPaintHitVisible(l)) return false
         if (l.reshapeQuad?.length === 4) return pointInPoly(l.reshapeQuad, pt)
         const q = unmapObjDisplayPt(pt, l)
         return l.type === 'text'
@@ -5299,7 +6198,7 @@ export function IconPaintEditor({
         }
       }
       const hit = [...linesRef.current].reverse().find((l) => {
-        if (!isVectorVisible(l) || !lineReshapeable(l)) return false
+        if (!isPaintHitVisible(l) || !lineReshapeable(l)) return false
         if (l.reshapeQuad?.length === 4) return pointInPoly(l.reshapeQuad, pt)
         const q = unmapObjDisplayPt(pt, l)
         return l.type === 'text'
@@ -5374,14 +6273,16 @@ export function IconPaintEditor({
       nl = {
         id, type: 'shape', shape: shapeKind, pts: [pt, { ...pt }], startCap: 'none', endCap: 'none',
         dash: lineDash, thickness: size, color, fill: shapeFill,
-        borderColor, borderWidth: size, borderRadius, keepStrokeOnResize, layer
+        borderColor, borderWidth: size, borderRadius, keepStrokeOnResize, layer,
+        punchThrough: shapeFill && transparentFillPunch()
       }
     } else if (tool === 'freepoly') {
       const n = Math.max(3, Math.min(60, freePolyN))
       nl = {
         id, type: 'poly', pts: regularPolyPts(pt, pt, n), startCap: 'none', endCap: 'none',
         dash: lineDash, thickness: size, color, fill: shapeFill,
-        borderColor, borderWidth: size, borderRadius, keepStrokeOnResize, layer
+        borderColor, borderWidth: size, borderRadius, keepStrokeOnResize, layer,
+        punchThrough: shapeFill && transparentFillPunch()
       }
     } else {
       let pts: Pt[]
@@ -5409,12 +6310,22 @@ export function IconPaintEditor({
       if (baseTransform.kind === 'move' && baseTransform.grab) {
         const dx = pt.x - baseTransform.grab.x
         const dy = pt.y - baseTransform.grab.y
-        paintContentFromSnapshot(baseTransform.source, baseTransform.bounds, {
+        const next = {
           x: baseTransform.bounds.x + dx,
           y: baseTransform.bounds.y + dy,
           w: baseTransform.bounds.w,
           h: baseTransform.bounds.h
-        })
+        }
+        paintContentFromSnapshot(baseTransform.source, baseTransform.bounds, next)
+        if (baseTransform.baseSource) {
+          paintContentFromSnapshot(
+            baseTransform.baseSource,
+            baseTransform.bounds,
+            next,
+            baseCanvas('content')
+          )
+        }
+        mapPunchStampsToBounds(baseTransform.punchStamps, baseTransform.bounds, next)
       } else if (baseTransform.kind === 'resize' && baseTransform.fixed) {
         const end = shiftHeldRef.current
           ? lockAspectRatioEnd(
@@ -5423,12 +6334,22 @@ export function IconPaintEditor({
               baseTransform.bounds.w / Math.max(1, baseTransform.bounds.h)
             )
           : pt
-        paintContentFromSnapshot(baseTransform.source, baseTransform.bounds, {
+        const next = {
           x: Math.min(baseTransform.fixed.x, end.x),
           y: Math.min(baseTransform.fixed.y, end.y),
           w: Math.max(1, Math.abs(end.x - baseTransform.fixed.x)),
           h: Math.max(1, Math.abs(end.y - baseTransform.fixed.y))
-        })
+        }
+        paintContentFromSnapshot(baseTransform.source, baseTransform.bounds, next)
+        if (baseTransform.baseSource) {
+          paintContentFromSnapshot(
+            baseTransform.baseSource,
+            baseTransform.bounds,
+            next,
+            baseCanvas('content')
+          )
+        }
+        mapPunchStampsToBounds(baseTransform.punchStamps, baseTransform.bounds, next)
       } else if (
         baseTransform.kind === 'rotate' &&
         baseTransform.center &&
@@ -5441,15 +6362,27 @@ export function IconPaintEditor({
         const delta = Math.abs(Math.atan2(Math.sin(raw - nearest), Math.cos(raw - nearest))) <= (3 * Math.PI / 180)
           ? nearest
           : raw
-        const canvas = ensureOffscreenCanvas(contentCanvasRef)
-        const ctx = canvas.getContext('2d')!
-        ctx.clearRect(0, 0, W, H)
-        ctx.save()
-        ctx.translate(baseTransform.center.x, baseTransform.center.y)
-        ctx.rotate(delta)
-        ctx.translate(-baseTransform.center.x, -baseTransform.center.y)
-        ctx.drawImage(baseTransform.source, 0, 0)
-        ctx.restore()
+        const drawRotated = (src: HTMLCanvasElement, dest: HTMLCanvasElement) => {
+          const ctx = dest.getContext('2d')!
+          ctx.clearRect(0, 0, W, H)
+          ctx.save()
+          ctx.imageSmoothingEnabled = false
+          ctx.translate(baseTransform.center!.x, baseTransform.center!.y)
+          ctx.rotate(delta)
+          ctx.translate(-baseTransform.center!.x, -baseTransform.center!.y)
+          ctx.drawImage(src, 0, 0)
+          ctx.restore()
+        }
+        drawRotated(baseTransform.source, ensureOffscreenCanvas(contentCanvasRef))
+        if (baseTransform.baseSource) {
+          drawRotated(baseTransform.baseSource, baseCanvas('content'))
+        }
+        for (const snap of baseTransform.punchStamps ?? []) {
+          const l = linesRef.current.find((item) => item.id === snap.id)
+          if (!l) continue
+          l.pts = snap.pts.map((p) => rotatePt(p, baseTransform.center!, delta))
+          l.rot = (snap.rot ?? 0) + delta
+        }
       }
       schedulePaintView(true)
       return
@@ -5927,7 +6860,7 @@ export function IconPaintEditor({
     else if (tool === 'pointer' || tool === 'reshape') drawHandles()
     else clearPreview()
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [lines, selectedId, selectedLayerIds, tool])
+  }, [lines, selectedId, selectedLayerIds, selectedBaseLayer, tool])
 
   // Fingerprint of every visibility checkbox. Remounting the display canvas on
   // change defeats Chromium's transformed-layer bitmap cache (stale frames after
@@ -6006,22 +6939,42 @@ export function IconPaintEditor({
    * outside so size/offset/shadow/text edits update without re-opening Paint.
    * When `layer` is set, only that paint stack is included.
    */
-  const decorationsCanvas = (layer?: PaintLayerId, includeLinkedText = false): HTMLCanvasElement => {
+  const decorationsCanvas = (
+    layer?: PaintLayerId,
+    includeLinkedText = false,
+    includeContentBound = false
+  ): HTMLCanvasElement => {
     const c = document.createElement('canvas')
     c.width = W; c.height = H
     const x = c.getContext('2d')!
     const show = (l: LineObj) =>
-      !l.contentBound &&
+      (includeContentBound || !l.contentBound) &&
       (includeLinkedText || !l.linkedOutsideText) &&
       (l.visible ?? l.editable ?? true) !== false
     const ids = layer
       ? [layer]
       : [...layerOrderRef.current].reverse()
     for (const id of ids) {
-      x.drawImage(layerCanvas(id), 0, 0)
+      const tmp = takeCanvas(W, H)
+      try {
+        const t = tmp.getContext('2d')!
+        t.drawImage(layerCanvas(id), 0, 0)
+        for (const l of linesRef.current) {
+          if (l.parentId || vectorLayerOf(l) !== id) continue
+          renderObjectTree(t, l, linesRef.current, show)
+        }
+        for (const l of linesRef.current) {
+          if (vectorLayerOf(l) !== id || !show(l)) continue
+          if (l.punchMask && !l.punchThrough) destOutLocalPunch(t, l)
+        }
+        x.drawImage(tmp, 0, 0)
+      } finally {
+        releaseCanvas(tmp)
+      }
       for (const l of linesRef.current) {
         if (l.parentId || vectorLayerOf(l) !== id) continue
-        renderObjectTree(x, l, linesRef.current, show)
+        if (l.punchMask && !l.punchThrough) continue
+        punchObjectFromComposite(x, l, linesRef.current, show)
       }
     }
     return c
@@ -6071,26 +7024,20 @@ export function IconPaintEditor({
     const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
     let changed = false
 
-    if (ta > 2 && item.sourceSvgMarkup) {
-      // Preserve vector quality when the user clicks an SVG stroke/fill.
-      const sourceSvgMarkup = applySvgColor(item.sourceSvgMarkup, fill)
-      const imageDataUrl = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(sourceSvgMarkup)}`
-      ensureStampImage(imageDataUrl, () => redrawLinesRef.current())
-      return { ...item, color: fill, sourceSvgMarkup, imageDataUrl }
-    }
-
     if (ta > 2) {
-      // Recolour every pixel belonging to the clicked colour slot. This catches
-      // disconnected SVG strokes while leaving a differently-coloured interior.
-      for (let i = 0; i < data.length; i += 4) {
-        if (
-          data[i + 3] > 0 &&
-          Math.abs(data[i] - tr) + Math.abs(data[i + 1] - tg) + Math.abs(data[i + 2] - tb) <= 72
-        ) {
-          data[i] = fr; data[i + 1] = fg; data[i + 2] = fb
-          data[i + 3] = Math.round((data[i + 3] * fa) / 255)
-          changed = true
-        }
+      // Connected section only — unconnected same-colour islands stay until clicked.
+      const region = floodFillConnected(width, height, px, py, (i) => {
+        if (data[i + 3] <= 2) return false
+        return Math.abs(data[i] - tr) + Math.abs(data[i + 1] - tg) + Math.abs(data[i + 2] - tb) <= 48
+      })
+      for (let p = 0; p < width * height; p++) {
+        if (!region[p]) continue
+        const i = p * 4
+        data[i] = fr
+        data[i + 1] = fg
+        data[i + 2] = fb
+        data[i + 3] = Math.round((data[i + 3] * fa) / 255)
+        changed = true
       }
     } else {
       // Transparent padding / counters: do not paint the stamp. Fall through so
@@ -6131,8 +7078,8 @@ export function IconPaintEditor({
       ctx.imageSmoothingQuality = 'high'
       interiorCtx.imageSmoothingEnabled = true
       interiorCtx.imageSmoothingQuality = 'high'
-      renderLine(interiorCtx, { ...item, paintStrokes: undefined })
-      renderLine(ctx, item)
+      renderLine(interiorCtx, { ...item, paintStrokes: undefined, shadow: false }, { skipHole: true })
+      renderLine(ctx, { ...item, shadow: false }, { skipHole: true })
       const obj = ctx.getImageData(0, 0, W, H)
       const od = obj.data
       const interior = interiorCtx.getImageData(0, 0, W, H).data
@@ -6152,16 +7099,35 @@ export function IconPaintEditor({
       }
       const seed = findFillSeed(W, H, canvasPoint.x, canvasPoint.y, (x, y) => {
         const i = (y * W + x) * 4
-        return interior[i + 3] > 2 && !isCut(i)
+        return interior[i + 3] >= 80 && !isCut(i)
       })
       if (!seed) return null
       const seedI = (seed.y * W + seed.x) * 4
       const tr = interior[seedI], tg = interior[seedI + 1], tb = interior[seedI + 2]
       const region = floodFillConnected(W, H, seed.x, seed.y, (i) => {
-        if (interior[i + 3] <= 2) return false
+        if (interior[i + 3] < 80) return false
         if (isCut(i)) return false
-        return Math.abs(interior[i] - tr) + Math.abs(interior[i + 1] - tg) + Math.abs(interior[i + 2] - tb) <= 72
+        return Math.abs(interior[i] - tr) + Math.abs(interior[i + 1] - tg) + Math.abs(interior[i + 2] - tb) <= 48
       })
+      const dirs4: [number, number][] = [[-1, 0], [1, 0], [0, -1], [0, 1]]
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const p = y * W + x
+          if (region[p]) continue
+          const i = p * 4
+          const a = interior[i + 3]
+          if (a <= 8 || a >= 80) continue
+          if (isCut(i)) continue
+          if (Math.abs(interior[i] - tr) + Math.abs(interior[i + 1] - tg) + Math.abs(interior[i + 2] - tb) > 48) continue
+          let adj = false
+          for (const [dx, dy] of dirs4) {
+            const nx = x + dx, ny = y + dy
+            if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
+            if (region[ny * W + nx]) { adj = true; break }
+          }
+          if (adj) region[p] = 1
+        }
+      }
       const fill = pixelColor(color)
       const fr = parseInt(fill.slice(1, 3), 16)
       const fg = parseInt(fill.slice(3, 5), 16)
@@ -6184,8 +7150,13 @@ export function IconPaintEditor({
         flooded++
       }
       if (!flooded) return null
+      const punch = transparentFillPunch()
+      if (isTransparentPaintColor(color)) {
+        setLocalPunchFromFilled(item, region, W, H)
+        return { ...item, punchThrough: punch || !!item.punchThrough }
+      }
       if (item.type === 'text' && wallHits === 0 && opaque > 0 && flooded >= opaque * 0.98) {
-        return { ...item, color: firstSolidColor(color) }
+        return { ...item, color: firstSolidColor(color), punchThrough: punch || !!item.punchThrough }
       }
       if (
         (item.type === 'shape' || item.type === 'poly') &&
@@ -6194,29 +7165,32 @@ export function IconPaintEditor({
         opaque > 0 &&
         flooded >= opaque * 0.98
       ) {
-        return { ...item, color: firstSolidColor(color), fill: true }
+        return { ...item, color: firstSolidColor(color), fill: true, punchThrough: punch || !!item.punchThrough }
       }
       ctx.putImageData(obj, 0, 0)
-      const bounds = alphaBoundsFromCanvas(canvas) ?? boundsForLine(item)
-      const cropped = takeCanvas(bounds.w, bounds.h)
+      const bounds = lineNeedsDisplayTransform(item)
+        ? (alphaBoundsFromCanvas(canvas) ?? boundsForLine(item))
+        : (punchLocalBox(item) ?? boundsForLine(item))
+      const cropped = takeCanvas(Math.max(1, Math.round(bounds.w)), Math.max(1, Math.round(bounds.h)))
       try {
         cropped.getContext('2d')!.drawImage(
           canvas,
           bounds.x, bounds.y, bounds.w, bounds.h,
-          0, 0, bounds.w, bounds.h
+          0, 0, cropped.width, cropped.height
         )
         const imageDataUrl = cropped.toDataURL('image/png')
         ensureStampImage(imageDataUrl, () => redrawLinesRef.current())
-        return {
+        const bakeXform = lineNeedsDisplayTransform(item)
+        const converted: LineObj = {
           ...item,
           type: 'stamp',
           pts: [
             { x: bounds.x, y: bounds.y },
             { x: bounds.x + bounds.w, y: bounds.y + bounds.h }
           ],
-          rot: 0,
-          scaleX: 1,
-          scaleY: 1,
+          rot: bakeXform ? 0 : item.rot,
+          scaleX: bakeXform ? 1 : item.scaleX,
+          scaleY: bakeXform ? 1 : item.scaleY,
           imageDataUrl,
           stampSource: item.stampSource ?? 'image',
           paintStrokes: undefined,
@@ -6224,8 +7198,15 @@ export function IconPaintEditor({
           sourceStampSize: undefined,
           keepStrokeOnResize: undefined,
           linkedOutsideText: undefined,
-          color: firstSolidColor(color)
+          color: firstSolidColor(color),
+          punchThrough: punch || !!item.punchThrough
         }
+        if (bakeXform && punchMaskCanvases.has(item.id)) {
+          const bits = punchMaskBits.get(item.id)
+          punchMaskCanvases.delete(item.id)
+          if (bits) setLocalPunchFromFilled(converted, bits, W, H)
+        }
+        return converted
       } finally {
         releaseCanvas(cropped)
       }
@@ -6245,7 +7226,10 @@ export function IconPaintEditor({
       })
     }
     if (l.type === 'text') return textFillHit(l, canvasPoint, W, H) != null
-    if ((l.type === 'stamp' || l.type === 'shape') && l.pts.length >= 2) {
+    if (l.type === 'stamp' || l.type === 'shape' || l.type === 'poly') {
+      return paintObjectHit(l, canvasPoint, W, H) != null
+    }
+    if (l.type === 'shape' && l.pts.length >= 2) {
       const local = rotatePt(canvasPoint, objCenter(l), -(l.rot ?? 0))
       return pointInRect(l.pts[0], l.pts[1], local)
     }
@@ -6253,27 +7237,54 @@ export function IconPaintEditor({
     return false
   }
 
+  const addPunchFromConnectedShadow = (
+    item: LineObj,
+    canvasPoint: Pt,
+    punchThrough: boolean
+  ) => {
+    const withS = takeCanvas(W, H)
+    const noS = takeCanvas(W, H)
+    try {
+      const withCtx = withS.getContext('2d')!
+      const noCtx = noS.getContext('2d')!
+      renderLineBase(withCtx, { ...item, punchThrough: false })
+      renderLineBase(noCtx, { ...item, shadow: false, punchThrough: false })
+      const a = withS.getImageData(0, 0, W, H).data
+      const b = noS.getImageData(0, 0, W, H).data
+      const shadowPx = new Uint8Array(W * H)
+      for (let p = 0; p < W * H; p++) {
+        if (a[p * 4 + 3] > 12 && b[p * 4 + 3] <= 12) shadowPx[p] = 1
+      }
+      const seed = findFillSeed(W, H, canvasPoint.x, canvasPoint.y, (x, y) => !!shadowPx[y * W + x])
+      if (!seed) return
+      const region = floodFillConnected(W, H, seed.x, seed.y, (i) => !!shadowPx[(i / 4) | 0])
+      addPunchStampFromMask(region, vectorLayerOf(item), punchThrough)
+    } finally {
+      releaseCanvas(withS)
+      releaseCanvas(noS)
+    }
+  }
+
   const fillSelectedObjectLayer = (canvasPoint: Pt): boolean => {
     // Fill follows the clicked icon even when it was not selected beforehand.
     const clickedStamp = [...linesRef.current].reverse().find((item) => {
-      if (item.type !== 'stamp' || !isVectorVisible(item) || item.pts.length < 2) return false
+      if (item.type !== 'stamp' || item.punchMask || !isPaintHitVisible(item) || item.pts.length < 2) return false
       if (isLiveInnerVector(item) && overlayHasOpaque(vectorLayerOf(item))) return false
-      const local = rotatePt(canvasPoint, objCenter(item), -(item.rot ?? 0))
-      return pointInRect(item.pts[0], item.pts[1], local)
+      return paintObjectHit(item, canvasPoint, W, H) != null
     })
     const clickedText = [...linesRef.current].reverse().find((item) => {
-      if (item.type !== 'text' || !isVectorVisible(item)) return false
+      if (item.type !== 'text' || !isPaintHitVisible(item)) return false
       if (isLiveInnerVector(item) && overlayHasOpaque(vectorLayerOf(item))) return false
       return textFillHit(item, canvasPoint, W, H) != null
     })
     const selectedExisting = linesRef.current.find((item) => item.id === selectedIdRef.current)
     const selectedHit =
       selectedExisting &&
-      isVectorVisible(selectedExisting) &&
+      isPaintHitVisible(selectedExisting) &&
       !(isLiveInnerVector(selectedExisting) && overlayHasOpaque(vectorLayerOf(selectedExisting))) &&
       objectOwnsFillClick(selectedExisting, canvasPoint)
     const selected = clickedStamp ?? clickedText ?? (selectedHit ? selectedExisting : undefined)
-    if (!selected || !isVectorVisible(selected)) return false
+    if (!selected || !isPaintHitVisible(selected)) return false
     const target = checkedGroupTarget(selected) ?? selected
     const targetIds =
       target.type === 'group'
@@ -6286,54 +7297,64 @@ export function IconPaintEditor({
             )
           : new Set([target.id])
     const fillColor = firstSolidColor(color)
+    const punch = transparentFillPunch()
+    const transparent = isTransparentPaintColor(color)
     const imageUrls: string[] = []
     let changed = false
     let textFillKind: 'glyph' | 'shadow' | null = null
+    const shadowPunches: LineObj[] = []
 
     const next = linesRef.current.map((item): LineObj => {
       if (!targetIds.has(item.id) || item.type === 'group') return item
+      const hit = paintObjectHit(item, canvasPoint, W, H)
+      if (hit === 'shadow') {
+        textFillKind = 'shadow'
+        changed = true
+        if (transparent) {
+          shadowPunches.push(item)
+          return item
+        }
+        return { ...item, shadow: true, shadowColor: fillColor }
+      }
       if (item.type === 'stamp') {
         const hasCuts = !!item.paintStrokes?.length || overlayHasOpaque(vectorLayerOf(item))
         const filled =
           fillObjectRespectingCuts(item, canvasPoint) ??
-          (hasCuts ? null : fillStampPixels(item, canvasPoint))
+          (hasCuts || punch ? null : fillStampPixels(item, canvasPoint))
         if (!filled) return item
-        imageUrls.push(filled.imageDataUrl ?? '')
+        if (filled.imageDataUrl) imageUrls.push(filled.imageDataUrl)
         changed = true
-        return filled
+        return { ...filled, punchThrough: punch || !!filled.punchThrough }
       }
       if (item.type === 'text') {
         const sectional = fillObjectRespectingCuts(item, canvasPoint)
         if (sectional) {
           if (sectional.imageDataUrl) imageUrls.push(sectional.imageDataUrl)
           changed = true
-          return sectional
+          return { ...sectional, punchThrough: punch || !!sectional.punchThrough }
         }
-        const hit = textFillHit(item, canvasPoint, W, H)
-        if (!hit) return item
-        textFillKind = hit
+        if (hit !== 'fill') return item
+        textFillKind = 'glyph'
         changed = true
-        if (hit === 'shadow') {
-          return { ...item, shadow: true, shadowColor: fillColor }
-        }
-        return { ...item, color: fillColor }
+        return { ...item, color: fillColor, punchThrough: punch || !!item.punchThrough }
       }
       if (item.type === 'shape' || item.type === 'poly') {
         const filled = fillObjectRespectingCuts(item, canvasPoint)
         if (filled) {
           if (filled.imageDataUrl) imageUrls.push(filled.imageDataUrl)
           changed = true
-          return filled
+          return { ...filled, punchThrough: punch || !!filled.punchThrough }
         }
         changed = true
-        return { ...item, color: fillColor, fill: true }
+        return { ...item, color: fillColor, fill: true, punchThrough: punch }
       }
-      return { ...item, color: fillColor, borderColor: fillColor }
+      return { ...item, color: fillColor, borderColor: fillColor, punchThrough: punch }
     })
 
     if (!changed) return false
     commitLines(next)
-    if (textFillKind === 'shadow') {
+    for (const item of shadowPunches) addPunchFromConnectedShadow(item, canvasPoint, punch)
+    if (textFillKind === 'shadow' && !transparent) {
       setTxtShadow(true)
       setTxtShadowColor(fillColor)
     } else if (textFillKind === 'glyph') {
@@ -6357,6 +7378,74 @@ export function IconPaintEditor({
     lastOuterFillColorRef.current = css
     lastOuterFillColorsRef.current = { ...lastOuterFillColorsRef.current, [kind]: css }
     lastOuterFillAllRef.current = false
+  }
+
+  const transparentFillPunch = () =>
+    isTransparentPaintColor(color) && transparentFillModeRef.current === 'punch'
+
+  const applyTransparentFillMode = (mode: 'see-through' | 'punch') => {
+    setTransparentFillMode(mode)
+    transparentFillModeRef.current = mode
+    inheritedFillMode?.setMode(mode)
+  }
+
+  const addPunchStampFromMask = (filled: Uint8Array, layerId: PaintLayerId, punchThrough: boolean) => {
+    const nl = punchStampFromFilled(filled, layerId, W, H)
+    if (!nl) return
+    nl.punchThrough = punchThrough
+    const next = [...linesRef.current, nl]
+    linesRef.current = next
+    commitLines(next)
+  }
+
+  /** Bind an enclosed transparent hole to the object whose ink rings it, so it moves with that object. */
+  const attachHoleToEnclosingObject = (filled: Uint8Array, punchThrough: boolean): boolean => {
+    let sx = 0, sy = 0, n = 0
+    for (let p = 0; p < filled.length; p++) {
+      if (!filled[p]) continue
+      sx += p % W
+      sy += (p / W) | 0
+      n++
+    }
+    if (!n) return false
+    const cx = sx / n
+    const cy = sy / n
+    const owner = [...linesRef.current].reverse().find((item) => {
+      if (item.punchMask || item.marqueeItem || item.type === 'group') return false
+      if (item.type !== 'stamp' && item.type !== 'shape' && item.type !== 'poly' && item.type !== 'text') {
+        return false
+      }
+      if (!isVectorVisible(item)) return false
+      const box = punchLocalBox(item)
+      if (!box) return false
+      const local = unmapObjDisplayPt({ x: cx, y: cy }, item)
+      return (
+        local.x >= box.x &&
+        local.y >= box.y &&
+        local.x <= box.x + box.w &&
+        local.y <= box.y + box.h
+      )
+    })
+    if (!owner) return false
+    setLocalPunchFromFilled(owner, filled, W, H)
+    const next = linesRef.current.map((l) =>
+      l.id === owner.id ? { ...l, punchThrough: punchThrough || !!l.punchThrough } : l
+    )
+    linesRef.current = next
+    commitLines(next)
+    return true
+  }
+
+  const applyTransparentFlood = (
+    filled: Uint8Array,
+    layerId: PaintLayerId,
+    _overlay: HTMLCanvasElement,
+    forcePunch = false
+  ) => {
+    if (!isTransparentPaintColor(color)) return
+    const punch = forcePunch || transparentFillPunch()
+    if (forcePunch && attachHoleToEnclosingObject(filled, punch)) return
+    addPunchStampFromMask(filled, layerId, punch)
   }
 
   const punchFilledFromBase = (
@@ -6410,7 +7499,11 @@ export function IconPaintEditor({
       punched[p] = 1
     }
     ctx.putImageData(out, 0, 0)
-    punchFilledFromBase(underlay, punched)
+    if (isTransparentPaintColor(color)) {
+      applyTransparentFlood(punched, layerId ?? 'content', ctx.canvas)
+    } else {
+      punchFilledFromBase(underlay, punched)
+    }
     if (layerId === 'container') {
       const css = cssPaintColor(fill)
       lastOuterFillTargetRef.current = 'fill'
@@ -6559,19 +7652,23 @@ export function IconPaintEditor({
     for (const root of linesRef.current) {
       if (root.parentId || root.marqueeItem) continue
       if (isLiveInnerVector(root)) continue
-      renderObjectTree(wallCtx, root, linesRef.current, isVectorVisible)
+      renderObjectTree(wallCtx, root, linesRef.current, isPaintHitVisible)
     }
     const wall = wallCtx.getImageData(0, 0, W, H).data
     const isWall = (i: number) => wall[i + 3] > 20
 
     const clickOnWall = isWall((Math.floor(sy) * W + Math.floor(sx)) * 4)
-    const seed = findFillSeed(W, H, px, py, (x, y) => {
-      const i = (y * W + x) * 4
-      if (isWall(i)) return false
-      // A click on an object must not hop onto Outer underlay behind it.
-      if (clickOnWall && layerId === 'container') return false
-      return under[i + 3] > 8 && overlayPix[i + 3] <= 8
-    }) ?? (!clickOnWall ? { x: px, y: py } : null)
+    const clickI = (Math.floor(sy) * W + Math.floor(sx)) * 4
+    const clickIsEmpty = under[clickI + 3] <= 8 && overlayPix[clickI + 3] <= 8 && !clickOnWall
+    const seed = clickIsEmpty
+      ? { x: Math.floor(sx), y: Math.floor(sy) }
+      : findFillSeed(W, H, px, py, (x, y) => {
+        const i = (y * W + x) * 4
+        if (isWall(i)) return false
+        // A click on an object must not hop onto Outer underlay behind it.
+        if (clickOnWall && layerId === 'container') return false
+        return under[i + 3] > 8 && overlayPix[i + 3] <= 8
+      }) ?? (!clickOnWall ? { x: px, y: py } : null)
     if (!seed) return
     px = seed.x
     py = seed.y
@@ -6589,11 +7686,24 @@ export function IconPaintEditor({
     // transparent background and paints the whole stage.
     const EMPTY_A = 8
     const clickedEmpty = ta <= EMPTY_A
+    let enclosedHole = false
+    if (clickedEmpty && isTransparentPaintColor(color)) {
+      const ink = new Uint8Array(W * H)
+      for (let p = 0; p < W * H; p++) {
+        if (data[p * 4 + 3] > EMPTY_A || isWall(p * 4)) ink[p] = 1
+      }
+      const outside = floodOutsideEmpty(ink, W, H)
+      if (outside[py * W + px]) return
+      enclosedHole = true
+    }
 
     const tol = 32
     // Same / near-same colour — nothing to do (also prevents an infinite loop if
     // painted pixels would still match the target within tolerance).
+    // Transparent see-through / punch must still run on soft shadows (low alpha
+    // is within 32 of fa=0 and would otherwise be treated as a no-op).
     if (
+      !isTransparentPaintColor(color) &&
       Math.abs(fr - tr) <= tol &&
       Math.abs(fg - tg) <= tol &&
       Math.abs(fb - tb) <= tol &&
@@ -6610,7 +7720,7 @@ export function IconPaintEditor({
     // share a colour (same as a normal fill), so curved strokes + matching glow
     // recolour together instead of a Manhattan ring that misses the curve.
     if (layerId === 'container' && !clickedEmpty && !clickOnWall) {
-      const edt = alphaOutsideEDT(data, W, H, 150)
+      const edt = alphaOutsideEDT(data, W, H, 185)
       outerKind = classifyOuterFillTarget(data, sx, sy, edt)
       const borderPx = Math.max(0, outerBorderWidthPx || 0)
 
@@ -6680,9 +7790,15 @@ export function IconPaintEditor({
         (outerKind === 'shadow' && clickMatchesLiveBorder)
       )
 
+      // Interior vs rim (border / shadow), not click vs interior — a fill
+      // click matches the interior, so that older test hid the colour split.
       const fillDiffersFromRim = !!(
-        interiorRgb &&
-        !rgbClose3(clickRgb, interiorRgb, 48)
+        interiorRgb && (
+          (liveBorder && !rgbClose3(interiorRgb, liveBorder, 52)) ||
+          (bakedBorder && !rgbClose3(interiorRgb, bakedBorder, 64)) ||
+          (liveShadow && !rgbClose3(interiorRgb, liveShadow, 56)) ||
+          (bakedShadow && !rgbClose3(interiorRgb, bakedShadow, 80))
+        )
       )
 
       // When fill colour ≠ rim colour, the stroke's max EDT is the true border
@@ -6693,7 +7809,7 @@ export function IconPaintEditor({
         let measured = 0
         for (let p = 0; p < W * H; p++) {
           const a = data[p * 4 + 3]
-          if (a < 160) continue
+          if (a < 185) continue
           const rgb = unpremul(p * 4)
           if (!rgb || rgbClose3(rgb, interiorRgb, 40)) continue
           if (edt[p] > measured) measured = edt[p]
@@ -6752,17 +7868,33 @@ export function IconPaintEditor({
       }
 
       if (outerKind === 'fill') {
-        for (let p = 0; p < W * H; p++) {
+        const fillRgb = unpremul(idx) ?? interiorRgb ?? clickRgb
+        const isFillPixel = (p: number) => {
           const a = data[p * 4 + 3]
-          if (a < 80) continue
-          if (borderPx <= 0) {
-            if (a >= 150) filled[p] = 1
-            continue
+          if (a < 160) return false
+          if (borderPx > 0 && edt[p] <= Math.min(rimW, Math.max(borderPx, 1)) + 0.5) return false
+          const rgb = unpremul(p * 4)
+          if (!rgb || !fillRgb || !rgbClose3(rgb, fillRgb, 40)) return false
+          if (fillDiffersFromRim) {
+            if (liveBorder && rgbClose3(rgb, liveBorder, 40)) return false
+            if (bakedBorder && rgbClose3(rgb, bakedBorder, 48) && edt[p] <= rimW + 1.5) return false
+            if (liveShadow && rgbClose3(rgb, liveShadow, 40) && a < 230) return false
+            if (bakedShadow && rgbClose3(rgb, bakedShadow, 64) && a < 160) return false
           }
-          if (edt[p] > borderPx) filled[p] = 1
-          else if (edt[p] > borderPx - 2.75 && a < 245) filled[p] = 1
+          return true
         }
-        // Inner-curve AA only — do not walk out into the stroke or drop-shadow.
+        // Connected section only — leftover same-colour islands stay until clicked.
+        const flood: number[] = [px, py]
+        while (flood.length >= 2) {
+          const y = flood.pop()!
+          const x = flood.pop()!
+          if (x < 0 || y < 0 || x >= W || y >= H) continue
+          const p = y * W + x
+          if (filled[p] || !isFillPixel(p)) continue
+          filled[p] = 1
+          flood.push(x + 1, y, x - 1, y, x, y + 1, x, y - 1)
+        }
+        // Inner-curve AA only — same fill colour, never stroke or drop-shadow.
         const dirs8: [number, number][] = [
           [-1, 0], [1, 0], [0, -1], [0, 1],
           [-1, -1], [1, -1], [-1, 1], [1, 1]
@@ -6775,8 +7907,14 @@ export function IconPaintEditor({
               if (filled[p]) continue
               const a = data[p * 4 + 3]
               if (a <= 8 || a >= 245) continue
-              if (a < 150 && edt[p] < 1) continue
-              if (borderPx > 0 && edt[p] <= borderPx - 2.75) continue
+              if (a < 150) continue
+              if (borderPx > 0 && edt[p] <= rimW + 0.5) continue
+              if (fillRgb) {
+                const rgb = unpremul(p * 4)
+                if (!rgb || !rgbClose3(rgb, fillRgb, 48)) continue
+                if (fillDiffersFromRim && liveBorder && rgbClose3(rgb, liveBorder, 36)) continue
+                if (fillDiffersFromRim && liveShadow && rgbClose3(rgb, liveShadow, 36)) continue
+              }
               let adj = false
               for (const [dx, dy] of dirs8) {
                 const nx = x + dx, ny = y + dy
@@ -6790,9 +7928,12 @@ export function IconPaintEditor({
           for (const p of extra) filled[p] = 1
         }
         recordOuterFill('fill', fill)
-      } else if (sameRimColor) {
-        // Live (or baked) border and shadow are the same colour — recolour the
-        // whole rim in one Fill, including curve AA between stroke and glow.
+      } else if (
+        sameRimColor ||
+        (isTransparentPaintColor(color) && (outerKind === 'border' || outerKind === 'shadow'))
+      ) {
+        // Same-colour rim, or a transparent punch/see-through on the border or
+        // shadow — include the stroke and its drop-shadow glow together.
         for (let p = 0; p < W * H; p++) {
           if (isSolidInterior(p)) continue
           if (data[p * 4 + 3] > 4) filled[p] = 1
@@ -6853,7 +7994,11 @@ export function IconPaintEditor({
         od[i + 3] = outA
       }
       ctx.putImageData(out, 0, 0)
-      punchFilledFromBase(underlay, filled)
+      if (isTransparentPaintColor(color)) {
+        applyTransparentFlood(filled, layerId ?? 'content', ctx.canvas)
+      } else {
+        punchFilledFromBase(underlay, filled)
+      }
       return
     }
 
@@ -7115,7 +8260,11 @@ export function IconPaintEditor({
       od[i + 3] = outA
     }
     ctx.putImageData(out, 0, 0)
-    if (!clickedEmpty) punchFilledFromBase(underlay, filled)
+    if (isTransparentPaintColor(color)) {
+      applyTransparentFlood(filled, layerId ?? 'content', ctx.canvas, enclosedHole)
+    } else if (!clickedEmpty) {
+      punchFilledFromBase(underlay, filled)
+    }
   }
 
   const eyedrop = (sx: number, sy: number) => {
@@ -7147,7 +8296,8 @@ export function IconPaintEditor({
       borderWidth: size,
       borderRadius,
       keepStrokeOnResize,
-      layer: activeAddLayer()
+      layer: activeAddLayer(),
+      punchThrough: shapeFill && transparentFillPunch()
     }
     linesRef.current = [...linesRef.current, nl]
     polyPts.current = []
@@ -7861,7 +9011,7 @@ export function IconPaintEditor({
     if (!svg.includes('<svg')) return
     const paintColor = firstSolidColor(color)
     svg = applySvgColor(svg, paintColor)
-    const sizePx = Math.round(W * 0.35)
+    const sizePx = Math.round(containerDraw * 0.35)
     const canvas = document.createElement('canvas')
     canvas.width = sizePx
     canvas.height = sizePx
@@ -7933,6 +9083,7 @@ export function IconPaintEditor({
 
   const paintDropAcceptsDrag = (e: React.DragEvent): boolean => {
     const types = [...e.dataTransfer.types]
+    if (types.includes(PAINT_LAYER_MIME)) return false
     if (
       types.includes(PAINT_SVG_MIME) ||
       types.includes(PAINT_LUCIDE_MIME) ||
@@ -8684,8 +9835,28 @@ export function IconPaintEditor({
     const persistVectors = stripContentProxyVectors(vectors)
     const linked = vectors.filter((v) => v.type === 'text' && v.linkedOutsideText).pop()
     const bakeLinkedText = !!(linked && Math.abs(linked.rot ?? 0) > 0.001)
+    const hasLiveInnerStandIn = vectors.some(
+      (v) => !!v.contentBound || (v.type === 'text' && !!v.linkedOutsideText)
+    )
+    const hasReplacementContent = persistVectors.some((v) => {
+      if ((v.layer ?? 'content') !== 'content') return false
+      if ((v.visible ?? v.editable ?? true) === false) return false
+      return (
+        v.type === 'stamp' ||
+        v.type === 'shape' ||
+        v.type === 'poly' ||
+        v.type === 'drawn' ||
+        v.type === 'text'
+      )
+    })
+    // Warped Inner proxy is baked into decorations. Also skip live Inner when
+    // the user removed the letters/lucide stand-in and left a library stamp —
+    // otherwise the live glyph/stroke peeks around the stamp on the small logo.
+    const bakeContentProxy =
+      vectors.some((v) => v.contentBound && reshapeIsApplied(v.reshapeQuad, v.reshapeSrc)) ||
+      (!hasLiveInnerStandIn && hasReplacementContent)
     const containerDecor = decorationsCanvas('container')
-    const contentDecor = decorationsCanvas('content', bakeLinkedText)
+    const contentDecor = decorationsCanvas('content', bakeLinkedText, bakeContentProxy)
     // Overlays only — live Outer/Inner settings stay outside Paint.
     await onSave(
       {
@@ -8698,12 +9869,30 @@ export function IconPaintEditor({
         resolution: W,
         hasContainer: !!(hasContainer || containerUsable),
         layerOrder: [...layerOrderRef.current],
-        decorationsPng: decorationsCanvas().toDataURL('image/png'),
+        decorationsPng: decorationsCanvas(undefined, bakeLinkedText, bakeContentProxy).toDataURL('image/png'),
         containerDecorationsPng: containerDecor.toDataURL('image/png'),
         contentDecorationsPng: contentDecor.toDataURL('image/png'),
         contentSync,
         linkedTextInDecorations: bakeLinkedText,
-        paintShapeSize: Math.round(innerDraw)
+        contentBakedInDecorations: bakeContentProxy,
+        paintShapeSize: Math.round(paintOuterSize ?? innerDraw),
+        paintContentDrawSize: Math.round(innerDraw),
+        paintContentSizeRatio: outsideContent?.sizeRatio,
+        punchMasks: (['container', 'content'] as PaintLayerId[]).flatMap((id) => {
+          const c = document.createElement('canvas')
+          c.width = W
+          c.height = H
+          const x = c.getContext('2d')!
+          for (const l of vectors) {
+            if (l.parentId || vectorLayerOf(l) !== id) continue
+            renderPunchSilhouette(x, l, vectors, (item) => (item.visible ?? item.editable ?? true) !== false)
+          }
+          const data = x.getImageData(0, 0, W, H).data
+          for (let i = 3; i < data.length; i += 16) {
+            if (data[i] > 8) return [{ layer: id, png: c.toDataURL('image/png') }]
+          }
+          return []
+        })
       },
       {
         logoIds: [...saveLogoIds],
@@ -9088,7 +10277,7 @@ export function IconPaintEditor({
     pushHistory([`object:${group.id}`, ...childIds.map((id) => `object:${id}`)])
   }
 
-  const eligibleObjectIds = lines.filter((l) => !l.marqueeItem).map((l) => l.id)
+  const eligibleObjectIds = lines.filter((l) => !l.marqueeItem && !l.punchMask).map((l) => l.id)
   const allObjectsSelected = eligibleObjectIds.length > 0 &&
     eligibleObjectIds.every((id) => selectedLayerIds.has(id))
   const toggleSelectAllObjects = () => {
@@ -9164,7 +10353,7 @@ export function IconPaintEditor({
       }
     }
     const roots = [...lines]
-      .filter((l) => vectorLayerOf(l) === id && !l.marqueeItem && !l.parentId)
+      .filter((l) => vectorLayerOf(l) === id && !l.marqueeItem && !l.punchMask && !l.parentId)
       .reverse()
     for (const root of roots) {
       result.push({ l: root, depth: 0 })
@@ -9191,9 +10380,8 @@ export function IconPaintEditor({
   // Live-patch the selected text object (if any) with the given fields.
   const patchText = (patch: Partial<LineObj>, commit = true): void => {
     if (selectedIdRef.current && selectedObj?.type === 'text') {
-      const next = { ...patch, reshapeQuad: undefined, reshapeSrc: undefined, reshapeBaseQuad: undefined }
-      if (commit) updateSelected(next)
-      else updateSelectedLive(next)
+      if (commit) updateSelected(patch)
+      else updateSelectedLive(patch)
     }
   }
 
@@ -9279,6 +10467,12 @@ export function IconPaintEditor({
   }
 
   return (
+    <TransparentFillModeContext.Provider
+      value={{
+        mode: transparentFillMode,
+        setMode: applyTransparentFillMode
+      }}
+    >
     <div style={NO_DRAG} className="fixed top-10 left-0 right-0 bottom-0 z-[9998] flex flex-col bg-bg/95 backdrop-blur-sm">
       {openMenu && <div className="absolute inset-0 z-30" onClick={() => setOpenMenu(null)} />}
       {/* Header — drag region so the window can still be moved in paint mode */}
@@ -9457,8 +10651,8 @@ export function IconPaintEditor({
                   if (selectedIdRef.current) {
                     updateSelectedLive((l) =>
                       l.type === 'poly' || l.type === 'shape'
-                        ? { color: n }
-                        : { color: n, borderColor: n }
+                        ? { color: n, punchThrough: isTransparentPaintColor(n) && transparentFillModeRef.current === 'punch' }
+                        : { color: n, borderColor: n, punchThrough: isTransparentPaintColor(n) && transparentFillModeRef.current === 'punch' }
                     )
                   }
                 }
@@ -9478,8 +10672,8 @@ export function IconPaintEditor({
                 if (selectedIdRef.current) {
                   updateSelectedLive((l) =>
                     l.type === 'poly' || l.type === 'shape'
-                      ? { color: c }
-                      : { color: c, borderColor: c }
+                      ? { color: c, punchThrough: isTransparentPaintColor(c) && transparentFillModeRef.current === 'punch' }
+                      : { color: c, borderColor: c, punchThrough: isTransparentPaintColor(c) && transparentFillModeRef.current === 'punch' }
                   )
                 }
               }}
@@ -9504,8 +10698,8 @@ export function IconPaintEditor({
                 if (selectedIdRef.current) {
                   updateSelectedLive((l) =>
                     l.type === 'poly' || l.type === 'shape'
-                      ? { color: c }
-                      : { color: c, borderColor: c }
+                      ? { color: c, punchThrough: isTransparentPaintColor(c) && transparentFillModeRef.current === 'punch' }
+                      : { color: c, borderColor: c, punchThrough: isTransparentPaintColor(c) && transparentFillModeRef.current === 'punch' }
                   )
                 }
               }}
@@ -9514,6 +10708,9 @@ export function IconPaintEditor({
             />
             <span className="text-[10px] text-muted w-7 text-right">{hexAlpha(color)}%</span>
           </div>
+        )}
+        {isTransparentPaintColor(color) && (
+          <TransparentFillToggle mode={transparentFillMode} onChange={applyTransparentFillMode} />
         )}
 
         <div className="w-px h-6 bg-border" />
@@ -9780,9 +10977,13 @@ export function IconPaintEditor({
             Clean thin edges
           </label>
           <span className="text-[10px] text-muted">
-            {fillAllOpaque
-              ? 'Click any editable layer — every opaque pixel becomes the fill colour'
-              : 'Fills AA fringes & thin rings · skips thick borders · thin session outlines inside the click also match fill colour'}
+            {isTransparentPaintColor(color)
+              ? transparentFillMode === 'punch'
+                ? 'Punch hole — the filled area cuts through every layer below; layers above still show'
+                : 'See-through — this fill disappears so layers below show through'
+              : fillAllOpaque
+                ? 'Click any editable layer — every opaque pixel becomes the fill colour'
+                : 'Fills AA fringes & thin rings · skips thick borders · thin session outlines inside the click also match fill colour'}
           </span>
         </div>
       )}
@@ -9845,7 +11046,7 @@ export function IconPaintEditor({
                 type="color"
                 value={txtShadowColor.slice(0, 7)}
                 onChange={(e) => {
-                  const c = e.target.value + (txtShadowColor.slice(7, 9) || 'b3')
+                  const c = e.target.value
                   setTxtShadowColor(c)
                   patchContentProxy({ shadowColor: c })
                 }}
@@ -10018,7 +11219,7 @@ export function IconPaintEditor({
               <input
                 type="color"
                 value={txtShadowColor.slice(0, 7)}
-                onChange={(e) => { const c = e.target.value + (txtShadowColor.slice(7, 9) || 'b3'); setTxtShadowColor(c); patchText({ shadowColor: c }) }}
+                onChange={(e) => { const c = e.target.value; setTxtShadowColor(c); patchText({ shadowColor: c }) }}
                 className="w-7 h-7 shrink-0 rounded cursor-pointer border border-border/50 bg-transparent"
                 title="Shadow colour"
               />
@@ -10368,7 +11569,7 @@ export function IconPaintEditor({
               if (tool !== 'pointer') return
               const pt = toCanvas(e)
               const hit = [...linesRef.current].reverse().find((l) => {
-                if (l.type !== 'text' || !isVectorVisible(l)) return false
+                if (l.type !== 'text' || !isPaintHitVisible(l)) return false
                 const q = unmapObjDisplayPt(pt, l)
                 return pointInPoly(flattenLine(l), q)
               })
@@ -10631,7 +11832,15 @@ export function IconPaintEditor({
               Drag above/below · drop on group centre to nest
             </p>
           </div>
-          <div className="flex-1 min-h-0 overflow-y-scroll p-2 space-y-1.5">
+          <div
+            className="flex-1 min-h-0 overflow-y-scroll p-2 space-y-1.5"
+            onDragOver={(e) => {
+              if (!draggedLayerRef.current) return
+              e.preventDefault()
+              e.stopPropagation()
+              e.dataTransfer.dropEffect = 'move'
+            }}
+          >
             {layerOrder.map((id) => {
               const isContent = id === 'content'
               const enabled = isContent ? editContent : editContainer && containerUsable
@@ -10691,14 +11900,17 @@ export function IconPaintEditor({
                             setLayerNameDraft(l.name ?? defaultObjectLayerName(l))
                           }}
                           onDragStart={(e) => {
+                            e.stopPropagation()
                             draggedLayerRef.current = key
                             setLayerDropTarget(null)
                             e.dataTransfer.effectAllowed = 'move'
+                            e.dataTransfer.setData(PAINT_LAYER_MIME, key)
                             e.dataTransfer.setData('text/plain', key)
                           }}
                           onDragOver={(e) => {
                             if (draggedLayerRef.current && draggedLayerRef.current !== key) {
                               e.preventDefault()
+                              e.stopPropagation()
                               e.dataTransfer.dropEffect = 'move'
                               const allowInside =
                                 l.type === 'group' &&
@@ -10894,16 +12106,19 @@ export function IconPaintEditor({
                       requestAnimationFrame(() => drawHandles())
                     }}
                     onDragStart={(e) => {
+                      e.stopPropagation()
                       const key = `base:${id}`
                       draggedLayerRef.current = key
                       setLayerDropTarget(null)
                       e.dataTransfer.effectAllowed = 'move'
+                      e.dataTransfer.setData(PAINT_LAYER_MIME, key)
                       e.dataTransfer.setData('text/plain', key)
                     }}
                     onDragOver={(e) => {
                       const key = `base:${id}`
                       if (draggedLayerRef.current && draggedLayerRef.current !== key) {
                         e.preventDefault()
+                        e.stopPropagation()
                         e.dataTransfer.dropEffect = 'move'
                         const position = dropPositionForRow(e, false)
                         setLayerDropTarget((prev) =>
@@ -10921,6 +12136,7 @@ export function IconPaintEditor({
                     }}
                     onDrop={(e) => {
                       e.preventDefault()
+                      e.stopPropagation()
                       const dragged = draggedLayerRef.current
                       const key = `base:${id}`
                       const position =
@@ -10971,6 +12187,10 @@ export function IconPaintEditor({
                         } else {
                           editContainerRef.current = e.target.checked
                           setEditContainer(e.target.checked)
+                        }
+                        if (!e.target.checked && selectedBaseLayerRef.current === id) {
+                          selectedBaseLayerRef.current = null
+                          setSelectedBaseLayer(null)
                         }
                         clearPreview()
                         redrawLinesRef.current()
@@ -11031,5 +12251,6 @@ export function IconPaintEditor({
       </aside>
       </div>
     </div>
+    </TransparentFillModeContext.Provider>
   )
 }

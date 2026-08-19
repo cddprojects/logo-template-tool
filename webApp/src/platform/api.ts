@@ -8,6 +8,7 @@ import {
   downloadDataUrl,
   pngBuffersToIco
 } from './download'
+import { buildStoreZip } from './zip'
 import { iconifyFetch, iconifySearch } from './iconify'
 import {
   createTemplate,
@@ -167,16 +168,15 @@ async function geminiGenerateImage(
 
 async function exportGroup(
   files: { filename: string; dataUrl: string }[],
-  _folderName?: string
+  folderName?: string
 ): Promise<{ success: boolean; folderPath?: string; error?: string }> {
-  // Always use normal browser downloads. Chromium's showDirectoryPicker often
-  // rejects even Downloads with "Can't modify … system files" / similar.
   try {
-    for (let i = 0; i < files.length; i++) {
-      downloadDataUrl(files[i].dataUrl, files[i].filename)
-      if (i < files.length - 1) await new Promise((r) => setTimeout(r, 150))
-    }
-    return { success: true, folderPath: 'downloads' }
+    const zipName = `${(folderName ?? 'my-assets').replace(/[\\/:*?"<>|]/g, '-').trim() || 'my-assets'}.zip`
+    const zip = buildStoreZip(
+      files.map((f) => ({ name: f.filename, data: dataUrlToUint8Array(f.dataUrl) }))
+    )
+    downloadBlob(zip, zipName)
+    return { success: true, folderPath: zipName }
   } catch (e) {
     return { success: false, error: String(e) }
   }
@@ -315,18 +315,89 @@ export function installWebApi(): void {
     geminiGenerateImage: (prompt: string, _apiKey: string, _imageData?: string) =>
       geminiGenerateImage(prompt),
 
-    removeBackground: async () => ({
-      success: false,
-      error: 'Not available in the web build'
-    }),
-
     iconifySearch,
     iconifyFetch,
 
     windowMinimize: () => {},
     windowMaximize: () => {},
     windowClose: () => {},
-    onWindowMaximized: (_cb: (maximized: boolean) => void) => {}
+    onWindowMaximized: (_cb: (maximized: boolean) => void) => {},
+
+    writeClipboardImage: async (pngBase64: string) => {
+      try {
+        if (typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
+          return { success: false, error: 'Clipboard image write is not supported' }
+        }
+        const bytes = Uint8Array.from(atob(pngBase64), (c) => c.charCodeAt(0))
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            'image/png': Promise.resolve(new Blob([bytes], { type: 'image/png' }))
+          })
+        ])
+        return { success: true }
+      } catch (e) {
+        return { success: false, error: String(e) }
+      }
+    },
+
+    writeClipboardTextAndImage: async (text: string, pngBase64: string) => {
+      try {
+        if (typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
+          await navigator.clipboard.writeText(text)
+          return { success: false, text: true, image: false, error: 'Clipboard image write is not supported' }
+        }
+        const bytes = Uint8Array.from(atob(pngBase64), (c) => c.charCodeAt(0))
+        const imageBlob = new Blob([bytes], { type: 'image/png' })
+        try {
+          await navigator.clipboard.write([
+            new ClipboardItem({
+              'text/plain': Promise.resolve(new Blob([text], { type: 'text/plain' })),
+              'image/png': Promise.resolve(imageBlob)
+            })
+          ])
+          return { success: true, text: true, image: true }
+        } catch {
+          await navigator.clipboard.write([
+            new ClipboardItem({
+              'image/png': Promise.resolve(imageBlob)
+            })
+          ])
+          return { success: false, text: false, image: true, error: 'Copied image only' }
+        }
+      } catch (e) {
+        return { success: false, error: String(e) }
+      }
+    },
+
+    openCanvaAi: async (payload?: { prompt?: string; pngBase64?: string }) => {
+      const prompt = payload?.prompt ?? ''
+      try {
+        if (payload?.pngBase64 && typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+          const bytes = Uint8Array.from(atob(payload.pngBase64), (c) => c.charCodeAt(0))
+          const imageBlob = new Blob([bytes], { type: 'image/png' })
+          try {
+            await navigator.clipboard.write([
+              new ClipboardItem({
+                'text/plain': Promise.resolve(new Blob([prompt], { type: 'text/plain' })),
+                'image/png': Promise.resolve(imageBlob)
+              })
+            ])
+          } catch {
+            await navigator.clipboard.write([
+              new ClipboardItem({
+                'image/png': Promise.resolve(imageBlob)
+              })
+            ])
+          }
+        } else if (prompt) {
+          await navigator.clipboard.writeText(prompt)
+        }
+      } catch {
+        /* browser clipboard may be blocked */
+      }
+      window.open('https://www.canva.com/ai', '_blank', 'noopener,noreferrer')
+      return { success: true, filled: false, login: false }
+    }
   }
 
   ;(window as unknown as { api: typeof api }).api = api

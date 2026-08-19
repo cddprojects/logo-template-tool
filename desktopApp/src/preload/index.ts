@@ -67,12 +67,6 @@ const api = {
   ): Promise<{ success: boolean; mimeType?: string; data?: string; error?: string }> =>
     ipcRenderer.invoke('gemini-generate-image', prompt, apiKey, imageData),
 
-  removeBackground: (
-    imageDataUrl: string,
-    hfToken: string
-  ): Promise<{ success: boolean; mimeType?: string; data?: string; error?: string }> =>
-    ipcRenderer.invoke('remove-background', imageDataUrl, hfToken),
-
   iconifySearch: (
     query: string,
     start = 0,
@@ -90,6 +84,22 @@ const api = {
     folderName?: string
   ): Promise<{ success: boolean; folderPath?: string; error?: string }> =>
     ipcRenderer.invoke('export-group', files, folderName),
+
+  writeClipboardTextAndImage: (
+    text: string,
+    pngBase64: string
+  ): Promise<{ success: boolean; text?: boolean; image?: boolean; error?: string }> =>
+    ipcRenderer.invoke('clipboard-write-text-and-image', text, pngBase64),
+
+  writeClipboardImage: (
+    pngBase64: string
+  ): Promise<{ success: boolean; error?: string }> =>
+    ipcRenderer.invoke('clipboard-write-image', pngBase64),
+
+  openCanvaAi: (
+    payload?: { prompt?: string; pngBase64?: string }
+  ): Promise<{ success: boolean; filled?: boolean; login?: boolean; error?: string }> =>
+    ipcRenderer.invoke('open-canva-ai', payload),
 
   windowMinimize: () => ipcRenderer.send('window-minimize'),
   windowMaximize: () => ipcRenderer.send('window-maximize'),

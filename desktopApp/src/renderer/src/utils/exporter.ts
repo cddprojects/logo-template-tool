@@ -31,6 +31,14 @@ declare global {
         files: { filename: string; dataUrl: string }[],
         folderName?: string
       ) => Promise<{ success: boolean; folderPath?: string; error?: string }>
+      writeClipboardTextAndImage: (
+        text: string,
+        pngBase64: string
+      ) => Promise<{ success: boolean; text?: boolean; image?: boolean; error?: string }>
+      writeClipboardImage: (pngBase64: string) => Promise<{ success: boolean; error?: string }>
+      openCanvaAi: (
+        payload?: { prompt?: string; pngBase64?: string }
+      ) => Promise<{ success: boolean; filled?: boolean; login?: boolean; error?: string }>
       windowMinimize: () => void
       windowMaximize: () => void
       windowClose: () => void

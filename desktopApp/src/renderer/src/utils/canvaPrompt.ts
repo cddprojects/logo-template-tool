@@ -71,6 +71,29 @@ export function resolveCanvaAppName(
   return fromAny || 'App'
 }
 
+function describeCanvaColor(color: string, role: 'primary' | 'secondary'): string {
+  const value = color.trim()
+  const linear = value.match(
+    /linear-gradient\((\d+(?:\.\d+)?)deg,\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\))\s+(\d+(?:\.\d+)?)%,\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\))\s+(\d+(?:\.\d+)?)%\)/
+  )
+  if (linear) {
+    return `The ${role} color should be a linear gradient from ${linear[2]} at ${linear[3]}% to ${linear[4]} at ${linear[5]}%, at ${Math.round(parseFloat(linear[1]))} degrees`
+  }
+  const radial = value.match(
+    /radial-gradient\(circle at (\d+(?:\.\d+)?)% (\d+(?:\.\d+)?)%,\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\))\s+(\d+(?:\.\d+)?)%,\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\))\s+(\d+(?:\.\d+)?)%\)/
+  )
+  if (radial) {
+    return `The ${role} color should be a radial gradient from ${radial[3]} at ${radial[4]}% to ${radial[5]} at ${radial[6]}%, centered at ${Math.round(parseFloat(radial[1]))}% ${Math.round(parseFloat(radial[2]))}%`
+  }
+  if (value.startsWith('linear-gradient(')) {
+    return `The ${role} color should be a linear gradient (${value})`
+  }
+  if (value.startsWith('radial-gradient(')) {
+    return `The ${role} color should be a radial gradient (${value})`
+  }
+  return `The ${role} color used should be ${value || '#6366f1'}`
+}
+
 export function buildCanvaPrompt(content: FaviconContent, appName: string): string {
   const businessType = canvaBusinessLabel(content.canvaBusinessType ?? 'recruitment-services')
   const designType = canvaDesignLabel(content.canvaDesignType ?? 'icon')
@@ -78,14 +101,14 @@ export function buildCanvaPrompt(content: FaviconContent, appName: string): stri
   const secondaryColor = content.canvaSecondaryColor?.trim() ?? ''
   const name = appName.trim() || 'App'
 
-  const secondaryClause = secondaryColor
-    ? ` (and the secondary color used should be ${secondaryColor})`
-    : ''
+  const colorClause = secondaryColor
+    ? `${describeCanvaColor(primaryColor, 'primary')}, and ${describeCanvaColor(secondaryColor, 'secondary').replace(/^The secondary color/, 'the secondary color')}`
+    : describeCanvaColor(primaryColor, 'primary')
 
-  let prompt = `Generate a ${designType} favicon with 1:1 aspect ratio, 512px, transparent background for ${businessType} website which is named ${name} so that it suits perfectly. The primary color used should be ${primaryColor}${secondaryClause}. Do not include an outer shape, container frame, background plate, border, or shadow wrapper — only the inner icon or symbol on a transparent background.`
+  let prompt = `Generate a ${designType} favicon, 1:1 aspect ratio, 512px, transparent background. The subject must come from the business and brand — invent a mark that clearly belongs to a ${businessType} website named "${name}". Lean hard on that industry and name so the icon reads as their brand, not a generic shape. ${colorClause}. Do not include an outer shape, container frame, background plate, border, or shadow wrapper — only the inner icon or symbol on a transparent background.`
 
   if (canvaImageReference(content) !== 'none') {
-    prompt += ' Attached is the image used for reference.'
+    prompt += ' A reference image is attached for STYLE ONLY. Weakly keep its visual treatment (line weight, simplicity, finish) — do not copy its subject, letters, layout, or composition.'
   }
 
   return prompt
@@ -147,9 +170,169 @@ export async function buildCanvaReferenceImageBlob(
   return canvasToBlob(canvas)
 }
 
-export type CanvaClipboardResult = 'full' | 'text-only' | 'failed'
+export type CanvaClipboardResult = 'full' | 'text-only' | 'image-only' | 'failed'
+export type CanvaOpenResult = 'filled' | 'login' | 'opened' | 'failed'
 
-/** Copy prompt text and an optional reference image together when the browser allows it. */
+type ClipboardApi = {
+  writeClipboardImage?: (pngBase64: string) => Promise<{ success: boolean }>
+  writeClipboardTextAndImage?: (
+    text: string,
+    pngBase64: string
+  ) => Promise<{ success: boolean; text?: boolean; image?: boolean }>
+  openCanvaAi?: (
+    payload?: { prompt?: string; pngBase64?: string }
+  ) => Promise<{ success: boolean; filled?: boolean; login?: boolean; error?: string }>
+}
+
+function clipboardApi(): ClipboardApi {
+  return ((window as Window & { api?: ClipboardApi }).api ?? {}) as ClipboardApi
+}
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buf = await blob.arrayBuffer()
+  const bytes = new Uint8Array(buf)
+  let binary = ''
+  const chunk = 0x8000
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
+  }
+  return btoa(binary)
+}
+
+function pngBlobFromBase64(pngBase64: string): Blob {
+  const bytes = Uint8Array.from(atob(pngBase64), (c) => c.charCodeAt(0))
+  return new Blob([bytes], { type: 'image/png' })
+}
+
+/** Browser clipboard: text + PNG in one ClipboardItem so paste can pick either. */
+export async function writeBrowserClipboardTextAndImage(
+  text: string,
+  imageBlob: Blob
+): Promise<{ text: boolean; image: boolean }> {
+  if (typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
+    return { text: false, image: false }
+  }
+  try {
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        'text/plain': Promise.resolve(new Blob([text], { type: 'text/plain' })),
+        'image/png': Promise.resolve(imageBlob)
+      })
+    ])
+    return { text: true, image: true }
+  } catch {
+    /* mixed payload rejected */
+  }
+  let image = false
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': Promise.resolve(imageBlob) })])
+    image = true
+  } catch {
+    image = false
+  }
+  if (image) return { text: false, image: true }
+  try {
+    await navigator.clipboard.writeText(text)
+    return { text: true, image: false }
+  } catch {
+    return { text: false, image: false }
+  }
+}
+
+async function writeTextAndImage(text: string, imageBlob: Blob): Promise<{ text: boolean; image: boolean }> {
+  const writeBoth = clipboardApi().writeClipboardTextAndImage
+  if (typeof writeBoth === 'function') {
+    const result = await writeBoth(text, await blobToBase64(imageBlob))
+    if (result?.success || (result?.text && result?.image)) {
+      return { text: true, image: true }
+    }
+    if (result?.image) return { text: false, image: true }
+    if (result?.text) return { text: true, image: false }
+  }
+  return writeBrowserClipboardTextAndImage(text, imageBlob)
+}
+
+export async function copyCanvaPromptText(content: FaviconContent, appName: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(buildCanvaPrompt(content, appName))
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function copyCanvaReferenceImage(
+  content: FaviconContent,
+  faviconConfig: FaviconConfig,
+  logoIcon?: IconConfig | null
+): Promise<boolean> {
+  const imageBlob = await buildCanvaReferenceImageBlob(content, faviconConfig, logoIcon)
+  if (!imageBlob) return false
+  const writeImage = clipboardApi().writeClipboardImage
+  if (typeof writeImage === 'function') {
+    const result = await writeImage(await blobToBase64(imageBlob))
+    if (result?.success) return true
+  }
+  if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': imageBlob })])
+      return true
+    } catch {
+      return false
+    }
+  }
+  return false
+}
+
+/** Open Canva AI, type the prompt, and leave the reference image on the clipboard. */
+export async function openCanvaWithPromptAndReference(
+  content: FaviconContent,
+  appName: string,
+  faviconConfig: FaviconConfig,
+  logoIcon?: IconConfig | null
+): Promise<CanvaOpenResult> {
+  const prompt = buildCanvaPrompt(content, appName)
+  const ref = canvaImageReference(content)
+  let pngBase64 = ''
+  if (ref !== 'none') {
+    try {
+      const imageBlob = await buildCanvaReferenceImageBlob(content, faviconConfig, logoIcon)
+      if (imageBlob) pngBase64 = await blobToBase64(imageBlob)
+    } catch {
+      return 'failed'
+    }
+    if (!pngBase64) return 'failed'
+  }
+
+  const open = clipboardApi().openCanvaAi
+  if (typeof open === 'function') {
+    const result = await open({ prompt, pngBase64: pngBase64 || undefined })
+    if (!result?.success) return 'failed'
+    if (result.login && !result.filled) return 'login'
+    if (result.filled) return 'filled'
+    return 'opened'
+  }
+
+  try {
+    if (pngBase64 && typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+      const imageBlob = pngBlobFromBase64(pngBase64)
+      const written = await writeBrowserClipboardTextAndImage(prompt, imageBlob)
+      if (!written.text && !written.image) return 'failed'
+    } else {
+      await navigator.clipboard.writeText(prompt)
+    }
+  } catch {
+    return 'failed'
+  }
+  window.open(CANVA_AI_URL, '_blank', 'noopener,noreferrer')
+  return 'opened'
+}
+
+/**
+ * Copy for Generate with Canva:
+ * - With a reference image: prompt text + PNG on the clipboard together.
+ * - No reference: copy the prompt text.
+ */
 export async function copyCanvaPromptAndReference(
   content: FaviconContent,
   appName: string,
@@ -160,32 +343,17 @@ export async function copyCanvaPromptAndReference(
   const ref = canvaImageReference(content)
 
   if (ref === 'none') {
-    try {
-      await navigator.clipboard.writeText(prompt)
-      return 'text-only'
-    } catch {
-      return 'failed'
-    }
+    return (await copyCanvaPromptText(content, appName)) ? 'text-only' : 'failed'
   }
 
   try {
     const imageBlob = await buildCanvaReferenceImageBlob(content, faviconConfig, logoIcon)
-    if (imageBlob && typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          'text/plain': new Blob([prompt], { type: 'text/plain' }),
-          'image/png': imageBlob
-        })
-      ])
-      return 'full'
-    }
-  } catch {
-    // Fall through to text-only.
-  }
-
-  try {
-    await navigator.clipboard.writeText(prompt)
-    return 'text-only'
+    if (!imageBlob) return 'failed'
+    const written = await writeTextAndImage(prompt, imageBlob)
+    if (written.text && written.image) return 'full'
+    if (written.image) return 'image-only'
+    if (written.text) return 'text-only'
+    return 'failed'
   } catch {
     return 'failed'
   }

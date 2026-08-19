@@ -169,6 +169,11 @@ export interface IconConfig {
   contentBorderColor: string
   contentBorderWidth: number
   /**
+   * When a fill hex ends with 00, see-through hides it and punch cuts a hole
+   * through layers below.
+   */
+  transparentFillMode?: 'see-through' | 'punch'
+  /**
    * Editable paint-editor session kept alongside the flattened display image.
    * Outside paint: preview uses the raster image. Reopening paint restores this.
    */
@@ -178,6 +183,8 @@ export interface IconConfig {
    * content vectors. Restored when switching sourceType back.
    */
   contentTypeStash?: Partial<Record<IconSourceType, ContentTypeStashEntry>>
+  /** True when the logo icon source is Canva — last sourceType content is kept for reference. */
+  canvaMode?: boolean
 }
 
 // ── Logo ──────────────────────────────────────────────────────────────────────
@@ -237,6 +244,11 @@ export interface LogoConfig {
   textShadowSpread: number
   textShadowOffsetX: number
   textShadowOffsetY: number
+  /**
+   * When a fill hex ends with 00, see-through hides it and punch cuts a hole
+   * through layers below.
+   */
+  transparentFillMode?: 'see-through' | 'punch'
 }
 
 // ── Favicon ───────────────────────────────────────────────────────────────────
@@ -294,6 +306,8 @@ export interface FaviconContent {
   /** Empty string = no secondary color. */
   canvaSecondaryColor: string
   canvaImageReference: CanvaImageReference
+  /** Last non-Canva inner type — kept so Canva reference images still render. */
+  canvaSourceType?: ContentType
   // universal content offset (px, relative to center)
   offsetX: number
   offsetY: number
@@ -345,6 +359,11 @@ export interface FaviconConfig {
    * while keeping Outer shape / Inner content aligned).
    */
   shadowReserveOnly?: boolean
+  /**
+   * When a fill hex ends with 00, see-through hides it and punch cuts a hole
+   * through layers below.
+   */
+  transparentFillMode?: 'see-through' | 'punch'
   /**
    * Editable paint-editor session kept alongside the flattened display image.
    * Outside paint: preview uses the raster content image. Reopening paint restores this.
@@ -449,6 +468,13 @@ export interface PaintVector {
   reshapeQuad?: { x: number; y: number }[]
   /** Quad at reshape init — used for symmetric snap distances. */
   reshapeBaseQuad?: { x: number; y: number }[]
+  /**
+   * Transparent fill punches a hole through every layer below this object.
+   * Layers above still draw on top.
+   */
+  punchThrough?: boolean
+  /** Invisible flood-fill mask used only for punch-through compositing. */
+  punchMask?: boolean
 }
 
 /** Outside (logo/favicon) letters settings passed into Paint for sync. */
@@ -525,12 +551,34 @@ export interface PaintSession {
    */
   linkedTextInDecorations?: boolean
   /**
+   * True when a warped Inner contentBound proxy was baked into content decorations.
+   * Outside render then skips live Inner so the warp is not covered.
+   */
+  contentBakedInDecorations?: boolean
+  /**
    * Outer-shape size in paint pixels, centered on `resolution`.
    * Logo/favicon paint insets the shape so the drop-shadow fits inside 512;
    * live render crops this square onto the icon rect so Save does not shrink
    * the logo. Omit (or equal resolution) when the shape already fills the canvas.
    */
   paintShapeSize?: number
+  /**
+   * Inner content box at Save (paint pixels). Used to rescale library stamps
+   * when the logo icon size / shadow inset / container padding changes.
+   */
+  paintContentDrawSize?: number
+  /**
+   * Live Inner sizeRatio at Save. Preview scales content decorations by
+   * currentRatio / this so Size % still drives library stamps.
+   */
+  paintContentSizeRatio?: number
+  /**
+   * Opaque silhouettes of punch-through transparent fills, per paint layer.
+   * Applied as destination-out after that layer's live pixels and decorations
+   * so leftover ink stays and the hole is not covered. A later layer still
+   * draws on top.
+   */
+  punchMasks?: { layer: PaintLayerId; png: string }[]
 }
 
 /**
@@ -603,8 +651,13 @@ export interface PaintSaveResult {
   contentSync?: PaintContentSync
   /** When true, linked Inner letters were baked into decorations (e.g. rotation). */
   linkedTextInDecorations?: boolean
+  /** When true, a warped Inner content proxy was baked into content decorations. */
+  contentBakedInDecorations?: boolean
   /** Outer-shape size in paint pixels (see PaintSession.paintShapeSize). */
   paintShapeSize?: number
+  paintContentDrawSize?: number
+  paintContentSizeRatio?: number
+  punchMasks?: { layer: PaintLayerId; png: string }[]
 }
 
 /** Which logo / favicon variants receive a paint Save. */
