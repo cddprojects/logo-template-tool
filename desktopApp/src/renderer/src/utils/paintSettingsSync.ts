@@ -161,17 +161,6 @@ const FAVICON_CONTENT_COLOR_KEYS = [
   'contentBorderColor'
 ] as const
 
-/** Placement / size kept on the target so Apply inner does not shove content out of the outer. */
-const FAVICON_CONTENT_LAYOUT_KEYS = [
-  'offsetX',
-  'offsetY',
-  'contentShadowBlur',
-  'contentShadowSpread',
-  'contentShadowOffsetX',
-  'contentShadowOffsetY',
-  'contentBorderWidth'
-] as const
-
 const ICON_CONTENT_COLOR_KEYS = [
   'primaryColor',
   'secondaryColor',
@@ -191,16 +180,6 @@ const ICON_CONTENT_COLOR_KEYS = [
   'contentShadowInset',
   'contentShadowColor',
   'contentBorderColor'
-] as const
-
-const ICON_CONTENT_LAYOUT_KEYS = [
-  'offsetX',
-  'offsetY',
-  'contentShadowBlur',
-  'contentShadowSpread',
-  'contentShadowOffsetX',
-  'contentShadowOffsetY',
-  'contentBorderWidth'
 ] as const
 
 /** Icon outer / container fields that must stay on the target when applying inner-only. */
@@ -305,11 +284,9 @@ function withIconContentSizeRatio(icon: IconConfig, ratio: number): IconConfig {
 function mergeTypeStashColors(
   sourceStash: FaviconConfig['contentTypeStash'] | IconConfig['contentTypeStash'],
   targetStash: FaviconConfig['contentTypeStash'] | IconConfig['contentTypeStash'],
-  colorKeys: readonly string[],
-  layoutKeys: readonly string[] = []
+  colorKeys: readonly string[]
 ): FaviconConfig['contentTypeStash'] | IconConfig['contentTypeStash'] {
   if (!sourceStash) return undefined
-  const keepKeys = [...colorKeys, ...layoutKeys]
   const out: Record<string, ContentTypeStashEntry> = {}
   for (const [type, entry] of Object.entries(sourceStash)) {
     if (!entry) continue
@@ -318,27 +295,92 @@ function mergeTypeStashColors(
       ...entry,
       fields: {
         ...entry.fields,
-        ...(targetFields ? pickKeys(targetFields, keepKeys) : {})
+        ...(targetFields ? pickKeys(targetFields, colorKeys) : {})
       },
-      // Drop baked Inner overlays so target palette drives live content.
-      contentOverlayPng: undefined
+      // Keep source Inner overlays / vectors — clearing them drops painted objects.
+      contentOverlayPng: entry.contentOverlayPng,
+      contentVectors: entry.contentVectors ? structuredClone(entry.contentVectors) : undefined
     }
   }
   return out as FaviconConfig['contentTypeStash']
 }
 
-/** Keep Outer paint; clear Inner overlays, content vectors, and content punch masks. */
-function blankInnerPaintKeepOuter(session: PaintSession | null | undefined): PaintSession | null {
+function isPaintContentLayerVector(v: PaintVector): boolean {
+  return (v.layer ?? 'content') === 'content' || isContentBoundVector(v)
+}
+
+function isPaintContainerLayerVector(v: PaintVector): boolean {
+  return (v.layer ?? 'content') === 'container' && !isContentBoundVector(v)
+}
+
+/**
+ * Target keeps Outer paint; Inner paint / content vectors come from the source
+ * so painted objects and placement match the active variant.
+ */
+function mergePaintInnerFromSource(
+  sourceSession: PaintSession | null | undefined,
+  targetSession: PaintSession | null | undefined
+): PaintSession | null {
+  if (!sourceSession && !targetSession) return null
+  if (!sourceSession) {
+    return blankInnerPaintOnly(targetSession)
+  }
+  if (!targetSession) {
+    return structuredClone(sourceSession)
+  }
+  if (sourceSession.resolution !== targetSession.resolution) {
+    // Different canvas sizes — still take source Inner; keep target Outer at its res
+    // by blanking Inner on target (cannot safely blit across resolutions).
+    return blankInnerPaintOnly(targetSession)
+  }
+  const empty = emptyOverlayPng(targetSession.resolution)
+  const containerVectors = (targetSession.vectors ?? []).filter(isPaintContainerLayerVector)
+  const contentVectors = structuredClone(
+    (sourceSession.vectors ?? []).filter(isPaintContentLayerVector)
+  )
+  const usedIds = new Set(containerVectors.map((v) => v.id))
+  for (const v of contentVectors) {
+    if (!usedIds.has(v.id)) {
+      usedIds.add(v.id)
+      continue
+    }
+    const nextId = `${v.id}-inner-${Math.random().toString(36).slice(2, 8)}`
+    const oldId = v.id
+    v.id = nextId
+    for (const child of contentVectors) {
+      if (child.parentId === oldId) child.parentId = nextId
+    }
+  }
+  const punchMasks = [
+    ...(targetSession.punchMasks ?? []).filter((m) => m.layer === 'container'),
+    ...(sourceSession.punchMasks ?? []).filter((m) => m.layer === 'content')
+  ]
+  return {
+    ...targetSession,
+    containerPng: targetSession.containerPng,
+    containerDecorationsPng: targetSession.containerDecorationsPng,
+    contentPng: sourceSession.contentPng ?? empty,
+    contentDecorationsPng: sourceSession.contentDecorationsPng ?? empty,
+    decorationsPng: undefined,
+    vectors: [...containerVectors, ...contentVectors],
+    punchMasks: punchMasks.length ? punchMasks : undefined,
+    contentBakedInDecorations: !!sourceSession.contentBakedInDecorations,
+    linkedTextInDecorations: !!sourceSession.linkedTextInDecorations,
+    paintContentSizeRatio: sourceSession.paintContentSizeRatio,
+    paintContentDrawSize: sourceSession.paintContentDrawSize,
+    // Drop stale sync so target live colors are not overwritten on next open.
+    contentSync: undefined
+  }
+}
+
+/** Clear Inner paint on a session; leave Outer untouched. */
+function blankInnerPaintOnly(session: PaintSession | null | undefined): PaintSession | null {
   if (!session) return null
   const blanked = blankPaintContentOverlay(session)
-  const vectors = (session.vectors ?? []).filter(
-    (v) => (v.layer ?? 'content') === 'container' && !isContentBoundVector(v)
-  )
-  const punchMasks = session.punchMasks?.filter((m) => m.layer !== 'content')
   return {
     ...blanked,
-    vectors,
-    punchMasks: punchMasks?.length ? punchMasks : undefined,
+    vectors: (session.vectors ?? []).filter(isPaintContainerLayerVector),
+    punchMasks: session.punchMasks?.filter((m) => m.layer !== 'content'),
     contentSync: undefined,
     paintContentSizeRatio: undefined,
     paintContentDrawSize: undefined,
@@ -348,25 +390,21 @@ function blankInnerPaintKeepOuter(session: PaintSession | null | undefined): Pai
 }
 
 /**
- * Copy active favicon’s inner content geometry/type onto a target variant while
- * keeping that target’s outer settings, color slots, placement, and Outer paint.
+ * Copy active favicon’s inner content (live settings + Inner paint) onto a target
+ * while keeping that target’s outer settings, color slots, and Outer paint.
  */
 export function applyFaviconInnerContent(source: FaviconConfig, target: FaviconConfig): FaviconConfig {
   const colors = pickColorFields(
     target.content as unknown as Record<string, unknown>,
     FAVICON_CONTENT_COLOR_KEYS
   )
-  const layout = pickColorFields(
-    target.content as unknown as Record<string, unknown>,
-    FAVICON_CONTENT_LAYOUT_KEYS
-  )
+  // Source placement + size so the shape matches the active variant; target
+  // offsets were often stale from a previous type and looked heavily displaced.
   const merged = withFaviconContentSizeRatio(
     {
       ...structuredClone(source.content),
-      ...colors,
-      ...layout
+      ...colors
     } as FaviconContent,
-    // Match the active variant’s inner size; keep target offsets via layout.
     faviconContentSizeRatio(source.content)
   )
   return {
@@ -375,16 +413,15 @@ export function applyFaviconInnerContent(source: FaviconConfig, target: FaviconC
     contentTypeStash: mergeTypeStashColors(
       source.contentTypeStash,
       target.contentTypeStash,
-      FAVICON_CONTENT_COLOR_KEYS,
-      FAVICON_CONTENT_LAYOUT_KEYS
+      FAVICON_CONTENT_COLOR_KEYS
     ) as FaviconConfig['contentTypeStash'],
-    paintSession: blankInnerPaintKeepOuter(target.paintSession)
+    paintSession: mergePaintInnerFromSource(source.paintSession, target.paintSession)
   }
 }
 
 /**
- * Copy active icon’s inner content geometry/type onto a target icon while
- * keeping that target’s outer/container settings, color slots, placement, and Outer paint.
+ * Copy active icon’s inner content (live settings + Inner paint) onto a target
+ * while keeping that target’s outer/container settings, color slots, and Outer paint.
  */
 export function applyIconInnerContent(source: IconConfig, target: IconConfig): IconConfig {
   const outer = pickKeys(
@@ -395,18 +432,12 @@ export function applyIconInnerContent(source: IconConfig, target: IconConfig): I
     target as unknown as Record<string, unknown>,
     ICON_CONTENT_COLOR_KEYS
   )
-  const layout = pickColorFields(
-    target as unknown as Record<string, unknown>,
-    ICON_CONTENT_LAYOUT_KEYS
-  )
   const merged = withIconContentSizeRatio(
     {
       ...structuredClone(source),
       ...outer,
-      ...colors,
-      ...layout
+      ...colors
     },
-    // Match the active variant’s inner size; keep target offsets via layout.
     iconContentSizeRatio(source)
   )
   return {
@@ -414,10 +445,9 @@ export function applyIconInnerContent(source: IconConfig, target: IconConfig): I
     contentTypeStash: mergeTypeStashColors(
       source.contentTypeStash,
       target.contentTypeStash,
-      ICON_CONTENT_COLOR_KEYS,
-      ICON_CONTENT_LAYOUT_KEYS
+      ICON_CONTENT_COLOR_KEYS
     ) as IconConfig['contentTypeStash'],
-    paintSession: blankInnerPaintKeepOuter(target.paintSession)
+    paintSession: mergePaintInnerFromSource(source.paintSession, target.paintSession)
   }
 }
 
