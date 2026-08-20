@@ -2147,6 +2147,24 @@ function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: Lin
     t.restore()
     item.shadow = wasShadow
     item.punchThrough = wasPunch
+    // Glyph AA subtract leaves soft residual columns (e.g. on "b"). Keep only
+    // solid hole pixels so dest-out cannot fringe into the letter stem.
+    const img = t.getImageData(0, 0, w, h)
+    const d = img.data
+    for (let i = 3; i < d.length; i += 4) {
+      if (d[i] < 200) {
+        d[i - 3] = 0
+        d[i - 2] = 0
+        d[i - 1] = 0
+        d[i] = 0
+      } else {
+        d[i - 3] = 255
+        d[i - 2] = 255
+        d[i - 1] = 255
+        d[i] = 255
+      }
+    }
+    t.putImageData(img, 0, 0)
     ctx.save()
     ctx.globalCompositeOperation = 'destination-out'
     ctx.imageSmoothingEnabled = false
@@ -4094,38 +4112,91 @@ export function IconPaintEditor({
     const liveDirty = liveDirtyLayers()
     const useSlotCache = !!(liveDirty && !liveDirty.has(id))
     const cacheSlot = id === 'content' ? slotCacheContentRef : slotCacheContainerRef
+
+    // Paint order within a slot: base → live Inner → overlay → session objects.
+    // Punch-through must only cut what is already below the punched object, so
+    // after each punch we redraw strictly-higher steps in this slot.
+    type SlotStep =
+      | { kind: 'base' }
+      | { kind: 'overlay' }
+      | { kind: 'object'; l: LineObj }
+    const roots = linesRef.current.filter((l) => !l.parentId && vectorLayerOf(l) === id)
+    const steps: SlotStep[] = []
+    if (opts?.base !== false) steps.push({ kind: 'base' })
+    for (const l of roots) {
+      if (isLiveInnerVector(l)) steps.push({ kind: 'object', l })
+    }
+    if (opts?.overlay !== false) steps.push({ kind: 'overlay' })
+    for (const l of roots) {
+      if (!isLiveInnerVector(l)) steps.push({ kind: 'object', l })
+    }
+
+    const paintObjectStep = (t: CanvasRenderingContext2D, l: LineObj) => {
+      if (skip(l)) return
+      renderObjectTree(t, l, linesRef.current, vis)
+      if (vis(l) && l.punchMask && !l.punchThrough) destOutLocalPunch(t, l)
+    }
+
+    const paintStepsTo = (t: CanvasRenderingContext2D) => {
+      for (const step of steps) {
+        if (step.kind === 'base') t.drawImage(baseCanvas(id), 0, 0)
+        else if (step.kind === 'overlay') t.drawImage(layerCanvas(id), 0, 0)
+        else paintObjectStep(t, step.l)
+      }
+    }
+
+    const redrawAbove = (target: CanvasRenderingContext2D, afterIndex: number) => {
+      for (let j = afterIndex + 1; j < steps.length; j++) {
+        const step = steps[j]
+        if (step.kind === 'base') continue
+        if (step.kind === 'overlay') {
+          target.drawImage(layerCanvas(id), 0, 0)
+          continue
+        }
+        paintObjectStep(target, step.l)
+      }
+    }
+
+    const groupMayPunch = (group: LineObj): boolean => {
+      for (const child of linesRef.current) {
+        if (child.parentId !== group.id) continue
+        if (child.type === 'group') {
+          if (groupMayPunch(child)) return true
+        } else if (child.punchThrough && vis(child)) {
+          return true
+        }
+      }
+      return false
+    }
+
+    const applyPunchThroughInOrder = (target: CanvasRenderingContext2D) => {
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i]
+        if (step.kind !== 'object') continue
+        const l = step.l
+        if (skip(l) || !vis(l)) continue
+        if (l.punchMask && !l.punchThrough) continue
+        if (l.type === 'group') {
+          if (!groupMayPunch(l)) continue
+        } else if (!l.punchThrough) {
+          continue
+        }
+        punchObjectFromComposite(target, l, linesRef.current, vis)
+        redrawAbove(target, i)
+      }
+    }
+
     if (useSlotCache && slotCacheReadyRef.current[id]) {
       const cached = cacheSlot.current
       if (cached && cached.width === W && cached.height === H) {
         ctx.drawImage(cached, 0, 0)
-        for (const l of linesRef.current) {
-          if (l.parentId || vectorLayerOf(l) !== id || skip(l)) continue
-          if (l.punchMask && !l.punchThrough) continue
-          punchObjectFromComposite(ctx, l, linesRef.current, vis)
-        }
+        applyPunchThroughInOrder(ctx)
         return
       }
     }
     const isolateSeeThrough = linesRef.current.some(
       (l) => vectorLayerOf(l) === id && !!l.punchMask && !l.punchThrough && vis(l)
     )
-    const paintSlot = (t: CanvasRenderingContext2D) => {
-      if (opts?.base !== false) t.drawImage(baseCanvas(id), 0, 0)
-      for (const l of linesRef.current) {
-        if (l.parentId || vectorLayerOf(l) !== id || !isLiveInnerVector(l) || skip(l)) continue
-        renderObjectTree(t, l, linesRef.current, vis)
-      }
-      if (opts?.overlay !== false) t.drawImage(layerCanvas(id), 0, 0)
-      for (const l of linesRef.current) {
-        if (l.parentId || vectorLayerOf(l) !== id || isLiveInnerVector(l) || skip(l)) continue
-        renderObjectTree(t, l, linesRef.current, vis)
-      }
-      for (const l of linesRef.current) {
-        if (vectorLayerOf(l) !== id || skip(l) || !vis(l)) continue
-        if (!l.punchMask) continue
-        if (!l.punchThrough) destOutLocalPunch(t, l)
-      }
-    }
     if (isolateSeeThrough || useSlotCache) {
       const tmp = useSlotCache ? ensureCanvas(cacheSlot, W, H) : takeCanvas(W, H)
       try {
@@ -4134,20 +4205,16 @@ export function IconPaintEditor({
           reset2dState(t)
           t.clearRect(0, 0, W, H)
         }
-        paintSlot(t)
+        paintStepsTo(t)
         ctx.drawImage(tmp, 0, 0)
         if (useSlotCache) slotCacheReadyRef.current[id] = true
       } finally {
         if (!useSlotCache) releaseCanvas(tmp)
       }
     } else {
-      paintSlot(ctx)
+      paintStepsTo(ctx)
     }
-    for (const l of linesRef.current) {
-      if (l.parentId || vectorLayerOf(l) !== id || skip(l)) continue
-      if (l.punchMask && !l.punchThrough) continue
-      punchObjectFromComposite(ctx, l, linesRef.current, vis)
-    }
+    applyPunchThroughInOrder(ctx)
   }
 
   const overlayHasOpaque = (id: PaintLayerId): boolean => {
@@ -6979,26 +7046,31 @@ export function IconPaintEditor({
       ? [layer]
       : [...layerOrderRef.current].reverse()
     for (const id of ids) {
+      const roots = linesRef.current.filter((l) => !l.parentId && vectorLayerOf(l) === id)
+      type SlotStep = { kind: 'object'; l: LineObj }
+      const steps: SlotStep[] = roots.map((l) => ({ kind: 'object' as const, l }))
+      const paintObjectStep = (t: CanvasRenderingContext2D, l: LineObj) => {
+        renderObjectTree(t, l, linesRef.current, show)
+        if (show(l) && l.punchMask && !l.punchThrough) destOutLocalPunch(t, l)
+      }
       const tmp = takeCanvas(W, H)
       try {
         const t = tmp.getContext('2d')!
         t.drawImage(layerCanvas(id), 0, 0)
-        for (const l of linesRef.current) {
-          if (l.parentId || vectorLayerOf(l) !== id) continue
-          renderObjectTree(t, l, linesRef.current, show)
-        }
-        for (const l of linesRef.current) {
-          if (vectorLayerOf(l) !== id || !show(l)) continue
-          if (l.punchMask && !l.punchThrough) destOutLocalPunch(t, l)
-        }
+        for (const step of steps) paintObjectStep(t, step.l)
         x.drawImage(tmp, 0, 0)
       } finally {
         releaseCanvas(tmp)
       }
-      for (const l of linesRef.current) {
-        if (l.parentId || vectorLayerOf(l) !== id) continue
+      for (let i = 0; i < steps.length; i++) {
+        const l = steps[i].l
+        if (!show(l)) continue
         if (l.punchMask && !l.punchThrough) continue
+        if (l.type !== 'group' && !l.punchThrough) continue
         punchObjectFromComposite(x, l, linesRef.current, show)
+        for (let j = i + 1; j < steps.length; j++) {
+          paintObjectStep(x, steps[j].l)
+        }
       }
     }
     return c
@@ -7441,7 +7513,7 @@ export function IconPaintEditor({
     if (!n) return false
     const cx = sx / n
     const cy = sy / n
-    const owner = [...linesRef.current].reverse().find((item) => {
+    const candidates = linesRef.current.filter((item) => {
       if (item.punchMask || item.marqueeItem || item.type === 'group') return false
       if (item.type !== 'stamp' && item.type !== 'shape' && item.type !== 'poly' && item.type !== 'text') {
         return false
@@ -7457,10 +7529,58 @@ export function IconPaintEditor({
         local.y <= box.y + box.h
       )
     })
+    if (!candidates.length) return false
+
+    // Prefer the object whose silhouette actually rings the hole (not merely the
+    // topmost bbox that contains the centroid — that wrongly binds to a higher
+    // overlapping object when a lower letter was punched).
+    let owner: LineObj | null = null
+    let bestScore = -Infinity
+    const dirs4: [number, number][] = [[-1, 0], [1, 0], [0, -1], [0, 1]]
+    for (const item of candidates) {
+      const probe = takeCanvas(W, H)
+      try {
+        const pctx = probe.getContext('2d')!
+        renderLine(pctx, { ...item, shadow: false, punchThrough: false })
+        const gd = pctx.getImageData(0, 0, W, H).data
+        let emptyOn = 0
+        let inkOn = 0
+        let borderTouch = 0
+        for (let p = 0; p < filled.length; p++) {
+          if (!filled[p]) continue
+          const a = gd[p * 4 + 3]
+          if (a >= 80) inkOn++
+          else emptyOn++
+          const x = p % W
+          const y = (p / W) | 0
+          for (const [dx, dy] of dirs4) {
+            const nx = x + dx
+            const ny = y + dy
+            if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
+            const np = ny * W + nx
+            if (filled[np]) continue
+            if (gd[np * 4 + 3] >= 80) {
+              borderTouch++
+              break
+            }
+          }
+        }
+        // Strong enclosure: hole is empty on this object and touches its ink.
+        const score = emptyOn * 2 + borderTouch * 3 - inkOn * 8
+        if (score > bestScore) {
+          bestScore = score
+          owner = item
+        }
+      } finally {
+        releaseCanvas(probe)
+      }
+    }
+    // Fallback: earliest candidate (lowest in paint order) whose bbox contains the hole.
+    if (!owner) owner = candidates[0] ?? null
     if (!owner) return false
     setLocalPunchFromFilled(owner, filled, W, H)
     const next = linesRef.current.map((l) =>
-      l.id === owner.id
+      l.id === owner!.id
         ? { ...l, punchThrough: punchThrough || !!l.punchThrough, punchEnclosedHole: true }
         : l
     )
@@ -8243,7 +8363,9 @@ export function IconPaintEditor({
 
     // Grow fill 1px into soft / near-edge underlay pixels so live-base outlines
     // cannot peek through when the overlay is scaled outside Paint.
-    if (clickedEmpty) {
+    // Skip for enclosed letter counters — growing into glyph AA leaves vertical
+    // fringe strips when the hole is later dest-outed through the stack.
+    if (clickedEmpty && !enclosedHole) {
       const grow: number[] = []
       const dirs4: [number, number][] = [[-1, 0], [1, 0], [0, -1], [0, 1]]
       for (let y = 0; y < H; y++) {
