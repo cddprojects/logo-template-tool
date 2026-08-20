@@ -161,6 +161,17 @@ const FAVICON_CONTENT_COLOR_KEYS = [
   'contentBorderColor'
 ] as const
 
+/** Placement / size kept on the target so Apply inner does not shove content out of the outer. */
+const FAVICON_CONTENT_LAYOUT_KEYS = [
+  'offsetX',
+  'offsetY',
+  'contentShadowBlur',
+  'contentShadowSpread',
+  'contentShadowOffsetX',
+  'contentShadowOffsetY',
+  'contentBorderWidth'
+] as const
+
 const ICON_CONTENT_COLOR_KEYS = [
   'primaryColor',
   'secondaryColor',
@@ -180,6 +191,16 @@ const ICON_CONTENT_COLOR_KEYS = [
   'contentShadowInset',
   'contentShadowColor',
   'contentBorderColor'
+] as const
+
+const ICON_CONTENT_LAYOUT_KEYS = [
+  'offsetX',
+  'offsetY',
+  'contentShadowBlur',
+  'contentShadowSpread',
+  'contentShadowOffsetX',
+  'contentShadowOffsetY',
+  'contentBorderWidth'
 ] as const
 
 /** Icon outer / container fields that must stay on the target when applying inner-only. */
@@ -213,12 +234,82 @@ function pickColorFields<T extends Record<string, unknown>>(
   return pickKeys(source, keys) as Partial<T>
 }
 
+function faviconContentSizeRatio(content: FaviconContent): number {
+  switch (content.type) {
+    case 'letters':
+      return content.fontSizeRatio ?? 0.52
+    case 'shape':
+      return content.shapeSizeRatio ?? 0.5
+    case 'lucide':
+      return content.lucideSizeRatio ?? 0.6
+    case 'svg-markup':
+      return content.svgMarkupSizeRatio ?? 0.7
+    case 'image':
+      return content.imageSizeRatio ?? 0.7
+    default:
+      return 0.5
+  }
+}
+
+function withFaviconContentSizeRatio(content: FaviconContent, ratio: number): FaviconContent {
+  switch (content.type) {
+    case 'letters':
+      return { ...content, fontSizeRatio: ratio }
+    case 'shape':
+      return { ...content, shapeSizeRatio: ratio }
+    case 'lucide':
+      return { ...content, lucideSizeRatio: ratio }
+    case 'svg-markup':
+      return { ...content, svgMarkupSizeRatio: ratio }
+    case 'image':
+      return { ...content, imageSizeRatio: ratio }
+    default:
+      return content
+  }
+}
+
+function iconContentSizeRatio(icon: IconConfig): number {
+  switch (icon.sourceType) {
+    case 'letters':
+      return icon.fontSizeRatio ?? 0.52
+    case 'shape':
+      return icon.shapeSizeRatio ?? 0.5
+    case 'lucide':
+      return icon.lucideSizeRatio ?? 0.6
+    case 'svg':
+      return icon.svgMarkupSizeRatio ?? 0.7
+    case 'image':
+      return icon.imageSizeRatio ?? 0.7
+    default:
+      return 0.5
+  }
+}
+
+function withIconContentSizeRatio(icon: IconConfig, ratio: number): IconConfig {
+  switch (icon.sourceType) {
+    case 'letters':
+      return { ...icon, fontSizeRatio: ratio }
+    case 'shape':
+      return { ...icon, shapeSizeRatio: ratio }
+    case 'lucide':
+      return { ...icon, lucideSizeRatio: ratio }
+    case 'svg':
+      return { ...icon, svgMarkupSizeRatio: ratio }
+    case 'image':
+      return { ...icon, imageSizeRatio: ratio }
+    default:
+      return icon
+  }
+}
+
 function mergeTypeStashColors(
   sourceStash: FaviconConfig['contentTypeStash'] | IconConfig['contentTypeStash'],
   targetStash: FaviconConfig['contentTypeStash'] | IconConfig['contentTypeStash'],
-  colorKeys: readonly string[]
+  colorKeys: readonly string[],
+  layoutKeys: readonly string[] = []
 ): FaviconConfig['contentTypeStash'] | IconConfig['contentTypeStash'] {
   if (!sourceStash) return undefined
+  const keepKeys = [...colorKeys, ...layoutKeys]
   const out: Record<string, ContentTypeStashEntry> = {}
   for (const [type, entry] of Object.entries(sourceStash)) {
     if (!entry) continue
@@ -227,7 +318,7 @@ function mergeTypeStashColors(
       ...entry,
       fields: {
         ...entry.fields,
-        ...(targetFields ? pickKeys(targetFields, colorKeys) : {})
+        ...(targetFields ? pickKeys(targetFields, keepKeys) : {})
       },
       // Drop baked Inner overlays so target palette drives live content.
       contentOverlayPng: undefined
@@ -236,16 +327,21 @@ function mergeTypeStashColors(
   return out as FaviconConfig['contentTypeStash']
 }
 
-/** Keep Outer paint; clear Inner overlays and content-layer vectors. */
+/** Keep Outer paint; clear Inner overlays, content vectors, and content punch masks. */
 function blankInnerPaintKeepOuter(session: PaintSession | null | undefined): PaintSession | null {
   if (!session) return null
   const blanked = blankPaintContentOverlay(session)
   const vectors = (session.vectors ?? []).filter(
     (v) => (v.layer ?? 'content') === 'container' && !isContentBoundVector(v)
   )
+  const punchMasks = session.punchMasks?.filter((m) => m.layer !== 'content')
   return {
     ...blanked,
     vectors,
+    punchMasks: punchMasks?.length ? punchMasks : undefined,
+    contentSync: undefined,
+    paintContentSizeRatio: undefined,
+    paintContentDrawSize: undefined,
     linkedTextInDecorations: false,
     contentBakedInDecorations: false
   }
@@ -253,23 +349,33 @@ function blankInnerPaintKeepOuter(session: PaintSession | null | undefined): Pai
 
 /**
  * Copy active favicon’s inner content geometry/type onto a target variant while
- * keeping that target’s outer settings, color slots, and Outer paint.
+ * keeping that target’s outer settings, color slots, placement, and Outer paint.
  */
 export function applyFaviconInnerContent(source: FaviconConfig, target: FaviconConfig): FaviconConfig {
   const colors = pickColorFields(
     target.content as unknown as Record<string, unknown>,
     FAVICON_CONTENT_COLOR_KEYS
   )
+  const layout = pickColorFields(
+    target.content as unknown as Record<string, unknown>,
+    FAVICON_CONTENT_LAYOUT_KEYS
+  )
+  const merged = withFaviconContentSizeRatio(
+    {
+      ...structuredClone(source.content),
+      ...colors,
+      ...layout
+    } as FaviconContent,
+    faviconContentSizeRatio(target.content)
+  )
   return {
     ...target,
-    content: {
-      ...structuredClone(source.content),
-      ...colors
-    } as FaviconContent,
+    content: merged,
     contentTypeStash: mergeTypeStashColors(
       source.contentTypeStash,
       target.contentTypeStash,
-      FAVICON_CONTENT_COLOR_KEYS
+      FAVICON_CONTENT_COLOR_KEYS,
+      FAVICON_CONTENT_LAYOUT_KEYS
     ) as FaviconConfig['contentTypeStash'],
     paintSession: blankInnerPaintKeepOuter(target.paintSession)
   }
@@ -277,7 +383,7 @@ export function applyFaviconInnerContent(source: FaviconConfig, target: FaviconC
 
 /**
  * Copy active icon’s inner content geometry/type onto a target icon while
- * keeping that target’s outer/container settings, color slots, and Outer paint.
+ * keeping that target’s outer/container settings, color slots, placement, and Outer paint.
  */
 export function applyIconInnerContent(source: IconConfig, target: IconConfig): IconConfig {
   const outer = pickKeys(
@@ -288,14 +394,26 @@ export function applyIconInnerContent(source: IconConfig, target: IconConfig): I
     target as unknown as Record<string, unknown>,
     ICON_CONTENT_COLOR_KEYS
   )
+  const layout = pickColorFields(
+    target as unknown as Record<string, unknown>,
+    ICON_CONTENT_LAYOUT_KEYS
+  )
+  const merged = withIconContentSizeRatio(
+    {
+      ...structuredClone(source),
+      ...outer,
+      ...colors,
+      ...layout
+    },
+    iconContentSizeRatio(target)
+  )
   return {
-    ...structuredClone(source),
-    ...outer,
-    ...colors,
+    ...merged,
     contentTypeStash: mergeTypeStashColors(
       source.contentTypeStash,
       target.contentTypeStash,
-      ICON_CONTENT_COLOR_KEYS
+      ICON_CONTENT_COLOR_KEYS,
+      ICON_CONTENT_LAYOUT_KEYS
     ) as IconConfig['contentTypeStash'],
     paintSession: blankInnerPaintKeepOuter(target.paintSession)
   }
