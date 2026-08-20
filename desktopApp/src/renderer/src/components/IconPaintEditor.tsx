@@ -10773,6 +10773,16 @@ export function IconPaintEditor({
           <span className="text-[10px] text-muted w-8 text-right tabular-nums">{size}px</span>
         </div>
 
+        {/* After Size so 0% opacity never inserts between Opacity and Size (or over them) */}
+        {isTransparentPaintColor(color) && (
+          <>
+            <div className="w-px h-6 bg-border shrink-0" />
+            <div className="flex items-center shrink-0">
+              <TransparentFillToggle mode={transparentFillMode} onChange={applyTransparentFillMode} />
+            </div>
+          </>
+        )}
+
         {(shapeToolActive || fillableCtx) && (
           <label className="flex items-center gap-1.5 text-[11px] text-muted cursor-pointer select-none shrink-0">
             <input
@@ -10933,15 +10943,9 @@ export function IconPaintEditor({
         </div>
       </div>
 
-      {/* Context options — fixed height so tool / transparent-mode changes never shift the canvas */}
+      {/* Context options — fixed height so tool changes never shift the canvas */}
       <div className="h-11 shrink-0 border-b border-border bg-surface2 overflow-hidden">
-        <div className="h-full flex items-center overflow-x-auto overflow-y-hidden">
-      {/* Transparent fill mode — lives here so opacity→0% never inserts into the main toolbar next to Size */}
-      {isTransparentPaintColor(color) && (
-        <div className="flex items-center gap-2 px-4 h-11 shrink-0 border-r border-border">
-          <TransparentFillToggle mode={transparentFillMode} onChange={applyTransparentFillMode} />
-        </div>
-      )}
+        <div className="h-full min-w-0 flex flex-nowrap items-center overflow-x-auto overflow-y-hidden">
       {/* Fill options */}
       {tool === 'fill' ? (
         <div className="flex items-center gap-3 px-4 h-11 flex-nowrap shrink-0">
@@ -11503,7 +11507,7 @@ export function IconPaintEditor({
             </button>
           )}
         </div>
-      ) : isTransparentPaintColor(color) ? null : (
+      ) : (
         <div className="px-4 text-[10px] text-muted/50 select-none whitespace-nowrap">
           Tool options appear here
         </div>
