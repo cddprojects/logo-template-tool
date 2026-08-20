@@ -3,6 +3,8 @@ desktopApp/node_modules/
 webApp/node_modules/
 server/node_modules/
 desktopApp/dist-app/
+desktopApp/dist-app-build/
+desktopApp/dist-app-new/
 desktopApp/out/
 webApp/dist/
 webApp/public/downloads/*.exe

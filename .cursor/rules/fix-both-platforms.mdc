@@ -1,0 +1,31 @@
+---
+description: Fix reported bugs in both desktop and web builds
+alwaysApply: true
+---
+
+# Fix bugs in desktop + web
+
+When the user reports an issue or bug, fix it for **both** targets unless they say otherwise.
+
+## Shared UI (fix once)
+
+Most editor/UI logic lives in `desktopApp/src/renderer/src/` and is reused by the web app via the `@renderer` alias in `webApp/vite.config.ts`. Changes there apply to **both** desktop and web after rebuild/redeploy.
+
+Examples: `LogoEditor`, `FaviconEditor`, `IconPaintEditor`, `useVersions`, `types`, renderer utils.
+
+## Web-only (fix separately when relevant)
+
+- `webApp/src/platform/api.ts` — `window.api` polyfill
+- `webApp/src/platform/auth.ts`, `WebShell`, login/admin/templates UI
+- `webApp/vite.config.ts`, `nginx.conf`, root `Dockerfile`, `server/`
+
+## Desktop-only (fix separately when relevant)
+
+- `desktopApp/src/main/` — Electron main process, IPC, file system, templates folder watcher
+- `desktopApp/src/preload/`
+
+## Checklist after a user-reported bug
+
+1. Identify whether the bug is shared renderer, web-only, desktop-only, or server.
+2. Apply the fix in every layer that applies (not just one).
+3. Do not leave divergent behavior between desktop and web for the same feature unless intentionally platform-limited.

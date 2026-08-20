@@ -10529,8 +10529,8 @@ export function IconPaintEditor({
         </div>
       </div>
 
-      {/* Toolbar — nowrap so tip/opacity extras scroll instead of wrapping the bar */}
-      <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-surface shrink-0 flex-nowrap overflow-x-auto">
+      {/* Toolbar — fixed height + nowrap so opacity/size extras scroll instead of shifting the canvas */}
+      <div className="h-12 flex items-center gap-3 px-4 border-b border-border bg-surface shrink-0 flex-nowrap overflow-x-auto">
         {/* Tools */}
         <div className="flex items-center gap-1">
           {TOOLS.map((t) => (
@@ -10720,7 +10720,7 @@ export function IconPaintEditor({
         </div>
 
         {!isGradientColor(color) && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <span className="text-[11px] text-muted">Opacity</span>
             <input
               type="range" min={0} max={100} value={hexAlpha(color)}
@@ -10739,18 +10739,15 @@ export function IconPaintEditor({
               onMouseUp={() => { if (selectedIdRef.current) pushHistory() }}
               className="w-24"
             />
-            <span className="text-[10px] text-muted w-7 text-right">{hexAlpha(color)}%</span>
+            <span className="text-[10px] text-muted w-7 text-right tabular-nums">{hexAlpha(color)}%</span>
           </div>
         )}
-        {isTransparentPaintColor(color) && (
-          <TransparentFillToggle mode={transparentFillMode} onChange={applyTransparentFillMode} />
-        )}
 
-        <div className="w-px h-6 bg-border" />
+        <div className="w-px h-6 bg-border shrink-0" />
 
         {/* Size / thickness / border width */}
-        <div className="flex items-center gap-2">
-          <span className="text-[11px] text-muted">
+        <div className="flex items-center gap-2 shrink-0">
+          <span className="text-[11px] text-muted whitespace-nowrap">
             {fillableCtx || tool === 'shape' || tool === 'freepoly' || tool === 'polygon'
               ? 'Border width'
               : tool === 'line'
@@ -10773,7 +10770,7 @@ export function IconPaintEditor({
             onMouseUp={() => { if (selectedIdRef.current) pushHistory() }}
             className="w-28"
           />
-          <span className="text-[10px] text-muted w-8 text-right">{size}px</span>
+          <span className="text-[10px] text-muted w-8 text-right tabular-nums">{size}px</span>
         </div>
 
         {(shapeToolActive || fillableCtx) && (
@@ -10936,9 +10933,15 @@ export function IconPaintEditor({
         </div>
       </div>
 
-      {/* Context options — fixed height so tool changes never shift the canvas */}
+      {/* Context options — fixed height so tool / transparent-mode changes never shift the canvas */}
       <div className="h-11 shrink-0 border-b border-border bg-surface2 overflow-hidden">
         <div className="h-full flex items-center overflow-x-auto overflow-y-hidden">
+      {/* Transparent fill mode — lives here so opacity→0% never inserts into the main toolbar next to Size */}
+      {isTransparentPaintColor(color) && (
+        <div className="flex items-center gap-2 px-4 h-11 shrink-0 border-r border-border">
+          <TransparentFillToggle mode={transparentFillMode} onChange={applyTransparentFillMode} />
+        </div>
+      )}
       {/* Fill options */}
       {tool === 'fill' ? (
         <div className="flex items-center gap-3 px-4 h-11 flex-nowrap shrink-0">
@@ -11500,7 +11503,7 @@ export function IconPaintEditor({
             </button>
           )}
         </div>
-      ) : (
+      ) : isTransparentPaintColor(color) ? null : (
         <div className="px-4 text-[10px] text-muted/50 select-none whitespace-nowrap">
           Tool options appear here
         </div>

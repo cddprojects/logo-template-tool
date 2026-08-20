@@ -1,0 +1,20 @@
+---
+description: Rebuild Windows app only when asked or when ready to test a portable exe
+alwaysApply: true
+---
+
+# Rebuild Windows app (on request)
+
+Do **not** run `npm run build:win` after every code change — full packaging is heavy and has crashed Cursor on this machine.
+
+Only rebuild when the user asks to build/package/test the exe, or explicitly says they want a portable build.
+
+When rebuilding:
+
+1. Stop any running `Image Generator` process first (packaging fails if `dist-app` is locked).
+2. Run `npm run build:win` from `desktopApp`.
+3. Confirm the portable exe at `desktopApp/dist-app/Image Generator 1.0.0.exe`.
+
+Use Node from Herd when `node` is not on PATH: `C:\Users\CDD_Tech\.config\herd\bin\nvm\v22.23.1`.
+
+For quick UI checks prefer `npm run dev` in `desktopApp` — never start a full package as a default step.
