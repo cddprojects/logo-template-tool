@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from 'react'
-import { ExternalLink, CheckCircle2, ClipboardCopy } from 'lucide-react'
+import { ExternalLink, CheckCircle2, ClipboardCopy, Image as ImageIcon } from 'lucide-react'
 import type {
   CanvaBusinessType,
   CanvaDesignType,
@@ -14,6 +14,8 @@ import {
   CANVA_BUSINESS_TYPE_OPTIONS,
   CANVA_DESIGN_TYPE_OPTIONS,
   CANVA_IMAGE_REFERENCE_OPTIONS,
+  copyCanvaPromptText,
+  copyCanvaReferenceImage,
   openCanvaWithPromptAndReference,
   type CanvaOpenResult
 } from '../utils/canvaPrompt'
@@ -34,6 +36,8 @@ const OPEN_LABELS: Record<CanvaOpenResult, string> = {
   failed: 'Could not open Canva — try again'
 }
 
+type CopyFlash = 'prompt' | 'image' | null
+
 export function CanvaPromptPanel({
   content,
   faviconConfig,
@@ -45,10 +49,12 @@ export function CanvaPromptPanel({
     typeof window !== 'undefined' &&
     !!(window as Window & { __WEB__?: boolean }).__WEB__
   const [openResult, setOpenResult] = useState<CanvaOpenResult | null>(null)
+  const [copyFlash, setCopyFlash] = useState<CopyFlash>(null)
   const prompt = useMemo(() => buildCanvaPrompt(content, appName), [content, appName])
   const hasLogoIcon = !!logoIcon
   const imageRef = content.canvaImageReference ?? 'none'
   const hasReference = imageRef !== 'none'
+  const logoIconBlocked = imageRef === 'logo-icon' && !hasLogoIcon
 
   const imageReferenceOptions = useMemo(
     () =>
@@ -60,11 +66,26 @@ export function CanvaPromptPanel({
     [hasLogoIcon]
   )
 
+  const flashCopy = useCallback((kind: Exclude<CopyFlash, null>) => {
+    setCopyFlash(kind)
+    window.setTimeout(() => setCopyFlash((cur) => (cur === kind ? null : cur)), 2500)
+  }, [])
+
   const handleGenerate = useCallback(async () => {
     const result = await openCanvaWithPromptAndReference(content, appName, faviconConfig, logoIcon)
     setOpenResult(result)
     window.setTimeout(() => setOpenResult(null), 4500)
   }, [content, appName, faviconConfig, logoIcon])
+
+  const handleCopyPrompt = useCallback(async () => {
+    const ok = await copyCanvaPromptText(content, appName)
+    if (ok) flashCopy('prompt')
+  }, [content, appName, flashCopy])
+
+  const handleCopyImage = useCallback(async () => {
+    const ok = await copyCanvaReferenceImage(content, faviconConfig, logoIcon)
+    if (ok) flashCopy('image')
+  }, [content, faviconConfig, logoIcon, flashCopy])
 
   const secondaryEnabled = !!(content.canvaSecondaryColor?.trim())
 
@@ -98,7 +119,7 @@ export function CanvaPromptPanel({
         options={imageReferenceOptions}
         onChange={(v) => onChange({ canvaImageReference: v as CanvaImageReference })}
       />
-      {imageRef === 'logo-icon' && !hasLogoIcon && (
+      {logoIconBlocked && (
         <p className="text-[10px] text-amber-400/90 leading-snug -mt-1">
           Add a logo variant with the same name as this favicon to use its icon as reference.
         </p>
@@ -143,21 +164,49 @@ export function CanvaPromptPanel({
       <button
         type="button"
         onClick={() => { void handleGenerate() }}
-        disabled={imageRef === 'logo-icon' && !hasLogoIcon}
+        disabled={logoIconBlocked}
         className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-lg text-xs font-semibold bg-accent text-white hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
       >
         {openResult ? <CheckCircle2 size={14} /> : <ClipboardCopy size={14} />}
         {openResult
           ? openResult === 'opened' && isWebApp
-            ? 'Copied prompt + image — paste in Canva'
+            ? 'Opened Canva — paste prompt (Ctrl+V)'
             : OPEN_LABELS[openResult]
           : 'Generate with Canva'}
       </button>
+
+      {isWebApp && (
+        <>
+          <button
+            type="button"
+            onClick={() => { void handleCopyPrompt() }}
+            className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-medium bg-surface3 text-muted hover:text-text border border-border transition-colors"
+          >
+            {copyFlash === 'prompt' ? <CheckCircle2 size={13} /> : <ClipboardCopy size={13} />}
+            {copyFlash === 'prompt' ? 'Prompt copied' : 'Copy prompt'}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => { void handleCopyImage() }}
+            disabled={!hasReference || logoIconBlocked}
+            className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs font-medium bg-surface3 text-muted hover:text-text border border-border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {copyFlash === 'image' ? <CheckCircle2 size={13} /> : <ImageIcon size={13} />}
+            {copyFlash === 'image'
+              ? 'Image copied'
+              : hasReference
+                ? 'Copy image'
+                : 'Copy image (set reference above)'}
+          </button>
+        </>
+      )}
+
       <p className="text-[10px] text-muted leading-snug">
         {isWebApp
           ? hasReference
-            ? 'Copies the prompt and reference image together, then opens Canva AI. Paste in the prompt box for the text, or into the image slot for the reference (Ctrl+V).'
-            : 'Copies the prompt, then opens Canva AI. Paste into the prompt box (Ctrl+V) and press Send.'
+            ? 'Generate opens Canva and copies the prompt. Paste into the text box (Ctrl+V), then use Copy image and paste again for the reference.'
+            : 'Generate opens Canva and copies the prompt. Paste into the prompt box (Ctrl+V) and press Send.'
           : hasReference
             ? 'Opens Canva AI and fills the prompt. The reference image is on the clipboard — paste it (Ctrl+V), then press Send.'
             : 'Opens Canva AI and fills the prompt. Press Send in Canva.'}

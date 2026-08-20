@@ -340,58 +340,25 @@ export function installWebApi(): void {
       }
     },
 
-    writeClipboardTextAndImage: async (text: string, pngBase64: string) => {
+    writeClipboardTextAndImage: async (text: string, _pngBase64: string) => {
+      // Canva's single prompt field prefers image/png when both MIME types are
+      // present, so Ctrl+V pastes only the image and drops the prompt. Web copies
+      // text here; use writeClipboardImage for the reference PNG separately.
       try {
-        if (typeof ClipboardItem === 'undefined' || !navigator.clipboard?.write) {
-          await navigator.clipboard.writeText(text)
-          return { success: false, text: true, image: false, error: 'Clipboard image write is not supported' }
-        }
-        const bytes = Uint8Array.from(atob(pngBase64), (c) => c.charCodeAt(0))
-        const imageBlob = new Blob([bytes], { type: 'image/png' })
-        try {
-          await navigator.clipboard.write([
-            new ClipboardItem({
-              'text/plain': Promise.resolve(new Blob([text], { type: 'text/plain' })),
-              'image/png': Promise.resolve(imageBlob)
-            })
-          ])
-          return { success: true, text: true, image: true }
-        } catch {
-          await navigator.clipboard.write([
-            new ClipboardItem({
-              'image/png': Promise.resolve(imageBlob)
-            })
-          ])
-          return { success: false, text: false, image: true, error: 'Copied image only' }
-        }
+        await navigator.clipboard.writeText(text)
+        return { success: true, text: true, image: false }
       } catch (e) {
-        return { success: false, error: String(e) }
+        return { success: false, text: false, image: false, error: String(e) }
       }
     },
 
     openCanvaAi: async (payload?: { prompt?: string; pngBase64?: string }) => {
       const prompt = payload?.prompt ?? ''
       try {
-        if (payload?.pngBase64 && typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
-          const bytes = Uint8Array.from(atob(payload.pngBase64), (c) => c.charCodeAt(0))
-          const imageBlob = new Blob([bytes], { type: 'image/png' })
-          try {
-            await navigator.clipboard.write([
-              new ClipboardItem({
-                'text/plain': Promise.resolve(new Blob([prompt], { type: 'text/plain' })),
-                'image/png': Promise.resolve(imageBlob)
-              })
-            ])
-          } catch {
-            await navigator.clipboard.write([
-              new ClipboardItem({
-                'image/png': Promise.resolve(imageBlob)
-              })
-            ])
-          }
-        } else if (prompt) {
-          await navigator.clipboard.writeText(prompt)
-        }
+        // Prompt only — mixed text+image clipboard makes Canva paste the PNG
+        // into the text box and skip the prompt. Copy the reference with
+        // writeClipboardImage after pasting the text.
+        if (prompt) await navigator.clipboard.writeText(prompt)
       } catch {
         /* browser clipboard may be blocked */
       }
