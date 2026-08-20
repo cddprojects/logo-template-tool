@@ -284,7 +284,9 @@ function withIconContentSizeRatio(icon: IconConfig, ratio: number): IconConfig {
 function mergeTypeStashColors(
   sourceStash: FaviconConfig['contentTypeStash'] | IconConfig['contentTypeStash'],
   targetStash: FaviconConfig['contentTypeStash'] | IconConfig['contentTypeStash'],
-  colorKeys: readonly string[]
+  colorKeys: readonly string[],
+  primaryFill: string,
+  secondaryFill?: string
 ): FaviconConfig['contentTypeStash'] | IconConfig['contentTypeStash'] {
   if (!sourceStash) return undefined
   const out: Record<string, ContentTypeStashEntry> = {}
@@ -297,12 +299,174 @@ function mergeTypeStashColors(
         ...entry.fields,
         ...(targetFields ? pickKeys(targetFields, colorKeys) : {})
       },
-      // Keep source Inner overlays / vectors — clearing them drops painted objects.
-      contentOverlayPng: entry.contentOverlayPng,
-      contentVectors: entry.contentVectors ? structuredClone(entry.contentVectors) : undefined
+      // Drop baked overlays (source colors). Keep vector geometry, recolored.
+      contentOverlayPng: undefined,
+      contentVectors: entry.contentVectors
+        ? recolorContentVectors(structuredClone(entry.contentVectors), primaryFill, secondaryFill)
+        : undefined
     }
   }
   return out as FaviconConfig['contentTypeStash']
+}
+
+function faviconPrimaryFill(content: FaviconContent): string {
+  switch (content.type) {
+    case 'letters':
+      return content.textColor || '#ffffff'
+    case 'shape':
+      return content.shapeColor || '#ffffff'
+    case 'lucide':
+    case 'svg-markup':
+      return content.lucideColor || '#ffffff'
+    case 'svg':
+      return content.svgColor || '#ffffff'
+    case 'canva':
+      return content.canvaPrimaryColor || '#6366f1'
+    case 'image':
+      return content.imageColor1 || content.lucideColor || '#ffffff'
+    default:
+      return '#ffffff'
+  }
+}
+
+function faviconSecondaryFill(content: FaviconContent): string {
+  if (content.type === 'canva') return content.canvaSecondaryColor || ''
+  if (content.type === 'svg-markup' || content.type === 'image') {
+    return content.svgMarkupSecondaryColor || content.imageColor2 || ''
+  }
+  return content.svgMarkupSecondaryColor || ''
+}
+
+/** Force the new content type’s fill slots to the target variant’s palette. */
+function withFaviconTargetColors(content: FaviconContent, target: FaviconContent): FaviconContent {
+  const picked = pickColorFields(
+    target as unknown as Record<string, unknown>,
+    FAVICON_CONTENT_COLOR_KEYS
+  )
+  const primary = faviconPrimaryFill(target)
+  const secondary = faviconSecondaryFill(target)
+  let next: FaviconContent = { ...content, ...picked }
+  switch (next.type) {
+    case 'letters':
+      next = { ...next, textColor: primary }
+      break
+    case 'shape':
+      next = { ...next, shapeColor: primary }
+      break
+    case 'lucide':
+      next = { ...next, lucideColor: primary }
+      break
+    case 'svg-markup':
+      next = {
+        ...next,
+        lucideColor: primary,
+        svgMarkupSecondaryColor: secondary || next.svgMarkupSecondaryColor,
+        // Prefer remapping so source SVG ink is not kept “as original”.
+        svgMarkupUseOriginalColors: target.svgMarkupUseOriginalColors ?? false
+      }
+      break
+    case 'svg':
+      next = { ...next, svgColor: primary }
+      break
+    case 'canva':
+      next = {
+        ...next,
+        canvaPrimaryColor: primary,
+        canvaSecondaryColor: secondary
+      }
+      break
+    case 'image':
+      next = {
+        ...next,
+        imageColor1: primary,
+        imageColor2: secondary || next.imageColor2,
+        imageUseOriginalColors: target.imageUseOriginalColors ?? false
+      }
+      break
+    default:
+      break
+  }
+  return next
+}
+
+function iconPrimaryFill(icon: IconConfig): string {
+  switch (icon.sourceType) {
+    case 'letters':
+      return icon.textColor || '#ffffff'
+    case 'shape':
+    case 'lucide':
+    case 'svg':
+      return icon.primaryColor || '#ffffff'
+    case 'image':
+      return icon.imageColor1 || icon.primaryColor || '#ffffff'
+    default:
+      return icon.primaryColor || '#ffffff'
+  }
+}
+
+function withIconTargetColors(icon: IconConfig, target: IconConfig): IconConfig {
+  const picked = pickColorFields(
+    target as unknown as Record<string, unknown>,
+    ICON_CONTENT_COLOR_KEYS
+  )
+  const primary = iconPrimaryFill(target)
+  const secondary = target.secondaryColor || ''
+  let next: IconConfig = { ...icon, ...picked }
+  switch (next.sourceType) {
+    case 'letters':
+      next = { ...next, textColor: primary }
+      break
+    case 'shape':
+      next = { ...next, primaryColor: primary, secondaryColor: secondary || next.secondaryColor }
+      break
+    case 'lucide':
+      next = { ...next, primaryColor: primary }
+      break
+    case 'svg':
+      next = {
+        ...next,
+        primaryColor: primary,
+        svgMarkupSecondaryColor: secondary || next.svgMarkupSecondaryColor,
+        svgMarkupUseOriginalColors: target.svgMarkupUseOriginalColors ?? false
+      }
+      break
+    case 'image':
+      next = {
+        ...next,
+        primaryColor: primary,
+        imageColor1: primary,
+        imageColor2: secondary || next.imageColor2,
+        imageUseOriginalColors: target.imageUseOriginalColors ?? false
+      }
+      break
+    default:
+      break
+  }
+  return next
+}
+
+function recolorContentVectors(
+  vectors: PaintVector[],
+  fill: string,
+  secondary?: string
+): PaintVector[] {
+  const border = secondary?.trim() ? secondary : fill
+  return vectors.map((v) => {
+    if (v.punchMask) return v
+    const next: PaintVector = { ...v, color: fill }
+    if (next.borderColor && next.borderColor !== 'transparent') {
+      next.borderColor = border
+    }
+    if (next.shadowColor && !String(next.shadowColor).endsWith('00')) {
+      // leave soft shadows; only recolor solid object fills above
+    }
+    if (next.paintStrokes?.length) {
+      next.paintStrokes = next.paintStrokes.map((s) =>
+        s.tool === 'eraser' ? s : { ...s, color: fill }
+      )
+    }
+    return next
+  })
 }
 
 function isPaintContentLayerVector(v: PaintVector): boolean {
@@ -314,29 +478,47 @@ function isPaintContainerLayerVector(v: PaintVector): boolean {
 }
 
 /**
- * Target keeps Outer paint; Inner paint / content vectors come from the source
- * so painted objects and placement match the active variant.
+ * Keep target Outer paint. Copy source Inner object geometry (position/size),
+ * but blank baked Inner PNGs and recolor vectors to the target palette.
  */
-function mergePaintInnerFromSource(
+function mergePaintInnerGeometryNoColor(
   sourceSession: PaintSession | null | undefined,
-  targetSession: PaintSession | null | undefined
+  targetSession: PaintSession | null | undefined,
+  primaryFill: string,
+  secondaryFill?: string
 ): PaintSession | null {
   if (!sourceSession && !targetSession) return null
-  if (!sourceSession) {
-    return blankInnerPaintOnly(targetSession)
-  }
+  if (!sourceSession) return blankInnerPaintOnly(targetSession)
   if (!targetSession) {
-    return structuredClone(sourceSession)
+    const empty = emptyOverlayPng(sourceSession.resolution)
+    const contentVectors = recolorContentVectors(
+      structuredClone((sourceSession.vectors ?? []).filter(isPaintContentLayerVector)),
+      primaryFill,
+      secondaryFill
+    )
+    return {
+      ...structuredClone(sourceSession),
+      containerPng: empty,
+      containerDecorationsPng: empty,
+      contentPng: empty,
+      contentDecorationsPng: empty,
+      decorationsPng: undefined,
+      vectors: contentVectors,
+      punchMasks: sourceSession.punchMasks?.filter((m) => m.layer === 'content'),
+      contentBakedInDecorations: false,
+      linkedTextInDecorations: false,
+      contentSync: undefined
+    }
   }
   if (sourceSession.resolution !== targetSession.resolution) {
-    // Different canvas sizes — still take source Inner; keep target Outer at its res
-    // by blanking Inner on target (cannot safely blit across resolutions).
     return blankInnerPaintOnly(targetSession)
   }
   const empty = emptyOverlayPng(targetSession.resolution)
   const containerVectors = (targetSession.vectors ?? []).filter(isPaintContainerLayerVector)
-  const contentVectors = structuredClone(
-    (sourceSession.vectors ?? []).filter(isPaintContentLayerVector)
+  const contentVectors = recolorContentVectors(
+    structuredClone((sourceSession.vectors ?? []).filter(isPaintContentLayerVector)),
+    primaryFill,
+    secondaryFill
   )
   const usedIds = new Set(containerVectors.map((v) => v.id))
   for (const v of contentVectors) {
@@ -359,16 +541,16 @@ function mergePaintInnerFromSource(
     ...targetSession,
     containerPng: targetSession.containerPng,
     containerDecorationsPng: targetSession.containerDecorationsPng,
-    contentPng: sourceSession.contentPng ?? empty,
-    contentDecorationsPng: sourceSession.contentDecorationsPng ?? empty,
+    // Never copy baked Inner rasters — they carry the source colors.
+    contentPng: empty,
+    contentDecorationsPng: empty,
     decorationsPng: undefined,
     vectors: [...containerVectors, ...contentVectors],
     punchMasks: punchMasks.length ? punchMasks : undefined,
-    contentBakedInDecorations: !!sourceSession.contentBakedInDecorations,
-    linkedTextInDecorations: !!sourceSession.linkedTextInDecorations,
+    contentBakedInDecorations: false,
+    linkedTextInDecorations: false,
     paintContentSizeRatio: sourceSession.paintContentSizeRatio,
     paintContentDrawSize: sourceSession.paintContentDrawSize,
-    // Drop stale sync so target live colors are not overwritten on next open.
     contentSync: undefined
   }
 }
@@ -390,21 +572,14 @@ function blankInnerPaintOnly(session: PaintSession | null | undefined): PaintSes
 }
 
 /**
- * Copy active favicon’s inner content (live settings + Inner paint) onto a target
- * while keeping that target’s outer settings, color slots, and Outer paint.
+ * Copy active favicon’s inner shape, size, and position onto a target.
+ * Colors (and Outer paint) stay on the target.
  */
 export function applyFaviconInnerContent(source: FaviconConfig, target: FaviconConfig): FaviconConfig {
-  const colors = pickColorFields(
-    target.content as unknown as Record<string, unknown>,
-    FAVICON_CONTENT_COLOR_KEYS
-  )
-  // Source placement + size so the shape matches the active variant; target
-  // offsets were often stale from a previous type and looked heavily displaced.
+  const primary = faviconPrimaryFill(target.content)
+  const secondary = faviconSecondaryFill(target.content)
   const merged = withFaviconContentSizeRatio(
-    {
-      ...structuredClone(source.content),
-      ...colors
-    } as FaviconContent,
+    withFaviconTargetColors(structuredClone(source.content), target.content),
     faviconContentSizeRatio(source.content)
   )
   return {
@@ -413,31 +588,38 @@ export function applyFaviconInnerContent(source: FaviconConfig, target: FaviconC
     contentTypeStash: mergeTypeStashColors(
       source.contentTypeStash,
       target.contentTypeStash,
-      FAVICON_CONTENT_COLOR_KEYS
+      FAVICON_CONTENT_COLOR_KEYS,
+      primary,
+      secondary
     ) as FaviconConfig['contentTypeStash'],
-    paintSession: mergePaintInnerFromSource(source.paintSession, target.paintSession)
+    paintSession: mergePaintInnerGeometryNoColor(
+      source.paintSession,
+      target.paintSession,
+      primary,
+      secondary
+    )
   }
 }
 
 /**
- * Copy active icon’s inner content (live settings + Inner paint) onto a target
- * while keeping that target’s outer/container settings, color slots, and Outer paint.
+ * Copy active icon’s inner shape, size, and position onto a target.
+ * Colors (and Outer/container) stay on the target.
  */
 export function applyIconInnerContent(source: IconConfig, target: IconConfig): IconConfig {
   const outer = pickKeys(
     target as unknown as Record<string, unknown>,
     ICON_OUTER_KEYS
   ) as Partial<IconConfig>
-  const colors = pickColorFields(
-    target as unknown as Record<string, unknown>,
-    ICON_CONTENT_COLOR_KEYS
-  )
+  const primary = iconPrimaryFill(target)
+  const secondary = target.secondaryColor || ''
   const merged = withIconContentSizeRatio(
-    {
-      ...structuredClone(source),
-      ...outer,
-      ...colors
-    },
+    withIconTargetColors(
+      {
+        ...structuredClone(source),
+        ...outer
+      },
+      target
+    ),
     iconContentSizeRatio(source)
   )
   return {
@@ -445,9 +627,16 @@ export function applyIconInnerContent(source: IconConfig, target: IconConfig): I
     contentTypeStash: mergeTypeStashColors(
       source.contentTypeStash,
       target.contentTypeStash,
-      ICON_CONTENT_COLOR_KEYS
+      ICON_CONTENT_COLOR_KEYS,
+      primary,
+      secondary
     ) as IconConfig['contentTypeStash'],
-    paintSession: mergePaintInnerFromSource(source.paintSession, target.paintSession)
+    paintSession: mergePaintInnerGeometryNoColor(
+      source.paintSession,
+      target.paintSession,
+      primary,
+      secondary
+    )
   }
 }
 
