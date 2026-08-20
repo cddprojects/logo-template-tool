@@ -10651,10 +10651,11 @@ export function IconPaintEditor({
         </div>
       </div>
 
-      {/* Toolbar — fixed height + nowrap so opacity/size extras scroll instead of shifting the canvas */}
-      <div className="h-12 flex items-center gap-3 px-4 border-b border-border bg-surface shrink-0 flex-nowrap overflow-x-auto">
+      {/* Toolbar — two fixed rows so tools and paint settings stay visible without one long scroll strip */}
+      <div className="shrink-0 border-b border-border bg-surface">
+      <div className="h-11 flex items-center gap-3 px-4 flex-nowrap overflow-x-auto">
         {/* Tools */}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 shrink-0">
           {TOOLS.map((t) => (
             <button
               key={t.key}
@@ -10762,11 +10763,11 @@ export function IconPaintEditor({
             <span className="text-border">|</span>
           </div>
         </div>
+      </div>
 
-        <div className="w-px h-6 bg-border" />
-
+      <div className="h-11 flex items-center gap-3 px-4 border-t border-border/70 flex-nowrap overflow-x-auto">
         {/* Colour — solid / linear / radial (same picker as outside paint mode) */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <button
             ref={colorSwatchRef}
             type="button"
@@ -11063,6 +11064,7 @@ export function IconPaintEditor({
             <Ban size={15} />
           </button>
         </div>
+      </div>
       </div>
 
       {/* Context options — fixed height so tool changes never shift the canvas */}
