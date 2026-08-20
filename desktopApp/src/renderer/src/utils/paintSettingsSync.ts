@@ -136,6 +136,171 @@ export function extractIconTypeFields(
   return pickKeys(icon as unknown as Record<string, unknown>, ICON_TYPE_KEYS[type] ?? SHARED_CONTENT_KEYS)
 }
 
+/** Inner color slots + “use original” flags kept per target variant when applying inner-only. */
+const FAVICON_CONTENT_COLOR_KEYS = [
+  'textColor',
+  'shapeColor',
+  'svgColor',
+  'lucideColor',
+  'svgMarkupUseOriginalColors',
+  'svgMarkupSecondaryColor',
+  'svgMarkupTertiaryColor',
+  'svgMarkupColor4',
+  'svgMarkupColor5',
+  'imageUseOriginalColors',
+  'imageColor1',
+  'imageColor2',
+  'imageColor3',
+  'imageColor4',
+  'imageColor5',
+  'canvaPrimaryColor',
+  'canvaSecondaryColor',
+  'contentShadowEnabled',
+  'contentShadowInset',
+  'contentShadowColor',
+  'contentBorderColor'
+] as const
+
+const ICON_CONTENT_COLOR_KEYS = [
+  'primaryColor',
+  'secondaryColor',
+  'textColor',
+  'svgMarkupUseOriginalColors',
+  'svgMarkupSecondaryColor',
+  'svgMarkupTertiaryColor',
+  'svgMarkupColor4',
+  'svgMarkupColor5',
+  'imageUseOriginalColors',
+  'imageColor1',
+  'imageColor2',
+  'imageColor3',
+  'imageColor4',
+  'imageColor5',
+  'contentShadowEnabled',
+  'contentShadowInset',
+  'contentShadowColor',
+  'contentBorderColor'
+] as const
+
+/** Icon outer / container fields that must stay on the target when applying inner-only. */
+const ICON_OUTER_KEYS = [
+  'containerEnabled',
+  'containerShape',
+  'containerType',
+  'containerColor',
+  'containerImageDataUrl',
+  'containerSvgMarkup',
+  'containerPadding',
+  'containerBorderColor',
+  'containerBorderWidth',
+  'containerBorderRadius',
+  'containerSvgBorderPath',
+  'size',
+  'visible',
+  'shadowEnabled',
+  'shadowColor',
+  'shadowBlur',
+  'shadowSpread',
+  'shadowOffsetX',
+  'shadowOffsetY',
+  'transparentFillMode'
+] as const
+
+function pickColorFields<T extends Record<string, unknown>>(
+  source: T,
+  keys: readonly string[]
+): Partial<T> {
+  return pickKeys(source, keys) as Partial<T>
+}
+
+function mergeTypeStashColors(
+  sourceStash: FaviconConfig['contentTypeStash'] | IconConfig['contentTypeStash'],
+  targetStash: FaviconConfig['contentTypeStash'] | IconConfig['contentTypeStash'],
+  colorKeys: readonly string[]
+): FaviconConfig['contentTypeStash'] | IconConfig['contentTypeStash'] {
+  if (!sourceStash) return undefined
+  const out: Record<string, ContentTypeStashEntry> = {}
+  for (const [type, entry] of Object.entries(sourceStash)) {
+    if (!entry) continue
+    const targetFields = targetStash?.[type as keyof typeof targetStash]?.fields
+    out[type] = {
+      ...entry,
+      fields: {
+        ...entry.fields,
+        ...(targetFields ? pickKeys(targetFields, colorKeys) : {})
+      },
+      // Drop baked Inner overlays so target palette drives live content.
+      contentOverlayPng: undefined
+    }
+  }
+  return out as FaviconConfig['contentTypeStash']
+}
+
+/** Keep Outer paint; clear Inner overlays and content-layer vectors. */
+function blankInnerPaintKeepOuter(session: PaintSession | null | undefined): PaintSession | null {
+  if (!session) return null
+  const blanked = blankPaintContentOverlay(session)
+  const vectors = (session.vectors ?? []).filter(
+    (v) => (v.layer ?? 'content') === 'container' && !isContentBoundVector(v)
+  )
+  return {
+    ...blanked,
+    vectors,
+    linkedTextInDecorations: false,
+    contentBakedInDecorations: false
+  }
+}
+
+/**
+ * Copy active favicon’s inner content geometry/type onto a target variant while
+ * keeping that target’s outer settings, color slots, and Outer paint.
+ */
+export function applyFaviconInnerContent(source: FaviconConfig, target: FaviconConfig): FaviconConfig {
+  const colors = pickColorFields(
+    target.content as unknown as Record<string, unknown>,
+    FAVICON_CONTENT_COLOR_KEYS
+  )
+  return {
+    ...target,
+    content: {
+      ...structuredClone(source.content),
+      ...colors
+    } as FaviconContent,
+    contentTypeStash: mergeTypeStashColors(
+      source.contentTypeStash,
+      target.contentTypeStash,
+      FAVICON_CONTENT_COLOR_KEYS
+    ) as FaviconConfig['contentTypeStash'],
+    paintSession: blankInnerPaintKeepOuter(target.paintSession)
+  }
+}
+
+/**
+ * Copy active icon’s inner content geometry/type onto a target icon while
+ * keeping that target’s outer/container settings, color slots, and Outer paint.
+ */
+export function applyIconInnerContent(source: IconConfig, target: IconConfig): IconConfig {
+  const outer = pickKeys(
+    target as unknown as Record<string, unknown>,
+    ICON_OUTER_KEYS
+  ) as Partial<IconConfig>
+  const colors = pickColorFields(
+    target as unknown as Record<string, unknown>,
+    ICON_CONTENT_COLOR_KEYS
+  )
+  return {
+    ...structuredClone(source),
+    ...outer,
+    ...colors,
+    contentTypeStash: mergeTypeStashColors(
+      source.contentTypeStash,
+      target.contentTypeStash,
+      ICON_CONTENT_COLOR_KEYS
+    ) as IconConfig['contentTypeStash'],
+    paintSession: blankInnerPaintKeepOuter(target.paintSession)
+  }
+}
+
 export function isContentBoundVector(v: PaintVector): boolean {
   return !!(v.linkedOutsideText || v.contentBound)
 }

@@ -11,6 +11,8 @@ import { recolorFieldsAfterImageChange } from '../utils/imageRecolor'
 import {
   applyPaintSaveToFavicon,
   applyPaintSaveToIcon,
+  applyFaviconInnerContent,
+  applyIconInnerContent,
   clearIconUploadedImage,
   iconConfigToFaviconConfig,
   mapFaviconStashToIconStash,
@@ -100,6 +102,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   const [labelInput, setLabelInput] = useState('')
   const [styleClipboard, setStyleClipboard] = useState<LogoConfig | null>(null)
   const [iconAppliedToAll, setIconAppliedToAll] = useState(false)
+  const [innerAppliedToAll, setInnerAppliedToAll] = useState(false)
   const dragIndexRef = useRef<number | null>(null)
   const variantsRef = useRef(variants)
   const faviconVariantsRef = useRef(faviconVariants)
@@ -847,6 +850,84 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
     window.setTimeout(() => setIconAppliedToAll(false), 1600)
   }
 
+  /** Copy only inner content; keep each variant's outer + color slots. */
+  const applyActiveInnerToAll = () => {
+    if (!safeConfig || !effectiveIcon || variants.length < 2) return
+
+    if (isSyncedWithFavicon && matchingFaviconVariant) {
+      const sourceFavicon = matchingFaviconVariant.config
+      const mergedByLabel = new Map(
+        faviconVariants.map((variant) => [
+          variant.label,
+          applyFaviconInnerContent(sourceFavicon, variant.config)
+        ])
+      )
+      if (onFaviconChange) {
+        onFaviconChange(
+          faviconVariants.map((variant) => ({
+            ...variant,
+            config: mergedByLabel.get(variant.label) ?? variant.config
+          }))
+        )
+      }
+
+      const sourceIcon = effectiveIcon
+      onChange(
+        variants.map((variant) => {
+          const mergedFav = mergedByLabel.get(variant.label)
+          if (mergedFav) {
+            const baseIcon =
+              variant.config.syncedIcon ??
+              variant.config.icon ??
+              safeConfig.icon
+            return {
+              ...variant,
+              config: {
+                ...variant.config,
+                iconLinked: true,
+                iconSyncBroken: false,
+                syncedIconSnapshot: null,
+                syncedIcon: faviconContentToIconConfig(
+                  mergedFav.content,
+                  baseIcon,
+                  mergedFav
+                )
+              }
+            }
+          }
+          return {
+            ...variant,
+            config: {
+              ...variant.config,
+              icon: applyIconInnerContent(sourceIcon, variant.config.icon),
+              syncedIcon: null,
+              iconLinked: false,
+              iconSyncBroken: false,
+              syncedIconSnapshot: null
+            }
+          }
+        })
+      )
+    } else {
+      const sourceIcon = effectiveIcon ?? safeConfig.icon
+      onChange(
+        variants.map((variant) => ({
+          ...variant,
+          config: {
+            ...variant.config,
+            icon: applyIconInnerContent(sourceIcon, variant.config.icon),
+            iconLinked: false,
+            iconSyncBroken: false,
+            syncedIconSnapshot: null
+          }
+        }))
+      )
+    }
+
+    setInnerAppliedToAll(true)
+    window.setTimeout(() => setInnerAppliedToAll(false), 1600)
+  }
+
   // Drag-to-reorder variants.
   const handleVariantDrop = (targetId: string) => {
     const from = dragIndexRef.current
@@ -1059,23 +1140,42 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
           </button>
         )}
         {variants.length > 1 && (
-          <button
-            type="button"
-            onClick={applyActiveIconToAll}
-            title={
-              isSyncedWithFavicon
-                ? 'Apply this synced favicon to every favicon and logo variant'
-                : 'Apply this original custom logo icon to every logo variant'
-            }
-            className={`ml-auto flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
-              iconAppliedToAll
-                ? 'border-success/60 bg-success/10 text-success'
-                : 'border-border bg-surface3 text-muted hover:text-text hover:border-muted'
-            }`}
-          >
-            {iconAppliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
-            {iconAppliedToAll ? 'Applied to all' : 'Apply icon to all'}
-          </button>
+          <div className="ml-auto flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={applyActiveIconToAll}
+              title={
+                isSyncedWithFavicon
+                  ? 'Apply this synced favicon to every favicon and logo variant'
+                  : 'Apply this original custom logo icon to every logo variant'
+              }
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
+                iconAppliedToAll
+                  ? 'border-success/60 bg-success/10 text-success'
+                  : 'border-border bg-surface3 text-muted hover:text-text hover:border-muted'
+              }`}
+            >
+              {iconAppliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
+              {iconAppliedToAll ? 'Applied to all' : 'Apply icon to all'}
+            </button>
+            <button
+              type="button"
+              onClick={applyActiveInnerToAll}
+              title={
+                isSyncedWithFavicon
+                  ? 'Copy only the inner content shape/type to every favicon and logo variant. Each keeps its outer settings and colors.'
+                  : 'Copy only the inner content shape/type to every logo variant. Each keeps its outer settings and colors.'
+              }
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
+                innerAppliedToAll
+                  ? 'border-success/60 bg-success/10 text-success'
+                  : 'border-border bg-surface3 text-muted hover:text-text hover:border-muted'
+              }`}
+            >
+              {innerAppliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
+              {innerAppliedToAll ? 'Inner applied' : 'Apply inner to all'}
+            </button>
+          </div>
         )}
       </div>
 

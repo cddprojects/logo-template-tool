@@ -83,6 +83,11 @@ function UseGuide(): JSX.Element {
             Synced logo icons copy through the favicon; unsynced logos copy their own custom icon
           </li>
           <li>
+            <span className="text-text">Apply inner to all</span> copies only the active variant’s inner content
+            shape/type onto every other variant. Each variant keeps its outer shape, Outer paint, and its own
+            color slots (primary, secondary, text, …). Inner paint overlays are cleared so those colors show through
+          </li>
+          <li>
             <span className="text-text">Paint</span> opens the icon editor. The right panel’s
             <span className="text-text"> Save to variants</span> list chooses which Logo / Favicon variants receive Save
             (a one-time copy, not continuous sync between variants). Saving onto a synced pair
