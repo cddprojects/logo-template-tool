@@ -366,7 +366,8 @@ export function applyFaviconInnerContent(source: FaviconConfig, target: FaviconC
       ...colors,
       ...layout
     } as FaviconContent,
-    faviconContentSizeRatio(target.content)
+    // Match the active variant’s inner size; keep target offsets via layout.
+    faviconContentSizeRatio(source.content)
   )
   return {
     ...target,
@@ -405,7 +406,8 @@ export function applyIconInnerContent(source: IconConfig, target: IconConfig): I
       ...colors,
       ...layout
     },
-    iconContentSizeRatio(target)
+    // Match the active variant’s inner size; keep target offsets via layout.
+    iconContentSizeRatio(source)
   )
   return {
     ...merged,
