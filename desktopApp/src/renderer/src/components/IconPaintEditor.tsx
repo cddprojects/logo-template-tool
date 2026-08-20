@@ -573,8 +573,18 @@ async function restorePunchMasks(
       if (l.type === 'text') {
         const mapped = textPunchBitsFromSavedLayer(l, bits, W, H)
         if (!mapped) continue
-        setLocalPunchFromFilled(l, mapped.bits, W, H)
-        if (mapped.enclosed) l.punchEnclosedHole = true
+        let hole = mapped.bits
+        if (mapped.enclosed) {
+          const probe = document.createElement('canvas')
+          probe.width = W
+          probe.height = H
+          const pctx = probe.getContext('2d')!
+          renderLine(pctx, { ...l, shadow: false, punchThrough: false, color: '#000000' })
+          const eroded = erodeHoleAwayFromInk(hole, pctx.getImageData(0, 0, W, H).data, W, H, 32, 1)
+          if (eroded.some((v) => v)) hole = eroded
+          l.punchEnclosedHole = true
+        }
+        setLocalPunchFromFilled(l, hole, W, H)
       } else {
         setLocalPunchFromFilled(l, bits, W, H)
       }
@@ -747,6 +757,78 @@ function floodOutsideEmpty(ink: Uint8Array, w: number, h: number): Uint8Array {
     tryPush(x, y - 1)
   }
   return outside
+}
+
+/**
+ * Shrink an enclosed letter-counter mask away from glyph ink / AA.
+ * Punching flush against anti-aliased edges leaves thin white fringe columns
+ * (especially on "b", "a", "e", "g") when the hole cuts through layers below.
+ */
+function erodeHoleAwayFromInk(
+  filled: Uint8Array,
+  inkAlpha: Uint8ClampedArray | Uint8Array,
+  w: number,
+  h: number,
+  inkThreshold = 32,
+  radius = 1
+): Uint8Array {
+  const out = new Uint8Array(filled.length)
+  const inkAt = (p: number) => {
+    // ImageData alpha stride vs packed 1-byte ink map
+    if (inkAlpha.length === w * h * 4) return inkAlpha[p * 4 + 3] >= inkThreshold
+    return inkAlpha[p] >= inkThreshold
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x
+      if (!filled[p]) continue
+      if (inkAt(p)) continue
+      let nearInk = false
+      for (let dy = -radius; dy <= radius && !nearInk; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          if (dx === 0 && dy === 0) continue
+          const nx = x + dx
+          const ny = y + dy
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+          if (inkAt(ny * w + nx)) {
+            nearInk = true
+            break
+          }
+        }
+      }
+      if (!nearInk) out[p] = 1
+    }
+  }
+  return out
+}
+
+/** Dilate opaque pixels in-place (alpha channel) by Chebyshev radius. */
+function dilateAlphaInPlace(data: Uint8ClampedArray, w: number, h: number, radius = 1, srcThreshold = 128): void {
+  if (radius <= 0) return
+  const src = new Uint8Array(w * h)
+  for (let p = 0; p < w * h; p++) src[p] = data[p * 4 + 3] >= srcThreshold ? 1 : 0
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let hit = false
+      for (let dy = -radius; dy <= radius && !hit; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const nx = x + dx
+          const ny = y + dy
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+          if (src[ny * w + nx]) {
+            hit = true
+            break
+          }
+        }
+      }
+      if (!hit) continue
+      const i = (y * w + x) * 4
+      data[i] = 0
+      data[i + 1] = 0
+      data[i + 2] = 0
+      data[i + 3] = 255
+    }
+  }
 }
 
 function stampRenderDataUrl(l: LineObj, width: number, height: number): string {
@@ -2121,6 +2203,7 @@ function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: Lin
   const w = ctx.canvas.width
   const h = ctx.canvas.height
   const tmp = takeCanvas(w, h)
+  const sil = takeCanvas(w, h)
   try {
     const t = tmp.getContext('2d')!
     t.imageSmoothingEnabled = false
@@ -2137,18 +2220,46 @@ function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: Lin
     } else {
       paintMask()
     }
+
+    // Opaque + 1px-dilated glyph silhouette (not AA body). Subtracting the AA
+    // glyph left soft residual mask columns that punched white fringe into the
+    // stem of counters like "b".
+    const s = sil.getContext('2d')!
+    s.imageSmoothingEnabled = false
     const wasShadow = item.shadow
     const wasPunch = item.punchThrough
+    const wasColor = item.color
     item.shadow = false
     item.punchThrough = false
-    t.save()
-    t.globalCompositeOperation = 'destination-out'
-    renderLineBody(t, item)
-    t.restore()
+    if (item.type === 'text') item.color = '#000000'
+    renderLineBody(s, item)
     item.shadow = wasShadow
     item.punchThrough = wasPunch
-    // Glyph AA subtract leaves soft residual columns (e.g. on "b"). Keep only
-    // solid hole pixels so dest-out cannot fringe into the letter stem.
+    item.color = wasColor
+    const silImg = s.getImageData(0, 0, w, h)
+    // Binary-ize then dilate so the keep-out zone covers glyph AA.
+    const sd = silImg.data
+    for (let i = 3; i < sd.length; i += 4) {
+      if (sd[i] >= 40) {
+        sd[i - 3] = 0
+        sd[i - 2] = 0
+        sd[i - 1] = 0
+        sd[i] = 255
+      } else {
+        sd[i - 3] = 0
+        sd[i - 2] = 0
+        sd[i - 1] = 0
+        sd[i] = 0
+      }
+    }
+    dilateAlphaInPlace(sd, w, h, 1, 128)
+    s.putImageData(silImg, 0, 0)
+
+    t.save()
+    t.globalCompositeOperation = 'destination-out'
+    t.drawImage(sil, 0, 0)
+    t.restore()
+
     const img = t.getImageData(0, 0, w, h)
     const d = img.data
     for (let i = 3; i < d.length; i += 4) {
@@ -2173,6 +2284,7 @@ function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: Lin
     return true
   } finally {
     releaseCanvas(tmp)
+    releaseCanvas(sil)
   }
 }
 
@@ -7578,7 +7690,23 @@ export function IconPaintEditor({
     // Fallback: earliest candidate (lowest in paint order) whose bbox contains the hole.
     if (!owner) owner = candidates[0] ?? null
     if (!owner) return false
-    setLocalPunchFromFilled(owner, filled, W, H)
+
+    // Keep the stored hole strictly inside the counter — never on glyph AA —
+    // so punch-through cannot leave white fringe along the stem.
+    let holeBits = filled
+    {
+      const probe = takeCanvas(W, H)
+      try {
+        const pctx = probe.getContext('2d')!
+        renderLine(pctx, { ...owner, shadow: false, punchThrough: false, color: owner.type === 'text' ? '#000000' : owner.color })
+        holeBits = erodeHoleAwayFromInk(filled, pctx.getImageData(0, 0, W, H).data, W, H, 32, 1)
+      } finally {
+        releaseCanvas(probe)
+      }
+    }
+    if (!holeBits.some((v) => v)) holeBits = filled
+
+    setLocalPunchFromFilled(owner, holeBits, W, H)
     const next = linesRef.current.map((l) =>
       l.id === owner!.id
         ? { ...l, punchThrough: punchThrough || !!l.punchThrough, punchEnclosedHole: true }
