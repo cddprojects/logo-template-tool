@@ -302,7 +302,11 @@ function mergeTypeStashColors(
       // Drop baked overlays (source colors). Keep vector geometry, recolored.
       contentOverlayPng: undefined,
       contentVectors: entry.contentVectors
-        ? recolorContentVectors(structuredClone(entry.contentVectors), primaryFill, secondaryFill)
+        ? recolorContentVectors(
+            structuredClone(entry.contentVectors).filter((v) => !v.contentBound),
+            primaryFill,
+            secondaryFill
+          )
         : undefined
     }
   }
@@ -469,8 +473,14 @@ function recolorContentVectors(
   })
 }
 
-function isPaintContentLayerVector(v: PaintVector): boolean {
-  return (v.layer ?? 'content') === 'content' || isContentBoundVector(v)
+/**
+ * User-added Inner paint objects only.
+ * Skip contentBound / linkedOutsideText — those are stand-ins for live Inner and
+ * would draw a second copy of the same shape behind/over the real content,
+ * so punch holes leave a matching silhouette behind.
+ */
+function isPaintInnerUserVector(v: PaintVector): boolean {
+  return (v.layer ?? 'content') === 'content' && !isContentBoundVector(v)
 }
 
 function isPaintContainerLayerVector(v: PaintVector): boolean {
@@ -492,7 +502,7 @@ function mergePaintInnerGeometryNoColor(
   if (!targetSession) {
     const empty = emptyOverlayPng(sourceSession.resolution)
     const contentVectors = recolorContentVectors(
-      structuredClone((sourceSession.vectors ?? []).filter(isPaintContentLayerVector)),
+      structuredClone((sourceSession.vectors ?? []).filter(isPaintInnerUserVector)),
       primaryFill,
       secondaryFill
     )
@@ -516,7 +526,7 @@ function mergePaintInnerGeometryNoColor(
   const empty = emptyOverlayPng(targetSession.resolution)
   const containerVectors = (targetSession.vectors ?? []).filter(isPaintContainerLayerVector)
   const contentVectors = recolorContentVectors(
-    structuredClone((sourceSession.vectors ?? []).filter(isPaintContentLayerVector)),
+    structuredClone((sourceSession.vectors ?? []).filter(isPaintInnerUserVector)),
     primaryFill,
     secondaryFill
   )

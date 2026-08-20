@@ -2800,14 +2800,15 @@ function transformTextLine(l: LineObj, mode: CanvasXform, S: number, opts: Xform
   const mapDisplayPt = (p: Pt): Pt =>
     canvasSpace ? mapCanvasPt(p, mode, S) : mapLocalPt(p, mode, pivotDisplay)
 
-  /** Flip mirrors via scaleX/scaleY only — rotation is independent. */
+  /** World flip: F∘R(θ)∘S = R(-θ)∘F∘S — negate rot and flip the matching scale. */
   const reflectOrientation = (base: LineObj): LineObj => {
     const curSx = base.scaleX ?? 1
     const curSy = base.scaleY ?? 1
+    const nextRot = normalizeRot(-(base.rot ?? 0))
     if (mode === 'flipH') {
-      return { ...base, scaleX: -curSx, scaleY: curSy }
+      return { ...base, rot: nextRot, scaleX: -curSx, scaleY: curSy }
     }
-    return { ...base, scaleX: curSx, scaleY: -curSy }
+    return { ...base, rot: nextRot, scaleX: curSx, scaleY: -curSy }
   }
 
   if (mode === 'flipH' || mode === 'flipV') {
@@ -2901,8 +2902,9 @@ function transformOrientedBox(l: LineObj, mode: CanvasXform, S: number, opts: Xf
   const reflect = (base: LineObj): LineObj => {
     const sx = base.scaleX ?? 1
     const sy = base.scaleY ?? 1
-    if (mode === 'flipH') return { ...base, scaleX: -sx, scaleY: sy }
-    return { ...base, scaleX: sx, scaleY: -sy }
+    const nextRot = normalizeRot(-(base.rot ?? 0))
+    if (mode === 'flipH') return { ...base, rot: nextRot, scaleX: -sx, scaleY: sy }
+    return { ...base, rot: nextRot, scaleX: sx, scaleY: -sy }
   }
   let next = l
   if (mode === 'flipH' || mode === 'flipV') next = reflect(l)
@@ -2954,9 +2956,13 @@ function transformLineObj(l: LineObj, mode: CanvasXform, S: number, opts?: Xform
   return { ...l, pts, rot: 0, ...mapReshapeFields(l, mapPt) }
 }
 
-/** Rotate / flip stamps and Inner proxies without resampling their pixels. */
+/** Rotate / flip stamps and oriented boxes without baking a wrong AABB. */
 function transformStampLineObj(l: LineObj, mode: CanvasXform, S: number, opts?: XformOpts): LineObj {
-  if (l.type === 'stamp' || (l.type === 'shape' && l.contentBound && l.pts.length === 2)) {
+  // Rotated/scaled 2-pt shapes must keep rot+scale — AABB bake only works at 90° steps.
+  if (
+    l.type === 'stamp' ||
+    (l.type === 'shape' && l.pts.length === 2 && (l.contentBound || lineNeedsDisplayTransform(l)))
+  ) {
     return transformOrientedBox(l, mode, S, opts ?? { canvasSpace: false })
   }
   return transformLineObj(l, mode, S, opts)
@@ -10523,8 +10529,8 @@ export function IconPaintEditor({
         </div>
       </div>
 
-      {/* Toolbar */}
-      <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-surface shrink-0 flex-wrap">
+      {/* Toolbar — nowrap so tip/opacity extras scroll instead of wrapping the bar */}
+      <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-surface shrink-0 flex-nowrap overflow-x-auto">
         {/* Tools */}
         <div className="flex items-center gap-1">
           {TOOLS.map((t) => (
@@ -10770,50 +10776,8 @@ export function IconPaintEditor({
           <span className="text-[10px] text-muted w-8 text-right">{size}px</span>
         </div>
 
-        {tool === 'brush' && (
-          <div className="flex items-center gap-1" title="Brush tip shape">
-            <span className="text-[11px] text-muted mr-0.5">Tip</span>
-            {BRUSH_TIPS.map((t) => (
-              <button
-                key={t.value}
-                type="button"
-                title={t.label}
-                onClick={() => setBrushTip(t.value)}
-                className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
-                  brushTip === t.value ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
-                }`}
-              >
-                <BrushTipIcon tip={t.value} />
-              </button>
-            ))}
-          </div>
-        )}
-
-        {tool === 'eraser' && (
-          <div className="flex items-center gap-1" title="Eraser shape">
-            <span className="text-[11px] text-muted mr-0.5">Shape</span>
-            {([
-              { value: 'round' as const, label: 'Circle' },
-              { value: 'square' as const, label: 'Square' }
-            ]).map((t) => (
-              <button
-                key={t.value}
-                type="button"
-                title={t.label}
-                onClick={() => setEraserTip(t.value)}
-                className={`h-8 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium transition-colors ${
-                  eraserTip === t.value ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
-                }`}
-              >
-                <BrushTipIcon tip={t.value} />
-                {t.label}
-              </button>
-            ))}
-          </div>
-        )}
-
         {(shapeToolActive || fillableCtx) && (
-          <label className="flex items-center gap-1.5 text-[11px] text-muted cursor-pointer select-none">
+          <label className="flex items-center gap-1.5 text-[11px] text-muted cursor-pointer select-none shrink-0">
             <input
               type="checkbox"
               checked={shapeFill}
@@ -10824,7 +10788,7 @@ export function IconPaintEditor({
         )}
         {(tool === 'shape' || tool === 'freepoly' || editingShape || editingPoly) && (
           <label
-            className="flex items-center gap-1.5 text-[11px] text-muted cursor-pointer select-none"
+            className="flex items-center gap-1.5 text-[11px] text-muted cursor-pointer select-none shrink-0"
             title="Keep a square bounding box while drawing or resizing polygon / irregular shapes"
           >
             <input
@@ -10972,9 +10936,12 @@ export function IconPaintEditor({
         </div>
       </div>
 
+      {/* Context options — fixed height so tool changes never shift the canvas */}
+      <div className="h-11 shrink-0 border-b border-border bg-surface2 overflow-hidden">
+        <div className="h-full flex items-center overflow-x-auto overflow-y-hidden">
       {/* Fill options */}
-      {tool === 'fill' && (
-        <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-surface2 shrink-0 flex-wrap">
+      {tool === 'fill' ? (
+        <div className="flex items-center gap-3 px-4 h-11 flex-nowrap shrink-0">
           <span className="text-[11px] font-semibold text-text">Fill</span>
           <label
             className="flex items-center gap-1.5 text-[11px] text-muted cursor-pointer select-none"
@@ -11003,7 +10970,7 @@ export function IconPaintEditor({
             />
             Clean thin edges
           </label>
-          <span className="text-[10px] text-muted">
+          <span className="text-[10px] text-muted whitespace-nowrap">
             {isTransparentPaintColor(color)
               ? transparentFillMode === 'punch'
                 ? 'Punch hole — the filled area cuts through every layer below; layers above still show'
@@ -11013,11 +10980,8 @@ export function IconPaintEditor({
                 : 'Fills AA fringes & thin rings · skips thick borders · thin session outlines inside the click also match fill colour'}
           </span>
         </div>
-      )}
-
-      {/* Marquee mode — Coverage vs Scale content */}
-      {tool === 'select' && hasMarquee && (
-        <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-surface2 shrink-0 flex-wrap">
+      ) : tool === 'select' && hasMarquee ? (
+        <div className="flex items-center gap-3 px-4 h-11 flex-nowrap shrink-0">
           <span className="text-[11px] font-semibold text-text">Marquee</span>
           <span className="text-[9px] uppercase tracking-wide text-muted/70">Corner dots</span>
           <div className="flex items-center rounded-lg border border-border overflow-hidden">
@@ -11040,17 +11004,52 @@ export function IconPaintEditor({
               Scale content
             </button>
           </div>
-          <span className="text-[10px] text-muted">
+          <span className="text-[10px] text-muted whitespace-nowrap">
             {marqueeMode === 'coverage'
               ? 'Blue box — drag corners to change the covered area'
               : 'Amber box — drag corners to stretch the selection'}
           </span>
         </div>
-      )}
-
-      {/* Inner content proxy — non-letter types: drag to move, corners to resize, shadow here */}
-      {editingContentProxy && selectedObj && (
-        <div className="flex items-center gap-2.5 px-4 py-2 border-b border-border bg-surface2 shrink-0 flex-nowrap overflow-x-auto">
+      ) : tool === 'brush' ? (
+        <div className="flex items-center gap-1 px-4 h-11 flex-nowrap shrink-0" title="Brush tip shape">
+          <span className="text-[11px] text-muted mr-0.5">Tip</span>
+          {BRUSH_TIPS.map((t) => (
+            <button
+              key={t.value}
+              type="button"
+              title={t.label}
+              onClick={() => setBrushTip(t.value)}
+              className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
+                brushTip === t.value ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+              }`}
+            >
+              <BrushTipIcon tip={t.value} />
+            </button>
+          ))}
+        </div>
+      ) : tool === 'eraser' ? (
+        <div className="flex items-center gap-1 px-4 h-11 flex-nowrap shrink-0" title="Eraser shape">
+          <span className="text-[11px] text-muted mr-0.5">Shape</span>
+          {([
+            { value: 'round' as const, label: 'Circle' },
+            { value: 'square' as const, label: 'Square' }
+          ]).map((t) => (
+            <button
+              key={t.value}
+              type="button"
+              title={t.label}
+              onClick={() => setEraserTip(t.value)}
+              className={`h-8 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium transition-colors ${
+                eraserTip === t.value ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+              }`}
+            >
+              <BrushTipIcon tip={t.value} />
+              {t.label}
+            </button>
+          ))}
+        </div>
+      ) : editingContentProxy && selectedObj ? (
+        <div className="flex items-center gap-2.5 px-4 h-11 flex-nowrap shrink-0">
           <span className="text-[11px] font-semibold text-text shrink-0">Inner content</span>
           <span className="text-[10px] text-muted shrink-0">
             Drag to move · corner handles to resize
@@ -11130,11 +11129,8 @@ export function IconPaintEditor({
             <Trash2 size={12} /> Remove
           </button>
         </div>
-      )}
-
-      {/* Text options — shown for the Text tool or a selected text object */}
-      {editingText && (
-        <div className="flex items-center gap-2.5 px-4 py-2 border-b border-border bg-surface2 shrink-0 flex-nowrap overflow-x-auto">
+      ) : editingText ? (
+        <div className="flex items-center gap-2.5 px-4 h-11 flex-nowrap shrink-0">
           <span className="text-[11px] font-semibold text-text shrink-0">
             {textEditId ? 'Typing' : 'Text'}
           </span>
@@ -11286,12 +11282,9 @@ export function IconPaintEditor({
             </button>
           )}
         </div>
-      )}
-
-      {/* Vector object options — shown for the Line / Free-polygon tools or a selection */}
-      {showVecOptions && (
-        <div className="flex items-center gap-3 px-4 py-2 border-b border-border bg-surface2 shrink-0 flex-wrap">
-          <span className="text-[11px] font-semibold text-text">
+      ) : showVecOptions ? (
+        <div className="flex items-center gap-3 px-4 h-11 flex-nowrap shrink-0">
+          <span className="text-[11px] font-semibold text-text shrink-0">
             {editingShape
               ? (selectedObj ? 'Edit shape' : 'New shape')
               : editingPoly
@@ -11507,7 +11500,13 @@ export function IconPaintEditor({
             </button>
           )}
         </div>
+      ) : (
+        <div className="px-4 text-[10px] text-muted/50 select-none whitespace-nowrap">
+          Tool options appear here
+        </div>
       )}
+        </div>
+      </div>
 
       {/* Canvas + icon palette + optional save-target columns */}
       <div
