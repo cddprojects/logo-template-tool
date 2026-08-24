@@ -404,14 +404,19 @@ function renderPaintTextVector(
   renderPaintTextUnwarped(ctx, v, decor, sessionRes)
 }
 
-/** True when linked letters were warped in Paint (not driven by live outside typography). */
-export function linkedTextHasPaintTransform(v: PaintVector): boolean {
-  if (v.type !== 'text' || !v.linkedOutsideText) return false
+/** Flip / rotate / reshape applied in Paint (not the default live-inner pose). */
+export function paintVectorHasDisplayTransform(v: PaintVector): boolean {
   if (reshapeIsApplied(v.reshapeQuad, v.reshapeSrc)) return true
   if (Math.abs(v.rot ?? 0) > 0.001) return true
   if (Math.abs((v.scaleX ?? 1) - 1) > 0.001) return true
   if (Math.abs((v.scaleY ?? 1) - 1) > 0.001) return true
   return false
+}
+
+/** True when linked letters were warped in Paint (not driven by live outside typography). */
+export function linkedTextHasPaintTransform(v: PaintVector): boolean {
+  if (v.type !== 'text' || !v.linkedOutsideText) return false
+  return paintVectorHasDisplayTransform(v)
 }
 
 function isVectorVisible(v: PaintVector): boolean {

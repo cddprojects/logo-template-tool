@@ -16,6 +16,7 @@ import { DEFAULT_FAVICON_CONFIG } from '../types'
 import { contentTypeFromIcon } from './contentTypeSync'
 import { emptyImageRecolorFields } from './imageRecolor'
 import type { InnerContentDecor } from './paintVectorRender'
+import { paintVectorHasDisplayTransform } from './paintVectorRender'
 import { iconOuterShadowPad, measureSpacedText } from './renderer'
 
 const DESIGN_SIZE = 256
@@ -303,7 +304,7 @@ function mergeTypeStashColors(
       contentOverlayPng: undefined,
       contentVectors: entry.contentVectors
         ? recolorContentVectors(
-            structuredClone(entry.contentVectors).filter((v) => !v.contentBound),
+            structuredClone(entry.contentVectors).filter(isPaintInnerGeometryVector),
             primaryFill,
             secondaryFill
           )
@@ -474,13 +475,15 @@ function recolorContentVectors(
 }
 
 /**
- * User-added Inner paint objects only.
- * Skip contentBound / linkedOutsideText — those are stand-ins for live Inner and
- * would draw a second copy of the same shape behind/over the real content,
- * so punch holes leave a matching silhouette behind.
+ * Inner paint geometry to copy with "Apply inner to all".
+ * Includes user-added objects plus live-inner proxies that were flipped or
+ * rotated in Paint — untransformed linkedOutsideText / contentBound stay
+ * driven by outside settings on each variant.
  */
-function isPaintInnerUserVector(v: PaintVector): boolean {
-  return (v.layer ?? 'content') === 'content' && !isContentBoundVector(v)
+function isPaintInnerGeometryVector(v: PaintVector): boolean {
+  if ((v.layer ?? 'content') !== 'content') return false
+  if (!isContentBoundVector(v)) return true
+  return paintVectorHasDisplayTransform(v)
 }
 
 function isPaintContainerLayerVector(v: PaintVector): boolean {
@@ -502,7 +505,7 @@ function mergePaintInnerGeometryNoColor(
   if (!targetSession) {
     const empty = emptyOverlayPng(sourceSession.resolution)
     const contentVectors = recolorContentVectors(
-      structuredClone((sourceSession.vectors ?? []).filter(isPaintInnerUserVector)),
+      structuredClone((sourceSession.vectors ?? []).filter(isPaintInnerGeometryVector)),
       primaryFill,
       secondaryFill
     )
@@ -526,7 +529,7 @@ function mergePaintInnerGeometryNoColor(
   const empty = emptyOverlayPng(targetSession.resolution)
   const containerVectors = (targetSession.vectors ?? []).filter(isPaintContainerLayerVector)
   const contentVectors = recolorContentVectors(
-    structuredClone((sourceSession.vectors ?? []).filter(isPaintInnerUserVector)),
+    structuredClone((sourceSession.vectors ?? []).filter(isPaintInnerGeometryVector)),
     primaryFill,
     secondaryFill
   )
