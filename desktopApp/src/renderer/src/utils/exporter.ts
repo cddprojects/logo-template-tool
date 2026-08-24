@@ -71,6 +71,25 @@ function sanitize(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9._-]/g, '-')
 }
 
+/** Favicon export sizes when the variant label is `16x16`, `32x32`, … */
+const VARIANT_LABEL_EXPORT_SIZES = [16, 32, 64, 128, 256, 512] as const
+
+/**
+ * Parse variant labels like `16x16` / `32 x 32` into a square export pixel size.
+ * Only the listed favicon sizes are accepted (width must equal height).
+ */
+export function exportPixelSizeFromVariantLabel(label?: string): number | undefined {
+  const trimmed = (label ?? '').trim()
+  const m = /^(\d+)\s*x\s*(\d+)$/i.exec(trimmed)
+  if (!m) return undefined
+  const w = parseInt(m[1], 10)
+  const h = parseInt(m[2], 10)
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w !== h || w < 1) return undefined
+  return VARIANT_LABEL_EXPORT_SIZES.includes(w as typeof VARIANT_LABEL_EXPORT_SIZES[number])
+    ? w
+    : undefined
+}
+
 /** Variant label → full-name fragment (`-dark`), or '' when blank. */
 function fullSuffix(label?: string): string {
   const trimmed = (label ?? '').trim()
@@ -197,15 +216,16 @@ export async function exportFaviconPng(
   variantLabel?: string,
   opts?: ExportNameOpts
 ): Promise<void> {
+  const pixelSize = exportPixelSizeFromVariantLabel(variantLabel) ?? size
   const canvas = document.createElement('canvas')
-  await renderFavicon(canvas, { ...config, size })
+  await renderFavicon(canvas, { ...config, size: pixelSize })
   const filename = buildFaviconFileName(
     opts?.nameStyle ?? 'full',
     versionName,
     'png',
     variantLabel,
     opts?.variantIndex ?? 0,
-    size
+    pixelSize
   )
   await window.api.exportFile(canvas.toDataURL('image/png'), filename, 'png')
 }
@@ -233,7 +253,8 @@ export async function exportFaviconIco(
   variantLabel?: string,
   opts?: ExportNameOpts
 ): Promise<void> {
-  const sizes = [16, 32, 48, 256]
+  const labelSize = exportPixelSizeFromVariantLabel(variantLabel)
+  const sizes = labelSize ? [labelSize] : [16, 32, 48, 256]
   const pngDataUrls = await Promise.all(
     sizes.map(async (size) => {
       const canvas = document.createElement('canvas')

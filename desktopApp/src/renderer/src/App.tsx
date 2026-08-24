@@ -216,7 +216,7 @@ export default function App(): JSX.Element {
     if (!sel) return
     setGroupExporting(true)
     try {
-      const [{ renderLogo, renderFavicon }, { resolveLogoEffectiveIcon }, { groupExportFileName }] = await Promise.all([
+      const [{ renderLogo, renderFavicon }, { resolveLogoEffectiveIcon }, { groupExportFileName, exportPixelSizeFromVariantLabel }] = await Promise.all([
         import('./utils/renderer'),
         import('./components/LogoEditor'),
         import('./utils/exporter'),
@@ -251,8 +251,9 @@ export default function App(): JSX.Element {
       // Render all favicon variants
       for (let i = 0; i < sel.favicons.length; i++) {
         const variant = sel.favicons[i]
+        const favSize = exportPixelSizeFromVariantLabel(variant.label) ?? 512
         const canvas = document.createElement('canvas')
-        await renderFavicon(canvas, { ...variant.config, size: 512 })
+        await renderFavicon(canvas, { ...variant.config, size: favSize })
         files.push({ filename: groupExportFileName('favicon', i, variant.label), dataUrl: canvas.toDataURL('image/png') })
       }
 
