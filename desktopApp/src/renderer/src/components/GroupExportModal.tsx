@@ -27,8 +27,8 @@ function toggleIn<T extends string>(list: T[], value: T, on: boolean): T[] {
 export function GroupExportModal({ onConfirm, onClose }: GroupExportModalProps): JSX.Element {
   const [logos, setLogos] = useState(true)
   const [favicons, setFavicons] = useState(true)
-  const [logoFormats, setLogoFormats] = useState<LogoExportFormat[]>(['png', 'svg'])
-  const [faviconFormats, setFaviconFormats] = useState<FaviconExportFormat[]>(['png', 'svg', 'ico'])
+  const [logoFormats, setLogoFormats] = useState<LogoExportFormat[]>(['png'])
+  const [faviconFormats, setFaviconFormats] = useState<FaviconExportFormat[]>(['png'])
 
   const canExport = useMemo(
     () => (logos && logoFormats.length > 0) || (favicons && faviconFormats.length > 0),
