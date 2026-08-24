@@ -802,6 +802,109 @@ function erodeHoleAwayFromInk(
   return out
 }
 
+/**
+ * Overpaint soft anti-aliased glyph pixels beside an enclosed hole with flat
+ * solid letter colour (full opacity). After this, a hard dest-out of the hole
+ * leaves a crisp counter edge — no leftover bright AA fringe.
+ */
+function flattenAaNearHole(
+  ctx: CanvasRenderingContext2D,
+  hole: Uint8Array,
+  fillColor: string,
+  w: number,
+  h: number,
+  radius = 2,
+  glyphAlpha?: Uint8ClampedArray
+): void {
+  if (isTransparentPaintColor(fillColor) || isGradientColor(fillColor)) return
+  const solid = pixelColor(fillColor)
+  const fr = parseInt(solid.slice(1, 3), 16)
+  const fg = parseInt(solid.slice(3, 5), 16)
+  const fb = parseInt(solid.slice(5, 7), 16)
+  let minX = w, minY = h, maxX = -1, maxY = -1
+  for (let p = 0; p < hole.length; p++) {
+    if (!hole[p]) continue
+    const x = p % w
+    const y = (p / w) | 0
+    if (x < minX) minX = x
+    if (y < minY) minY = y
+    if (x > maxX) maxX = x
+    if (y > maxY) maxY = y
+  }
+  if (maxX < minX) return
+  minX = Math.max(0, minX - radius)
+  minY = Math.max(0, minY - radius)
+  maxX = Math.min(w - 1, maxX + radius)
+  maxY = Math.min(h - 1, maxY + radius)
+  const bw = maxX - minX + 1
+  const bh = maxY - minY + 1
+  const img = ctx.getImageData(minX, minY, bw, bh)
+  const d = img.data
+  const mark = new Uint8Array(bw * bh)
+  for (let y = minY; y <= maxY; y++) {
+    for (let x = minX; x <= maxX; x++) {
+      if (!hole[y * w + x]) continue
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const nx = x + dx
+          const ny = y + dy
+          if (nx < minX || ny < minY || nx > maxX || ny > maxY) continue
+          mark[(ny - minY) * bw + (nx - minX)] = 1
+        }
+      }
+    }
+  }
+  for (let i = 0, p = 0; p < mark.length; p++, i += 4) {
+    if (!mark[p]) continue
+    const a = d[i + 3]
+    // Soft / partial AA only — solid stem cores stay untouched.
+    if (a <= 0 || a >= 250) continue
+    if (glyphAlpha) {
+      const gx = minX + (p % bw)
+      const gy = minY + ((p / bw) | 0)
+      const ga = glyphAlpha[(gy * w + gx) * 4 + 3]
+      if (ga <= 0) continue
+    }
+    d[i] = fr
+    d[i + 1] = fg
+    d[i + 2] = fb
+    d[i + 3] = 255
+  }
+  ctx.putImageData(img, minX, minY)
+}
+
+/** Flatten AA beside an enclosed counter, then cut a hard hole from the glyph. */
+function flattenAndPunchEnclosedHole(ctx: CanvasRenderingContext2D, l: LineObj): void {
+  const w = ctx.canvas.width
+  const h = ctx.canvas.height
+  if (punchMaskCanvases.has(l.id)) rewritePunchBitsFromLocal(l, w, h)
+  const bits = punchMaskBits.get(l.id)
+  if (!bits || bits.length !== w * h) {
+    destOutLocalPunch(ctx, l)
+    return
+  }
+  // Only flatten pixels that belong to this glyph (isolated silhouette), never
+  // soft pixels on layers already under the letter on the composite.
+  const sil = takeCanvas(w, h)
+  try {
+    const s = sil.getContext('2d')!
+    const wasShadow = l.shadow
+    const wasPunch = l.punchThrough
+    const wasEnclosed = l.punchEnclosedHole
+    l.shadow = false
+    l.punchThrough = false
+    l.punchEnclosedHole = false
+    renderLineBase(s, l)
+    l.shadow = wasShadow
+    l.punchThrough = wasPunch
+    l.punchEnclosedHole = wasEnclosed
+    flattenAaNearHole(ctx, bits, l.color, w, h, 2, s.getImageData(0, 0, w, h).data)
+  } finally {
+    releaseCanvas(sil)
+  }
+  destOutFilledMask(ctx, bits, w, h)
+}
+
 function stampRenderDataUrl(l: LineObj, width: number, height: number): string {
   if (!l.keepStrokeOnResize || !l.sourceSvgMarkup || !l.sourceStampSize) {
     return l.imageDataUrl ?? ''
@@ -2189,12 +2292,14 @@ function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: Lin
     item.punchThrough = wasPunch
     item.color = wasColor
 
-    const punch = erodeHoleAwayFromInk(bits, s.getImageData(0, 0, w, h).data, w, h, 24, 2)
-    if (!punch.some((v) => v)) return destOutLocalPunch(ctx, item)
+    const inkData = s.getImageData(0, 0, w, h).data
+    // Inset hole for layers below — never nibble the solid stem.
+    const through = erodeHoleAwayFromInk(bits, inkData, w, h, 24, 2)
+    if (!through.some((v) => v)) return destOutLocalPunch(ctx, item)
+    destOutFilledMask(ctx, through, w, h)
 
-    destOutFilledMask(ctx, punch, w, h)
-
-    // Repaint the whole object (shadow + glyph) so stem AA is not left frayed.
+    // Redraw letter; destOutObjectPunch flattens soft AA to flat colour then
+    // hard-cuts the counter so no bright fringe is left over the punch.
     renderLine(ctx, item)
     return true
   } finally {
@@ -2256,9 +2361,12 @@ function objectHasFillHole(l: LineObj): boolean {
 
 function destOutObjectPunch(ctx: CanvasRenderingContext2D, l: LineObj): void {
   if (l.punchMask || !objectHasFillHole(l)) return
-  // Punch-through is applied on the composite after the object is drawn.
-  // Dest-outing the same mask on the glyph eats enclosed counters (the hole
-  // in "b") and can leave a 1px fringe.
+  // Enclosed letter counters: flatten soft AA to solid colour, then hard-cut
+  // the hole so no bright fringe hangs over the punch (esp. white text).
+  if (l.punchEnclosedHole) {
+    flattenAndPunchEnclosedHole(ctx, l)
+    return
+  }
   if (l.punchThrough) return
   if (destOutLocalPunch(ctx, l)) return
   // Canvas-fixed bits stay at the punch origin. After a move they leave a ghost
