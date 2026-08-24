@@ -803,32 +803,9 @@ function erodeHoleAwayFromInk(
 }
 
 /**
- * Overpaint soft anti-aliased pixels on an *isolated* glyph buffer with flat
- * solid letter colour. Must run before the glyph is composited onto opaque
- * layers — after compositing, AA is baked into opaque blended RGB and can no
- * longer be flattened by alpha.
- */
-function flattenIsolatedGlyphAa(
-  data: Uint8ClampedArray,
-  fillColor: string
-): void {
-  if (isTransparentPaintColor(fillColor) || isGradientColor(fillColor)) return
-  const solid = pixelColor(fillColor)
-  const fr = parseInt(solid.slice(1, 3), 16)
-  const fg = parseInt(solid.slice(3, 5), 16)
-  const fb = parseInt(solid.slice(5, 7), 16)
-  for (let i = 0; i < data.length; i += 4) {
-    if (data[i + 3] <= 0) continue
-    data[i] = fr
-    data[i + 1] = fg
-    data[i + 2] = fb
-    data[i + 3] = 255
-  }
-}
-
-/**
- * Draw an enclosed-hole object as flat solid colour with a hard counter cut.
- * Builds on an isolated canvas so AA still has partial alpha and can be flattened.
+ * Build a hard (no-AA) letter silhouette from an isolated glyph render, then
+ * punch enclosed counters. Colour of the source draw does not matter — only
+ * alpha is used to find the shape; fill is always flat `l.color`.
  */
 function drawEnclosedHoleObjectFlat(
   ctx: CanvasRenderingContext2D,
@@ -838,20 +815,66 @@ function drawEnclosedHoleObjectFlat(
   const w = ctx.canvas.width
   const h = ctx.canvas.height
   if (punchMaskCanvases.has(l.id)) rewritePunchBitsFromLocal(l, w, h)
-  const bits = punchMaskBits.get(l.id)
+  const savedBits = punchMaskBits.get(l.id)
 
   const body = takeCanvas(w, h)
   try {
     const bctx = body.getContext('2d')!
     bctx.imageSmoothingEnabled = false
+    // Source colour is irrelevant — we only need the alpha outline of the glyph.
     drawBody(bctx)
 
     const img = bctx.getImageData(0, 0, w, h)
-    flattenIsolatedGlyphAa(img.data, l.color)
+    const d = img.data
+    const ink = new Uint8Array(w * h)
+    // Include soft AA in the solid body so the counter edge is decided by the
+    // hole punch, not by leftover fringe. Threshold low → former AA becomes fill.
+    const inkT = 24
+    for (let p = 0, i = 0; p < ink.length; p++, i += 4) {
+      if (d[i + 3] >= inkT) ink[p] = 1
+    }
+
+    const fillColor = isTransparentPaintColor(l.color) || isGradientColor(l.color)
+      ? null
+      : pixelColor(l.color)
+    const fr = fillColor ? parseInt(fillColor.slice(1, 3), 16) : 0
+    const fg = fillColor ? parseInt(fillColor.slice(3, 5), 16) : 0
+    const fb = fillColor ? parseInt(fillColor.slice(5, 7), 16) : 0
+
+    // Hard silhouette: every ink pixel → fully opaque. Solid fills use flat colour
+    // (colour-agnostic vs the canvas behind). Gradients/transparent keep source RGB.
+    for (let p = 0, i = 0; p < ink.length; p++, i += 4) {
+      if (!ink[p]) {
+        d[i] = 0
+        d[i + 1] = 0
+        d[i + 2] = 0
+        d[i + 3] = 0
+        continue
+      }
+      if (fillColor) {
+        d[i] = fr
+        d[i + 1] = fg
+        d[i + 2] = fb
+      }
+      d[i + 3] = 255
+    }
     bctx.putImageData(img, 0, 0)
 
-    if (bits && bits.length === w * h) {
-      destOutFilledMask(bctx, bits, w, h)
+    // Counters = empty regions enclosed by the hard outline (not outside).
+    // Prefer live silhouette holes so they match the hard body; fall back to saved.
+    const outside = floodOutsideEmpty(ink, w, h)
+    const hole = new Uint8Array(w * h)
+    let holeN = 0
+    for (let p = 0; p < hole.length; p++) {
+      if (ink[p] || outside[p]) continue
+      hole[p] = 1
+      holeN++
+    }
+    const punch = holeN > 0 ? hole : savedBits
+    if (punch && punch.length === w * h) {
+      destOutFilledMask(bctx, punch, w, h)
+      // Keep punch-through / later redraws in sync with the hard outline holes.
+      punchMaskBits.set(l.id, punch)
     }
 
     if (shouldDrawObjectShadow(l)) {
@@ -861,13 +884,26 @@ function drawEnclosedHoleObjectFlat(
       const solidSil = takeCanvas(bw, bh)
       try {
         const ss = solidSil.getContext('2d')!
-        ss.save()
-        ss.translate(-clip.x, -clip.y)
-        drawBody(ss)
-        ss.restore()
-        const simg = ss.getImageData(0, 0, bw, bh)
-        flattenIsolatedGlyphAa(simg.data, l.color)
-        ss.putImageData(simg, 0, 0)
+        // Shadow from hard silhouette *before* counter punch (full letter body).
+        ss.putImageData(
+          (() => {
+            const silImg = ss.createImageData(bw, bh)
+            const sd = silImg.data
+            for (let y = 0; y < bh; y++) {
+              for (let x = 0; x < bw; x++) {
+                const sx = clip.x + x
+                const sy = clip.y + y
+                if (sx < 0 || sy < 0 || sx >= w || sy >= h) continue
+                if (!ink[sy * w + sx]) continue
+                const i = (y * bw + x) * 4
+                sd[i + 3] = 255
+              }
+            }
+            return silImg
+          })(),
+          0,
+          0
+        )
         const baked = bakeCanvasDropShadow(solidSil, {
           blur: l.shadowBlur ?? 0,
           ox: l.shadowOffsetX ?? 0,
@@ -2269,6 +2305,7 @@ function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: Lin
     const wasColor = item.color
     item.shadow = false
     item.punchThrough = false
+    // Colour irrelevant — alpha outline only.
     if (item.type === 'text') item.color = '#000000'
     renderLineBase(s, item)
     item.shadow = wasShadow
@@ -2276,13 +2313,33 @@ function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: Lin
     item.color = wasColor
 
     const inkData = s.getImageData(0, 0, w, h).data
-    // Inset hole for layers below — never nibble the solid stem.
-    const through = erodeHoleAwayFromInk(bits, inkData, w, h, 24, 2)
-    if (!through.some((v) => v)) return destOutLocalPunch(ctx, item)
-    destOutFilledMask(ctx, through, w, h)
+    const ink = new Uint8Array(w * h)
+    for (let p = 0; p < ink.length; p++) {
+      if (inkData[p * 4 + 3] >= 24) ink[p] = 1
+    }
+    const outside = floodOutsideEmpty(ink, w, h)
+    const hardHole = new Uint8Array(w * h)
+    let holeN = 0
+    for (let p = 0; p < hardHole.length; p++) {
+      if (ink[p] || outside[p]) continue
+      hardHole[p] = 1
+      holeN++
+    }
+    const hole = holeN > 0 ? hardHole : bits
+    // Slight inset so punch-through never clips the hard stem.
+    const inkAlpha = new Uint8Array(w * h * 4)
+    for (let p = 0; p < ink.length; p++) {
+      if (ink[p]) inkAlpha[p * 4 + 3] = 255
+    }
+    const through = erodeHoleAwayFromInk(hole, inkAlpha, w, h, 128, 1)
+    if (!through.some((v) => v)) {
+      destOutFilledMask(ctx, hole, w, h)
+    } else {
+      destOutFilledMask(ctx, through, w, h)
+    }
+    punchMaskBits.set(item.id, hole)
 
-    // Flat solid glyph + hard counter (isolated flatten — AA cannot be flattened
-    // after it has already been blended onto opaque layers below).
+    // Hard outline fill + counter punch (colour-agnostic silhouette).
     item.punchThrough = false
     renderLine(ctx, item)
     item.punchThrough = wasPunch
