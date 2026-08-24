@@ -6,6 +6,7 @@ import { HistoryPanel } from './components/HistoryPanel'
 import { VersionModal } from './components/VersionModal'
 import { SettingsModal } from './components/SettingsModal'
 import { DownloadDesktopModal } from './components/DownloadDesktopModal'
+import { GroupExportModal, type GroupExportOptions } from './components/GroupExportModal'
 import { useVersions } from './hooks/useVersions'
 import type { Version, AssetVariant, LogoConfig, FaviconConfig } from './types'
 import { initFontLoading } from './utils/fontLoader'
@@ -197,6 +198,7 @@ export default function App(): JSX.Element {
     typeof window !== 'undefined' &&
     !!(window as Window & { __WEB__?: boolean }).__WEB__
   const [groupExporting, setGroupExporting] = useState(false)
+  const [showGroupExport, setShowGroupExport] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
 
   // ── Toast notifications ───────────────────────────────────────────────────
@@ -210,51 +212,100 @@ export default function App(): JSX.Element {
     toastTimerRef.current = setTimeout(() => setToast(null), durationMs)
   }, [])
 
-  const handleGroupExport = useCallback(async () => {
+  const handleGroupExport = useCallback(async (opts: GroupExportOptions) => {
     // Use the ref so we never read `selected` before it is declared below.
     const sel = selectedRef.current
     if (!sel) return
+    if (!opts.logos && !opts.favicons) return
+    setShowGroupExport(false)
     setGroupExporting(true)
     try {
-      const [{ renderLogo, renderFavicon }, { resolveLogoEffectiveIcon }, { groupExportFileName, exportPixelSizeFromVariantLabel }] = await Promise.all([
+      const [
+        { renderLogo, renderFavicon, generateLogoSvg, generateFaviconSvg },
+        { resolveLogoEffectiveIcon },
+        {
+          groupExportFileName,
+          exportPixelSizeFromVariantLabel,
+          svgStringToDataUrl,
+          buildFaviconIcoDataUrl
+        }
+      ] = await Promise.all([
         import('./utils/renderer'),
         import('./components/LogoEditor'),
         import('./utils/exporter'),
       ])
       const files: { filename: string; dataUrl: string }[] = []
 
-      // Render all logo variants.
-      // When iconLinked is true, the logo icon must be derived from the matching
-      // favicon variant's content — exactly as LogoEditor does at preview time.
-      for (let i = 0; i < sel.logos.length; i++) {
-        const logoVariant = sel.logos[i]
-        const cfg = logoVariant.config
+      if (opts.logos && opts.logoFormats.length > 0) {
+        for (let i = 0; i < sel.logos.length; i++) {
+          const logoVariant = sel.logos[i]
+          const cfg = logoVariant.config
 
-        // Sync only when a favicon variant shares the exact same label.
-        const matchingFavicon = sel.favicons.find((f) => f.label === logoVariant.label)
-        const effectiveIcon = resolveLogoEffectiveIcon(
-          cfg,
-          matchingFavicon?.config?.content,
-          matchingFavicon?.config,
-          !!matchingFavicon
-        )
-        const faviconIconSource =
-          (cfg.iconLinked ?? true) && matchingFavicon?.config
-            ? matchingFavicon.config
-            : undefined
+          // Sync only when a favicon variant shares the exact same label.
+          const matchingFavicon = sel.favicons.find((f) => f.label === logoVariant.label)
+          const effectiveIcon = resolveLogoEffectiveIcon(
+            cfg,
+            matchingFavicon?.config?.content,
+            matchingFavicon?.config,
+            !!matchingFavicon
+          )
+          const faviconIconSource =
+            (cfg.iconLinked ?? true) && matchingFavicon?.config
+              ? matchingFavicon.config
+              : undefined
+          const exportConfig = { ...cfg, icon: effectiveIcon }
 
-        const canvas = document.createElement('canvas')
-        await renderLogo(canvas, { ...cfg, icon: effectiveIcon }, 4, true, faviconIconSource)
-        files.push({ filename: groupExportFileName('logo', i, logoVariant.label), dataUrl: canvas.toDataURL('image/png') })
+          if (opts.logoFormats.includes('png')) {
+            const canvas = document.createElement('canvas')
+            await renderLogo(canvas, exportConfig, 4, true, faviconIconSource)
+            files.push({
+              filename: groupExportFileName('logo', i, logoVariant.label, 'png'),
+              dataUrl: canvas.toDataURL('image/png')
+            })
+          }
+          if (opts.logoFormats.includes('svg')) {
+            const svg = await generateLogoSvg(exportConfig)
+            files.push({
+              filename: groupExportFileName('logo', i, logoVariant.label, 'svg'),
+              dataUrl: svgStringToDataUrl(svg)
+            })
+          }
+        }
       }
 
-      // Render all favicon variants
-      for (let i = 0; i < sel.favicons.length; i++) {
-        const variant = sel.favicons[i]
-        const favSize = exportPixelSizeFromVariantLabel(variant.label) ?? 512
-        const canvas = document.createElement('canvas')
-        await renderFavicon(canvas, { ...variant.config, size: favSize })
-        files.push({ filename: groupExportFileName('favicon', i, variant.label), dataUrl: canvas.toDataURL('image/png') })
+      if (opts.favicons && opts.faviconFormats.length > 0) {
+        for (let i = 0; i < sel.favicons.length; i++) {
+          const variant = sel.favicons[i]
+          const favSize = exportPixelSizeFromVariantLabel(variant.label) ?? 512
+
+          if (opts.faviconFormats.includes('png')) {
+            const canvas = document.createElement('canvas')
+            await renderFavicon(canvas, { ...variant.config, size: favSize })
+            files.push({
+              filename: groupExportFileName('favicon', i, variant.label, 'png'),
+              dataUrl: canvas.toDataURL('image/png')
+            })
+          }
+          if (opts.faviconFormats.includes('svg')) {
+            const svg = await generateFaviconSvg(variant.config)
+            files.push({
+              filename: groupExportFileName('favicon', i, variant.label, 'svg'),
+              dataUrl: svgStringToDataUrl(svg)
+            })
+          }
+          if (opts.faviconFormats.includes('ico')) {
+            const icoDataUrl = await buildFaviconIcoDataUrl(variant.config, variant.label)
+            files.push({
+              filename: groupExportFileName('favicon', i, variant.label, 'ico'),
+              dataUrl: icoDataUrl
+            })
+          }
+        }
+      }
+
+      if (!files.length) {
+        showToast('Nothing selected to export', 'info')
+        return
       }
 
       const result = await window.api.exportGroup(files, sel.name)
@@ -461,7 +512,7 @@ export default function App(): JSX.Element {
                   {/* Undo / Redo + Group Export + Settings */}
                   <div className="ml-auto flex items-center gap-1 relative">
                     <button
-                      onClick={handleGroupExport}
+                      onClick={() => setShowGroupExport(true)}
                       disabled={!selected || groupExporting}
                       title={isWebApp ? 'Export all variants as a zip' : 'Export all variants to a folder'}
                       className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors disabled:opacity-30 disabled:cursor-not-allowed text-muted hover:text-text hover:bg-surface3 disabled:hover:bg-transparent disabled:hover:text-muted"
@@ -571,6 +622,12 @@ export default function App(): JSX.Element {
         />
       )}
       {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
+      {showGroupExport && (
+        <GroupExportModal
+          onClose={() => setShowGroupExport(false)}
+          onConfirm={(opts) => { void handleGroupExport(opts) }}
+        />
+      )}
       {showDownloadDesktop && (
         <DownloadDesktopModal onClose={() => setShowDownloadDesktop(false)} />
       )}

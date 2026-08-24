@@ -614,7 +614,8 @@ ipcMain.handle(
     try {
       mkdirSync(filePath, { recursive: true })
       for (const { filename, dataUrl } of files) {
-        const base64 = dataUrl.replace(/^data:image\/png;base64,/, '')
+        const comma = dataUrl.indexOf(',')
+        const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
         writeFileSync(join(filePath, filename), Buffer.from(base64, 'base64'))
       }
       return { success: true, folderPath: filePath }

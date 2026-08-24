@@ -271,3 +271,93 @@ export async function exportFaviconIco(
   )
   await window.api.exportIco(pngDataUrls, filename)
 }
+
+/** Encode raw bytes as a data URL for group-export zip/folder writes. */
+export function bytesToDataUrl(bytes: Uint8Array, mime: string): string {
+  let binary = ''
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+  return `data:${mime};base64,${btoa(binary)}`
+}
+
+export function svgStringToDataUrl(svg: string): string {
+  const bytes = new TextEncoder().encode(svg)
+  return bytesToDataUrl(bytes, 'image/svg+xml')
+}
+
+function dataUrlToUint8Array(dataUrl: string): Uint8Array {
+  const comma = dataUrl.indexOf(',')
+  const b64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
+  const bin = atob(b64)
+  const out = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+  return out
+}
+
+/**
+ * Pack PNG data URLs into a Vista+ ICO (PNG-compressed images) as a data URL.
+ * Used for group export so the renderer does not need Node's png-to-ico.
+ */
+export function pngDataUrlsToIcoDataUrl(pngDataUrls: string[]): string {
+  const pngs = pngDataUrls.map(dataUrlToUint8Array)
+  const count = pngs.length
+  const headerSize = 6
+  const dirEntrySize = 16
+  const dirSize = headerSize + dirEntrySize * count
+  let offset = dirSize
+  const offsets: number[] = []
+  for (const png of pngs) {
+    offsets.push(offset)
+    offset += png.length
+  }
+  const out = new Uint8Array(offset)
+  const view = new DataView(out.buffer)
+  view.setUint16(0, 0, true)
+  view.setUint16(2, 1, true)
+  view.setUint16(4, count, true)
+  for (let i = 0; i < count; i++) {
+    const png = pngs[i]
+    const entry = headerSize + i * dirEntrySize
+    let w = 0
+    let h = 0
+    if (
+      png.length >= 24 &&
+      png[12] === 0x49 &&
+      png[13] === 0x48 &&
+      png[14] === 0x44 &&
+      png[15] === 0x52
+    ) {
+      const ihdr = new DataView(png.buffer, png.byteOffset + 16, 8)
+      const pw = ihdr.getUint32(0)
+      const ph = ihdr.getUint32(4)
+      w = pw >= 256 ? 0 : pw
+      h = ph >= 256 ? 0 : ph
+    }
+    out[entry] = w
+    out[entry + 1] = h
+    out[entry + 2] = 0
+    out[entry + 3] = 0
+    view.setUint16(entry + 4, 1, true)
+    view.setUint16(entry + 6, 32, true)
+    view.setUint32(entry + 8, png.length, true)
+    view.setUint32(entry + 12, offsets[i], true)
+    out.set(png, offsets[i])
+  }
+  return bytesToDataUrl(out, 'image/x-icon')
+}
+
+/** Build favicon ICO data URL (same sizes as single-file ICO export). */
+export async function buildFaviconIcoDataUrl(
+  config: FaviconConfig,
+  variantLabel?: string
+): Promise<string> {
+  const labelSize = exportPixelSizeFromVariantLabel(variantLabel)
+  const sizes = labelSize ? [labelSize] : [16, 32, 48, 256]
+  const pngDataUrls = await Promise.all(
+    sizes.map(async (size) => {
+      const canvas = document.createElement('canvas')
+      await renderFavicon(canvas, { ...config, size })
+      return canvas.toDataURL('image/png')
+    })
+  )
+  return pngDataUrlsToIcoDataUrl(pngDataUrls)
+}
