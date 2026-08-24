@@ -1352,6 +1352,41 @@ function resolveReshapeSource(
   return l.reshapeSrc ?? null
 }
 
+/** Warp a full-canvas buffer with the object's reshape quad (uses stored reshapeSrc). */
+function drawReshapedCanvas(
+  ctx: CanvasRenderingContext2D,
+  source: HTMLCanvasElement,
+  l: LineObj
+): boolean {
+  const quad = l.reshapeQuad
+  if (!quad || quad.length !== 4) return false
+  const src = l.reshapeSrc
+  if (!src || src.w < 1 || src.h < 1) return false
+  const q: [Pt, Pt, Pt, Pt] = [quad[0], quad[1], quad[2], quad[3]]
+  if (reshapeQuadMatchesSource(q, src)) {
+    ctx.drawImage(source, 0, 0)
+    return true
+  }
+  ctx.save()
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  if (quadIsAxisAlignedRect(q)) {
+    drawImageAxisRect(ctx, source, src.x, src.y, src.w, src.h, q)
+  } else {
+    drawImageHomographyQuad(ctx, source, src.x, src.y, src.w, src.h, q)
+  }
+  ctx.restore()
+  return true
+}
+
+function lineHasReshapeWarp(l: LineObj): boolean {
+  return reshapeIsApplied(l.reshapeQuad, l.reshapeSrc)
+}
+
+function lineHasPunchHole(l: LineObj): boolean {
+  return objectHasFillHole(l) || !!l.punchEnclosedHole
+}
+
 function renderLineWithReshape(ctx: CanvasRenderingContext2D, l: LineObj): void {
   const quad = l.reshapeQuad
   if (!quad || quad.length !== 4) {
@@ -1364,7 +1399,7 @@ function renderLineWithReshape(ctx: CanvasRenderingContext2D, l: LineObj): void 
   try {
     const tctx = temp.getContext('2d')!
     renderLineUnwarpedToCanvas(tctx, l)
-    const src = resolveReshapeSource(temp, l, W, H)
+    const src = l.reshapeSrc ?? resolveReshapeSource(temp, l, W, H)
     if (!src) {
       renderLineBase(ctx, l)
       return
@@ -2265,25 +2300,66 @@ function destOutLocalPunch(ctx: CanvasRenderingContext2D, item: LineObj): boolea
   const cached = item.punchMask && item.imageDataUrl ? stampImgCache.get(item.imageDataUrl) : null
   const src = sync ?? (cached && cached.complete && cached.naturalWidth > 0 ? cached : null)
   if (!src) return false
-  const paint = () => {
-    ctx.save()
-    ctx.imageSmoothingEnabled = false
-    ctx.globalCompositeOperation = 'destination-out'
-    ctx.drawImage(src, box.x, box.y, box.w, box.h)
-    ctx.restore()
+  const paintOnto = (target: CanvasRenderingContext2D) => {
+    target.save()
+    target.imageSmoothingEnabled = false
+    target.globalCompositeOperation = 'destination-out'
+    target.drawImage(src, box.x, box.y, box.w, box.h)
+    target.restore()
   }
-  if (lineNeedsDisplayTransform(item)) {
-    const c = objCenter(item)
-    ctx.save()
-    ctx.translate(c.x, c.y)
-    ctx.rotate(item.rot ?? 0)
-    ctx.scale(item.scaleX ?? 1, item.scaleY ?? 1)
-    ctx.translate(-c.x, -c.y)
-    paint()
-    ctx.restore()
+  const paintTransformed = (target: CanvasRenderingContext2D) => {
+    if (lineNeedsDisplayTransform(item)) {
+      const c = objCenter(item)
+      target.save()
+      target.translate(c.x, c.y)
+      target.rotate(item.rot ?? 0)
+      target.scale(item.scaleX ?? 1, item.scaleY ?? 1)
+      target.translate(-c.x, -c.y)
+      paintOnto(target)
+      target.restore()
+      return
+    }
+    paintOnto(target)
+  }
+  // Reshape warps the hole with the object (punch first in local space, then warp).
+  if (lineHasReshapeWarp(item) && item.reshapeSrc) {
+    const w = ctx.canvas.width
+    const h = ctx.canvas.height
+    const mask = takeCanvas(w, h)
+    try {
+      const m = mask.getContext('2d')!
+      // Opaque hole silhouette (source-over), then warp + dest-out.
+      m.save()
+      m.imageSmoothingEnabled = false
+      if (lineNeedsDisplayTransform(item)) {
+        const c = objCenter(item)
+        m.translate(c.x, c.y)
+        m.rotate(item.rot ?? 0)
+        m.scale(item.scaleX ?? 1, item.scaleY ?? 1)
+        m.translate(-c.x, -c.y)
+      }
+      m.drawImage(src, box.x, box.y, box.w, box.h)
+      m.restore()
+      const warped = takeCanvas(w, h)
+      try {
+        if (!drawReshapedCanvas(warped.getContext('2d')!, mask, item)) {
+          paintTransformed(ctx)
+          return true
+        }
+        ctx.save()
+        ctx.globalCompositeOperation = 'destination-out'
+        ctx.imageSmoothingEnabled = false
+        ctx.drawImage(warped, 0, 0)
+        ctx.restore()
+      } finally {
+        releaseCanvas(warped)
+      }
+    } finally {
+      releaseCanvas(mask)
+    }
     return true
   }
-  paint()
+  paintTransformed(ctx)
   return true
 }
 
@@ -2305,9 +2381,14 @@ function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: Lin
     const wasColor = item.color
     item.shadow = false
     item.punchThrough = false
-    // Colour irrelevant — alpha outline only.
+    // Colour irrelevant — alpha outline only. Include reshape so counters
+    // line up with the warped glyph on layers below.
     if (item.type === 'text') item.color = '#000000'
-    renderLineBase(s, item)
+    if (lineHasReshapeWarp(item)) {
+      renderLine(s, item, { skipHole: true })
+    } else {
+      renderLineBase(s, item)
+    }
     item.shadow = wasShadow
     item.punchThrough = wasPunch
     item.color = wasColor
@@ -2473,6 +2554,29 @@ function renderLineBodyThenHole(ctx: CanvasRenderingContext2D, l: LineObj, drawB
 function renderLine(ctx: CanvasRenderingContext2D, l: LineObj, opts?: { skipHole?: boolean }): void {
   // Punch-mask stamps are hole operators, not visible pixels.
   if (l.punchMask) return
+  // Punch in unwarped space, then reshape once — otherwise the hole mask stays
+  // axis-aligned while the body warps and counters / fill-holes look broken.
+  if (lineHasReshapeWarp(l) && lineHasPunchHole(l) && !opts?.skipHole) {
+    const W = ctx.canvas.width
+    const H = ctx.canvas.height
+    const temp = takeCanvas(W, H)
+    try {
+      const tctx = temp.getContext('2d')!
+      const plain: LineObj = {
+        ...l,
+        reshapeQuad: undefined,
+        reshapeSrc: undefined,
+        reshapeBaseQuad: undefined
+      }
+      renderLine(tctx, plain, opts)
+      if (!drawReshapedCanvas(ctx, temp, l)) {
+        ctx.drawImage(temp, 0, 0)
+      }
+    } finally {
+      releaseCanvas(temp)
+    }
+    return
+  }
   const paintBody = (c: CanvasRenderingContext2D) => {
     const prevShadow = l.shadow
     l.shadow = false
