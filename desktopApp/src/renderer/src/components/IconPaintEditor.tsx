@@ -579,8 +579,8 @@ async function restorePunchMasks(
           probe.width = W
           probe.height = H
           const pctx = probe.getContext('2d')!
-          renderLine(pctx, { ...l, shadow: false, punchThrough: false, color: '#000000' })
-          const eroded = erodeHoleAwayFromInk(hole, pctx.getImageData(0, 0, W, H).data, W, H, 32, 1)
+          renderLineBase(pctx, { ...l, shadow: false, punchThrough: false, color: '#000000' })
+          const eroded = erodeHoleAwayFromInk(hole, pctx.getImageData(0, 0, W, H).data, W, H, 24, 2)
           if (eroded.some((v) => v)) hole = eroded
           l.punchEnclosedHole = true
         }
@@ -800,35 +800,6 @@ function erodeHoleAwayFromInk(
     }
   }
   return out
-}
-
-/** Dilate opaque pixels in-place (alpha channel) by Chebyshev radius. */
-function dilateAlphaInPlace(data: Uint8ClampedArray, w: number, h: number, radius = 1, srcThreshold = 128): void {
-  if (radius <= 0) return
-  const src = new Uint8Array(w * h)
-  for (let p = 0; p < w * h; p++) src[p] = data[p * 4 + 3] >= srcThreshold ? 1 : 0
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let hit = false
-      for (let dy = -radius; dy <= radius && !hit; dy++) {
-        for (let dx = -radius; dx <= radius; dx++) {
-          const nx = x + dx
-          const ny = y + dy
-          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
-          if (src[ny * w + nx]) {
-            hit = true
-            break
-          }
-        }
-      }
-      if (!hit) continue
-      const i = (y * w + x) * 4
-      data[i] = 0
-      data[i + 1] = 0
-      data[i + 2] = 0
-      data[i + 3] = 255
-    }
-  }
 }
 
 function stampRenderDataUrl(l: LineObj, width: number, height: number): string {
@@ -2197,33 +2168,14 @@ function destOutLocalPunch(ctx: CanvasRenderingContext2D, item: LineObj): boolea
 /** Punch-through dest-out on the stack. Enclosed counters skip the glyph ink. */
 function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: LineObj): boolean {
   if (!item.punchEnclosedHole) return destOutLocalPunch(ctx, item)
-  const box = punchLocalBox(item)
-  const sync = punchMaskCanvases.get(item.id)
-  if (!box || !sync) return destOutLocalPunch(ctx, item)
   const w = ctx.canvas.width
   const h = ctx.canvas.height
-  const tmp = takeCanvas(w, h)
+  if (punchMaskCanvases.has(item.id)) rewritePunchBitsFromLocal(item, w, h)
+  const bits = punchMaskBits.get(item.id)
+  if (!bits || bits.length !== w * h) return destOutLocalPunch(ctx, item)
+
   const sil = takeCanvas(w, h)
   try {
-    const t = tmp.getContext('2d')!
-    t.imageSmoothingEnabled = false
-    const paintMask = () => t.drawImage(sync, box.x, box.y, box.w, box.h)
-    if (lineNeedsDisplayTransform(item)) {
-      const c = objCenter(item)
-      t.save()
-      t.translate(c.x, c.y)
-      t.rotate(item.rot ?? 0)
-      t.scale(item.scaleX ?? 1, item.scaleY ?? 1)
-      t.translate(-c.x, -c.y)
-      paintMask()
-      t.restore()
-    } else {
-      paintMask()
-    }
-
-    // Opaque + 1px-dilated glyph silhouette (not AA body). Subtracting the AA
-    // glyph left soft residual mask columns that punched white fringe into the
-    // stem of counters like "b".
     const s = sil.getContext('2d')!
     s.imageSmoothingEnabled = false
     const wasShadow = item.shadow
@@ -2232,58 +2184,20 @@ function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: Lin
     item.shadow = false
     item.punchThrough = false
     if (item.type === 'text') item.color = '#000000'
-    renderLineBody(s, item)
+    renderLineBase(s, item)
     item.shadow = wasShadow
     item.punchThrough = wasPunch
     item.color = wasColor
-    const silImg = s.getImageData(0, 0, w, h)
-    // Binary-ize then dilate so the keep-out zone covers glyph AA.
-    const sd = silImg.data
-    for (let i = 3; i < sd.length; i += 4) {
-      if (sd[i] >= 40) {
-        sd[i - 3] = 0
-        sd[i - 2] = 0
-        sd[i - 1] = 0
-        sd[i] = 255
-      } else {
-        sd[i - 3] = 0
-        sd[i - 2] = 0
-        sd[i - 1] = 0
-        sd[i] = 0
-      }
-    }
-    dilateAlphaInPlace(sd, w, h, 1, 128)
-    s.putImageData(silImg, 0, 0)
 
-    t.save()
-    t.globalCompositeOperation = 'destination-out'
-    t.drawImage(sil, 0, 0)
-    t.restore()
+    const punch = erodeHoleAwayFromInk(bits, s.getImageData(0, 0, w, h).data, w, h, 24, 2)
+    if (!punch.some((v) => v)) return destOutLocalPunch(ctx, item)
 
-    const img = t.getImageData(0, 0, w, h)
-    const d = img.data
-    for (let i = 3; i < d.length; i += 4) {
-      if (d[i] < 200) {
-        d[i - 3] = 0
-        d[i - 2] = 0
-        d[i - 1] = 0
-        d[i] = 0
-      } else {
-        d[i - 3] = 255
-        d[i - 2] = 255
-        d[i - 1] = 255
-        d[i] = 255
-      }
-    }
-    t.putImageData(img, 0, 0)
-    ctx.save()
-    ctx.globalCompositeOperation = 'destination-out'
-    ctx.imageSmoothingEnabled = false
-    ctx.drawImage(tmp, 0, 0)
-    ctx.restore()
+    destOutFilledMask(ctx, punch, w, h)
+
+    // Repaint the whole object (shadow + glyph) so stem AA is not left frayed.
+    renderLine(ctx, item)
     return true
   } finally {
-    releaseCanvas(tmp)
     releaseCanvas(sil)
   }
 }
@@ -7698,8 +7612,9 @@ export function IconPaintEditor({
       const probe = takeCanvas(W, H)
       try {
         const pctx = probe.getContext('2d')!
-        renderLine(pctx, { ...owner, shadow: false, punchThrough: false, color: owner.type === 'text' ? '#000000' : owner.color })
-        holeBits = erodeHoleAwayFromInk(filled, pctx.getImageData(0, 0, W, H).data, W, H, 32, 1)
+        const probeItem = { ...owner, shadow: false, punchThrough: false, color: owner.type === 'text' ? '#000000' : owner.color }
+        renderLineBase(pctx, probeItem)
+        holeBits = erodeHoleAwayFromInk(filled, pctx.getImageData(0, 0, W, H).data, W, H, 24, 2)
       } finally {
         releaseCanvas(probe)
       }
@@ -8345,7 +8260,7 @@ export function IconPaintEditor({
 
     // Recolor of existing pixels (border / shadow / fill): also absorb AA and
     // white-bake fringes so they are not left peeking beside the new colour.
-    if (fillCleanEdges && clickedEmpty) {
+    if (fillCleanEdges && clickedEmpty && !enclosedHole) {
       // Pass 2–3: absorb anti-aliased fringes and thin leftover outline rings
       // next to the filled area. Thick opaque bands of a different color stay.
       const fringeTol = 110
@@ -8523,6 +8438,11 @@ export function IconPaintEditor({
     // Commit: merge a clean fill-colour silhouette into the overlay (do not
     // wipe earlier overlay paint). Solid bake pixels get full cover so original
     // RGB (including white AA) cannot show through; soft shadow keeps its alpha.
+    // Enclosed letter counters only need a vector punch — never bake into overlay.
+    if (enclosedHole && isTransparentPaintColor(color)) {
+      applyTransparentFlood(filled, layerId ?? 'content', ctx.canvas, true)
+      return
+    }
     const out = ctx.getImageData(0, 0, W, H)
     const od = out.data
     for (let p = 0; p < filled.length; p++) {
