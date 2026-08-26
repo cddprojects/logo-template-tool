@@ -1520,6 +1520,13 @@ function translatePolyEdge(corners: Pt[], edgeIdx: number, dx: number, dy: numbe
   return next
 }
 
+/** Shift-drag: keep movement on the dominant canvas axis only. */
+function constrainDragDeltaAxis(d: Pt, axisLock: boolean): Pt {
+  if (!axisLock) return d
+  if (Math.abs(d.x) >= Math.abs(d.y)) return { x: d.x, y: 0 }
+  return { x: 0, y: d.y }
+}
+
 function parseFontWeightNum(weight: string | undefined): number {
   const n = parseInt(String(weight ?? '700'), 10)
   return Number.isFinite(n) ? Math.max(100, Math.min(900, n)) : 700
@@ -7128,7 +7135,10 @@ export function IconPaintEditor({
       return
     } else if (dr.kind === 'reshapeEdge') {
       if (!l.reshapeQuad || dr.idx == null || !dr.grab) return
-      const d = { x: pt.x - dr.grab.x, y: pt.y - dr.grab.y }
+      const d = constrainDragDeltaAxis(
+        { x: pt.x - dr.grab.x, y: pt.y - dr.grab.y },
+        shiftHeldRef.current
+      )
       const source = dr.snapshot?.find((item) => item.id === l.id)
       if (!source?.reshapeQuad) return
       const i = dr.idx
@@ -7153,8 +7163,14 @@ export function IconPaintEditor({
       const localGrab = rotatePt(dr.grab, center, -rot)
       let dx = localPt.x - localGrab.x
       let dy = localPt.y - localGrab.y
-      if (dr.idx === 0 || dr.idx === 2) dx = 0
-      else dy = 0
+      // Default: move edge perpendicular (resize). Shift: slide along the edge only.
+      if (shiftHeldRef.current) {
+        if (dr.idx === 0 || dr.idx === 2) dy = 0
+        else dx = 0
+      } else {
+        if (dr.idx === 0 || dr.idx === 2) dx = 0
+        else dy = 0
+      }
       const corners = localRectCornersFromPts(source.pts)
       const moved = translatePolyEdge(corners, dr.idx, dx, dy)
       l.pts = [moved[0], moved[2]]
@@ -7172,7 +7188,7 @@ export function IconPaintEditor({
         const gx = Math.min(l.pts[0].x, l.pts[1].x)
         const gy = Math.min(l.pts[0].y, l.pts[1].y)
         const gw = Math.max(1, Math.abs(l.pts[1].x - l.pts[0].x))
-        const gh = Math.max(1, Math.abs(l.pts[1].y - l.pts[1].y))
+        const gh = Math.max(1, Math.abs(l.pts[1].y - l.pts[0].y))
         const descendants = descendantIds(l.id, dr.snapshot)
         for (const child of linesRef.current) {
           if (!descendants.has(child.id)) continue
