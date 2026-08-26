@@ -1427,6 +1427,7 @@ function renderLineWithReshape(ctx: CanvasRenderingContext2D, l: LineObj): void 
 function translateReshape(l: LineObj, dx: number, dy: number): void {
   if (l.reshapeQuad) l.reshapeQuad = l.reshapeQuad.map((p) => ({ x: p.x + dx, y: p.y + dy }))
   if (l.reshapeBaseQuad) l.reshapeBaseQuad = l.reshapeBaseQuad.map((p) => ({ x: p.x + dx, y: p.y + dy }))
+  if (l.reshapeSrc) l.reshapeSrc = { ...l.reshapeSrc, x: l.reshapeSrc.x + dx, y: l.reshapeSrc.y + dy }
 }
 
 function rotateReshapeFromSnapshot(l: LineObj, source: LineObj, center: Pt, delta: number): void {
@@ -1456,6 +1457,67 @@ function reshapeCornerAt(l: LineObj, pt: Pt): number {
     if (dist(l.reshapeQuad[i], pt) <= 12) return i
   }
   return -1
+}
+
+function distPtToSegment(p: Pt, a: Pt, b: Pt): number {
+  const dx = b.x - a.x
+  const dy = b.y - a.y
+  const len2 = dx * dx + dy * dy
+  if (len2 < 1e-6) return dist(p, a)
+  let t = ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2
+  t = Math.max(0, Math.min(1, t))
+  return dist(p, { x: a.x + t * dx, y: a.y + t * dy })
+}
+
+function edgeIndexAtPoly(corners: Pt[], pt: Pt, cornerExcl = 12, threshold = 10): number {
+  for (let i = 0; i < corners.length; i++) {
+    const a = corners[i]
+    const b = corners[(i + 1) % corners.length]
+    if (dist(pt, a) <= cornerExcl || dist(pt, b) <= cornerExcl) continue
+    if (distPtToSegment(pt, a, b) <= threshold) return i
+  }
+  return -1
+}
+
+function reshapeEdgeAt(l: LineObj, pt: Pt): number {
+  if (!l.reshapeQuad?.length) return -1
+  return edgeIndexAtPoly(l.reshapeQuad, pt)
+}
+
+function localRectCornersFromPts(pts: Pt[]): Pt[] {
+  const a = pts[0]
+  const b = pts[1]
+  const x0 = Math.min(a.x, b.x)
+  const y0 = Math.min(a.y, b.y)
+  const x1 = Math.max(a.x, b.x)
+  const y1 = Math.max(a.y, b.y)
+  return [
+    { x: x0, y: y0 },
+    { x: x1, y: y0 },
+    { x: x1, y: y1 },
+    { x: x0, y: y1 }
+  ]
+}
+
+function displayRectCorners(l: LineObj): Pt[] {
+  const c = objCenter(l)
+  const rot = l.rot ?? 0
+  return localRectCornersFromPts(l.pts).map((p) => rotatePt(p, c, rot))
+}
+
+function bboxEdgeAt(l: LineObj, pt: Pt): number {
+  if (l.pts.length !== 2) return -1
+  if (l.type !== 'shape' && l.type !== 'stamp' && l.type !== 'group') return -1
+  if (l.reshapeQuad?.length === 4) return -1
+  return edgeIndexAtPoly(displayRectCorners(l), pt)
+}
+
+function translatePolyEdge(corners: Pt[], edgeIdx: number, dx: number, dy: number): Pt[] {
+  const next = corners.map((p) => ({ ...p }))
+  const j = (edgeIdx + 1) % corners.length
+  next[edgeIdx] = { x: next[edgeIdx].x + dx, y: next[edgeIdx].y + dy }
+  next[j] = { x: next[j].x + dx, y: next[j].y + dy }
+  return next
 }
 
 function parseFontWeightNum(weight: string | undefined): number {
@@ -4277,7 +4339,7 @@ export function IconPaintEditor({
     label: string | null
   } | null>(null)
   const lineDragRef = useRef<{
-    kind: 'create' | 'draw' | 'handle' | 'move' | 'rotate' | 'reshapeCorner' | 'cropHandle' | 'cropPan'
+    kind: 'create' | 'draw' | 'handle' | 'move' | 'rotate' | 'reshapeCorner' | 'reshapeEdge' | 'bboxEdge' | 'cropHandle' | 'cropPan'
     id: string
     idx?: number
     grab?: Pt
@@ -4318,6 +4380,8 @@ export function IconPaintEditor({
   const lastPt = useRef({ x: 0, y: 0 })
   const objectPaintStrokeRef = useRef<{ id: string; index: number } | null>(null)
   const polyPts = useRef<{ x: number; y: number }[]>([])
+  /** When true, double-click finish should not pop — the second click was already skipped. */
+  const polyDblClickSkippedRef = useRef(false)
   /** Active window-level pointer capture so drags continue outside the canvas. */
   const pointerDragCleanupRef = useRef<(() => void) | null>(null)
 
@@ -5288,7 +5352,7 @@ export function IconPaintEditor({
     }
   }
 
-  const finishPolygonRef = useRef<() => void>(() => {})
+  const finishPolygonRef = useRef<(opts?: { dropLastPoint?: boolean }) => void>(() => {})
 
   const deleteSelectedRef = useRef<() => void>(() => {})
   const endTextEditRef = useRef<() => void>(() => {})
@@ -5904,6 +5968,18 @@ export function IconPaintEditor({
       p.fill()
       p.stroke()
     }
+    p.fillStyle = '#ffffff'
+    p.strokeStyle = '#c084fc'
+    for (let i = 0; i < 4; i++) {
+      const a = quad[i]
+      const b = quad[(i + 1) % 4]
+      const mx = (a.x + b.x) / 2
+      const my = (a.y + b.y) / 2
+      p.beginPath()
+      p.rect(mx - 5, my - 5, 10, 10)
+      p.fill()
+      p.stroke()
+    }
     p.restore()
     return true
   }
@@ -6069,6 +6145,28 @@ export function IconPaintEditor({
         p.beginPath(); p.arc(pt.x, pt.y, 7, 0, Math.PI * 2); p.fill(); p.stroke()
       } else {
         p.beginPath(); p.rect(pt.x - 6, pt.y - 6, 12, 12); p.fill(); p.stroke()
+      }
+      p.restore()
+    }
+    if (
+      l.pts.length === 2 &&
+      (l.type === 'shape' || l.type === 'stamp' || l.type === 'group') &&
+      !l.reshapeQuad?.length
+    ) {
+      const corners = displayRectCorners(l)
+      p.save()
+      p.fillStyle = '#ffffff'
+      p.strokeStyle = '#22d3ee'
+      p.lineWidth = 2
+      for (let i = 0; i < 4; i++) {
+        const a = corners[i]
+        const b = corners[(i + 1) % 4]
+        const mx = (a.x + b.x) / 2
+        const my = (a.y + b.y) / 2
+        p.beginPath()
+        p.rect(mx - 5, my - 5, 10, 10)
+        p.fill()
+        p.stroke()
       }
       p.restore()
     }
@@ -6498,26 +6596,63 @@ export function IconPaintEditor({
           }
           return
         }
-        const hi = handleIndexAt(sel, pt)
-        if (hi >= 0) {
-          resizeSnapLockRef.current = { width: false, height: false }
-          const snapshotResize =
-            sel.pts.length === 2 &&
-            (sel.type === 'shape' || sel.type === 'stamp' || sel.type === 'group')
-          lineDragRef.current = {
-            kind: 'handle',
-            id: sel.id,
-            idx: hi,
-            ...(snapshotResize
-              ? {
-                  startRect: boundsForLine(sel),
-                  startCenter: objCenter(sel),
-                  startRot: sel.rot ?? 0,
-                  snapshot: cloneLines(linesRef.current)
-                }
-              : {})
+        if (sel.reshapeQuad?.length === 4) {
+          const ci = reshapeCornerAt(sel, pt)
+          if (ci >= 0) {
+            lineDragRef.current = {
+              kind: 'reshapeCorner',
+              id: sel.id,
+              idx: ci,
+              snapshot: cloneLines(linesRef.current)
+            }
+            return
           }
-          return
+          const ei = reshapeEdgeAt(sel, pt)
+          if (ei >= 0) {
+            lineDragRef.current = {
+              kind: 'reshapeEdge',
+              id: sel.id,
+              idx: ei,
+              grab: pt,
+              snapshot: cloneLines(linesRef.current)
+            }
+            return
+          }
+        } else {
+          const hi = handleIndexAt(sel, pt)
+          if (hi >= 0) {
+            resizeSnapLockRef.current = { width: false, height: false }
+            const snapshotResize =
+              sel.pts.length === 2 &&
+              (sel.type === 'shape' || sel.type === 'stamp' || sel.type === 'group')
+            lineDragRef.current = {
+              kind: 'handle',
+              id: sel.id,
+              idx: hi,
+              ...(snapshotResize
+                ? {
+                    startRect: boundsForLine(sel),
+                    startCenter: objCenter(sel),
+                    startRot: sel.rot ?? 0,
+                    snapshot: cloneLines(linesRef.current)
+                  }
+                : {})
+            }
+            return
+          }
+          const ei = bboxEdgeAt(sel, pt)
+          if (ei >= 0) {
+            lineDragRef.current = {
+              kind: 'bboxEdge',
+              id: sel.id,
+              idx: ei,
+              grab: pt,
+              startCenter: objCenter(sel),
+              startRot: sel.rot ?? 0,
+              snapshot: cloneLines(linesRef.current)
+            }
+            return
+          }
         }
       }
 
@@ -6561,6 +6696,17 @@ export function IconPaintEditor({
             kind: 'reshapeCorner',
             id: sel.id,
             idx: ci,
+            snapshot: cloneLines(linesRef.current)
+          }
+          return
+        }
+        const ei = reshapeEdgeAt(sel, pt)
+        if (ei >= 0) {
+          lineDragRef.current = {
+            kind: 'reshapeEdge',
+            id: sel.id,
+            idx: ei,
+            grab: pt,
             snapshot: cloneLines(linesRef.current)
           }
           return
@@ -6980,6 +7126,74 @@ export function IconPaintEditor({
           : null
       schedulePaintView(true, () => drawReshapeSnapGuides())
       return
+    } else if (dr.kind === 'reshapeEdge') {
+      if (!l.reshapeQuad || dr.idx == null || !dr.grab) return
+      const d = { x: pt.x - dr.grab.x, y: pt.y - dr.grab.y }
+      const source = dr.snapshot?.find((item) => item.id === l.id)
+      if (!source?.reshapeQuad) return
+      const i = dr.idx
+      const j = (i + 1) % 4
+      l.reshapeQuad = source.reshapeQuad.map((p) => ({ ...p }))
+      l.reshapeBaseQuad = source.reshapeBaseQuad?.map((p) => ({ ...p }))
+      l.reshapeQuad[i] = { x: l.reshapeQuad[i].x + d.x, y: l.reshapeQuad[i].y + d.y }
+      l.reshapeQuad[j] = { x: l.reshapeQuad[j].x + d.x, y: l.reshapeQuad[j].y + d.y }
+      if (l.reshapeBaseQuad) {
+        l.reshapeBaseQuad[i] = { x: l.reshapeBaseQuad[i].x + d.x, y: l.reshapeBaseQuad[i].y + d.y }
+        l.reshapeBaseQuad[j] = { x: l.reshapeBaseQuad[j].x + d.x, y: l.reshapeBaseQuad[j].y + d.y }
+      }
+      schedulePaintView(true)
+      return
+    } else if (dr.kind === 'bboxEdge') {
+      if (dr.idx == null || !dr.grab) return
+      const source = dr.snapshot?.find((item) => item.id === l.id)
+      if (!source || source.pts.length !== 2) return
+      const center = dr.startCenter ?? objCenter(l)
+      const rot = dr.startRot ?? l.rot ?? 0
+      const localPt = rotatePt(pt, center, -rot)
+      const localGrab = rotatePt(dr.grab, center, -rot)
+      let dx = localPt.x - localGrab.x
+      let dy = localPt.y - localGrab.y
+      if (dr.idx === 0 || dr.idx === 2) dx = 0
+      else dy = 0
+      const corners = localRectCornersFromPts(source.pts)
+      const moved = translatePolyEdge(corners, dr.idx, dx, dy)
+      l.pts = [moved[0], moved[2]]
+      l.rot = source.rot
+      l.thickness = source.thickness
+      l.borderWidth = source.borderWidth
+      l.fontSize = source.fontSize
+      if (l.type === 'group') {
+        const groupBefore = {
+          x: Math.min(source.pts[0].x, source.pts[1].x),
+          y: Math.min(source.pts[0].y, source.pts[1].y),
+          w: Math.max(1, Math.abs(source.pts[1].x - source.pts[0].x)),
+          h: Math.max(1, Math.abs(source.pts[1].y - source.pts[0].y))
+        }
+        const gx = Math.min(l.pts[0].x, l.pts[1].x)
+        const gy = Math.min(l.pts[0].y, l.pts[1].y)
+        const gw = Math.max(1, Math.abs(l.pts[1].x - l.pts[0].x))
+        const gh = Math.max(1, Math.abs(l.pts[1].y - l.pts[1].y))
+        const descendants = descendantIds(l.id, dr.snapshot)
+        for (const child of linesRef.current) {
+          if (!descendants.has(child.id)) continue
+          const childSource = dr.snapshot!.find((item) => item.id === child.id)
+          if (!childSource) continue
+          child.pts = childSource.pts.map((p) => ({
+            x: gx + ((p.x - groupBefore.x) / groupBefore.w) * gw,
+            y: gy + ((p.y - groupBefore.y) / groupBefore.h) * gh
+          }))
+          child.rot = childSource.rot
+          child.thickness = childSource.thickness
+          child.borderWidth = childSource.borderWidth
+          child.fontSize = childSource.fontSize
+          child.paintStrokes = childSource.paintStrokes
+            ? structuredClone(childSource.paintStrokes)
+            : childSource.paintStrokes
+        }
+        syncGroupBounds()
+      }
+      schedulePaintView(true)
+      return
     } else if (dr.kind === 'move') {
       const d = { x: pt.x - dr.grab!.x, y: pt.y - dr.grab!.y }
       l.pts = l.pts.map((p) => ({ x: p.x + d.x, y: p.y + d.y }))
@@ -6989,17 +7203,20 @@ export function IconPaintEditor({
         for (const child of linesRef.current) {
           if (descendants.has(child.id)) {
             child.pts = child.pts.map((p) => ({ x: p.x + d.x, y: p.y + d.y }))
+            translateReshape(child, d.x, d.y)
           }
         }
       }
       const snap = snapRectToCanvas(boundsForLine(l))
       if (snap.x || snap.y) {
         l.pts = l.pts.map((p) => ({ x: p.x + snap.dx, y: p.y + snap.dy }))
+        translateReshape(l, snap.dx, snap.dy)
         if (l.type === 'group') {
           const descendants = descendantIds(l.id)
           for (const child of linesRef.current) {
             if (descendants.has(child.id)) {
               child.pts = child.pts.map((p) => ({ x: p.x + snap.dx, y: p.y + snap.dy }))
+              translateReshape(child, snap.dx, snap.dy)
             }
           }
         }
@@ -7188,6 +7405,7 @@ export function IconPaintEditor({
     if (textEditIdRef.current) endTextEditRef.current()
     clearPreview()
     polyPts.current = []
+    polyDblClickSkippedRef.current = false
     lineDragRef.current = null
     objectPaintStrokeRef.current = null
     drawing.current = false
@@ -8736,8 +8954,11 @@ export function IconPaintEditor({
     setHexText(hex)
   }
 
-  const finishPolygon = () => {
+  const finishPolygon = (opts?: { dropLastPoint?: boolean }) => {
     const pts = polyPts.current
+    // Double-click finish: drop the vertex from the second click if it was added.
+    if (opts?.dropLastPoint && pts.length > 0) pts.pop()
+    polyDblClickSkippedRef.current = false
     if (pts.length < 2) { polyPts.current = []; clearPreview(); return }
     // Create an editable vector polygon (so it can be re-selected/edited) rather
     // than rasterizing it straight onto the layers.
@@ -10203,6 +10424,13 @@ export function IconPaintEditor({
       return
     }
     if (tool === 'polygon') {
+      // The second click of a double-click has detail >= 2. Skip adding a vertex
+      // so finishing with double-click does not leave a stray last point.
+      if (e.detail >= 2) {
+        polyDblClickSkippedRef.current = true
+        return
+      }
+      polyDblClickSkippedRef.current = false
       polyPts.current.push(pt)
       drawPolyPreview(pt)
       return
@@ -12026,7 +12254,12 @@ export function IconPaintEditor({
               if (!pointerDragCleanupRef.current && !drawing.current && tool === 'eraser') clearPreview()
             }}
             onDoubleClick={(e) => {
-              if (tool === 'polygon') { finishPolygon(); return }
+              if (tool === 'polygon') {
+                e.preventDefault()
+                // If the second click was not skipped (detail unavailable), undo it.
+                finishPolygon({ dropLastPoint: !polyDblClickSkippedRef.current })
+                return
+              }
               if (tool !== 'pointer') return
               const pt = toCanvas(e)
               const hit = [...linesRef.current].reverse().find((l) => {
