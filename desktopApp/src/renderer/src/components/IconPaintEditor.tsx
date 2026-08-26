@@ -341,6 +341,8 @@ interface LineObj {
   editable?: boolean
   /** Parent nondestructive group. Group children remain real object layers. */
   parentId?: string
+  /** Root-only: paint below the live base + overlay for this object's paint layer. */
+  belowBase?: boolean
   type: LineType
   /** Control points. straight:2 · curved:3 · free:4 · drawn:N · poly:N (vertices) */
   pts: Pt[]
@@ -421,6 +423,16 @@ interface LineObj {
   punchEnclosedHole?: boolean
   /** Invisible flood-fill mask used only for punch-through compositing. */
   punchMask?: boolean
+}
+
+function paintRootOfLine(item: LineObj, items: LineObj[]): LineObj {
+  let current = item
+  while (current.parentId) {
+    const parent = items.find((entry) => entry.id === current.parentId)
+    if (!parent) break
+    current = parent
+  }
+  return current
 }
 
 /** Cache decoded stamp images so undo/redo redraws stay sync after the first load. */
@@ -670,6 +682,36 @@ function ensureStampImage(dataUrl: string, onReady?: () => void): HTMLImageEleme
 /** Live Inner letters / contentBound proxy — fillable material, not session walls. */
 function isLiveInnerVector(l: LineObj): boolean {
   return !!l.linkedOutsideText || !!l.contentBound
+}
+
+type PaintSlotStep =
+  | { kind: 'base' }
+  | { kind: 'overlay' }
+  | { kind: 'object'; l: LineObj }
+
+/** Paint-order steps for one base slot: below-base objects → base → overlay → above-base objects. */
+function paintSlotStepsForRoots(
+  roots: LineObj[],
+  opts?: { base?: boolean; overlay?: boolean }
+): PaintSlotStep[] {
+  const belowRoots = roots.filter((l) => l.belowBase)
+  const aboveRoots = roots.filter((l) => !l.belowBase)
+  const steps: PaintSlotStep[] = []
+  for (const l of belowRoots) {
+    if (isLiveInnerVector(l)) steps.push({ kind: 'object', l })
+  }
+  for (const l of belowRoots) {
+    if (!isLiveInnerVector(l)) steps.push({ kind: 'object', l })
+  }
+  if (opts?.base !== false) steps.push({ kind: 'base' })
+  for (const l of aboveRoots) {
+    if (isLiveInnerVector(l)) steps.push({ kind: 'object', l })
+  }
+  if (opts?.overlay !== false) steps.push({ kind: 'overlay' })
+  for (const l of aboveRoots) {
+    if (!isLiveInnerVector(l)) steps.push({ kind: 'object', l })
+  }
+  return steps
 }
 
 /** Spiral search for a pixel that may start a flood (click landed on a cut). */
@@ -4596,23 +4638,11 @@ export function IconPaintEditor({
     const useSlotCache = !!(liveDirty && !liveDirty.has(id))
     const cacheSlot = id === 'content' ? slotCacheContentRef : slotCacheContainerRef
 
-    // Paint order within a slot: base → live Inner → overlay → session objects.
+    // Paint order within a slot: below-base objects → base → live Inner → overlay → above-base objects.
     // Punch-through must only cut what is already below the punched object, so
     // after each punch we redraw strictly-higher steps in this slot.
-    type SlotStep =
-      | { kind: 'base' }
-      | { kind: 'overlay' }
-      | { kind: 'object'; l: LineObj }
     const roots = linesRef.current.filter((l) => !l.parentId && vectorLayerOf(l) === id)
-    const steps: SlotStep[] = []
-    if (opts?.base !== false) steps.push({ kind: 'base' })
-    for (const l of roots) {
-      if (isLiveInnerVector(l)) steps.push({ kind: 'object', l })
-    }
-    if (opts?.overlay !== false) steps.push({ kind: 'overlay' })
-    for (const l of roots) {
-      if (!isLiveInnerVector(l)) steps.push({ kind: 'object', l })
-    }
+    const steps = paintSlotStepsForRoots(roots, opts)
 
     const paintObjectStep = (t: CanvasRenderingContext2D, l: LineObj) => {
       if (skip(l)) return
@@ -4799,6 +4829,19 @@ export function IconPaintEditor({
 
   const isPaintHitVisible = (l: LineObj): boolean =>
     !l.punchMask && isVectorVisible(l)
+
+  const paintHitRank = (l: LineObj): number => {
+    const root = paintRootOfLine(l, linesRef.current)
+    const layerI = [...layerOrderRef.current].reverse().indexOf(vectorLayerOf(root))
+    const above = root.belowBase ? 0 : 1
+    const rootIndex = linesRef.current.findIndex((item) => item.id === root.id)
+    return layerI * 100_000 + above * 10_000 + rootIndex
+  }
+
+  const topmostPaintHit = (pred: (l: LineObj) => boolean): LineObj | undefined =>
+    [...linesRef.current]
+      .sort((a, b) => paintHitRank(b) - paintHitRank(a))
+      .find(pred)
 
   /** A checked ancestor group owns edits; otherwise the item edits itself. */
   const checkedGroupTarget = (l: LineObj): LineObj | null => {
@@ -6802,8 +6845,8 @@ export function IconPaintEditor({
         }
       }
 
-      // 2. Selecting / moving an existing visible object (topmost first).
-      const hit = [...linesRef.current].reverse().find((l) => {
+      // 2. Selecting / moving an existing visible object (topmost in paint order first).
+      const hit = topmostPaintHit((l) => {
         if (!isPaintHitVisible(l)) return false
         if (l.reshapeQuad?.length === 4) return pointInPoly(l.reshapeQuad, pt)
         const q = unmapObjDisplayPt(pt, l)
@@ -6874,7 +6917,7 @@ export function IconPaintEditor({
           return
         }
       }
-      const hit = [...linesRef.current].reverse().find((l) => {
+      const hit = topmostPaintHit((l) => {
         if (!isPaintHitVisible(l) || !lineReshapeable(l)) return false
         if (l.reshapeQuad?.length === 4) return pointInPoly(l.reshapeQuad, pt)
         const q = unmapObjDisplayPt(pt, l)
@@ -7731,29 +7774,35 @@ export function IconPaintEditor({
       : [...layerOrderRef.current].reverse()
     for (const id of ids) {
       const roots = linesRef.current.filter((l) => !l.parentId && vectorLayerOf(l) === id)
-      type SlotStep = { kind: 'object'; l: LineObj }
-      const steps: SlotStep[] = roots.map((l) => ({ kind: 'object' as const, l }))
+      const belowRoots = roots.filter((l) => l.belowBase)
+      const aboveRoots = roots.filter((l) => !l.belowBase)
+      type DecorStep = { kind: 'object'; l: LineObj }
       const paintObjectStep = (t: CanvasRenderingContext2D, l: LineObj) => {
         renderObjectTree(t, l, linesRef.current, show)
         if (show(l) && l.punchMask && !l.punchThrough) destOutLocalPunch(t, l)
       }
+      const allSteps = (items: LineObj[]): DecorStep[] => items.map((l) => ({ kind: 'object' as const, l }))
+      const belowSteps = allSteps(belowRoots)
+      const aboveSteps = allSteps(aboveRoots)
       const tmp = takeCanvas(W, H)
       try {
         const t = tmp.getContext('2d')!
+        for (const step of belowSteps) paintObjectStep(t, step.l)
         t.drawImage(layerCanvas(id), 0, 0)
-        for (const step of steps) paintObjectStep(t, step.l)
+        for (const step of aboveSteps) paintObjectStep(t, step.l)
         x.drawImage(tmp, 0, 0)
       } finally {
         releaseCanvas(tmp)
       }
-      for (let i = 0; i < steps.length; i++) {
-        const l = steps[i].l
+      const punchSteps = [...belowSteps, ...aboveSteps]
+      for (let i = 0; i < punchSteps.length; i++) {
+        const l = punchSteps[i].l
         if (!show(l)) continue
         if (l.punchMask && !l.punchThrough) continue
         if (l.type !== 'group' && !l.punchThrough) continue
         punchObjectFromComposite(x, l, linesRef.current, show)
-        for (let j = i + 1; j < steps.length; j++) {
-          paintObjectStep(x, steps[j].l)
+        for (let j = i + 1; j < punchSteps.length; j++) {
+          paintObjectStep(x, punchSteps[j].l)
         }
       }
     }
@@ -10824,10 +10873,31 @@ export function IconPaintEditor({
     pushHistory()
   }
 
-  const rootIndicesOnLayer = (items: LineObj[], layer: PaintLayerId): number[] => {
+  const paintRootOf = (item: LineObj, items: LineObj[]): LineObj => paintRootOfLine(item, items)
+
+  const applyMovingLayerFlags = (
+    moving: LineObj[],
+    dragged: LineObj,
+    layer: PaintLayerId,
+    belowBase: boolean
+  ) => {
+    for (const item of moving) {
+      item.layer = layer
+      if (isLiveInnerVector(item)) item.belowBase = false
+    }
+    dragged.belowBase = isLiveInnerVector(dragged) ? false : belowBase
+  }
+
+  const rootIndicesOnLayer = (
+    items: LineObj[],
+    layer: PaintLayerId,
+    belowBase?: boolean
+  ): number[] => {
     const indices: number[] = []
     items.forEach((item, i) => {
-      if (!item.parentId && vectorLayerOf(item) === layer) indices.push(i)
+      if (!item.parentId && vectorLayerOf(item) === layer) {
+        if (belowBase === undefined || !!item.belowBase === belowBase) indices.push(i)
+      }
     })
     return indices
   }
@@ -10866,18 +10936,23 @@ export function IconPaintEditor({
 
     if (targetKey.startsWith('base:')) {
       const layer = targetKey.slice(5) as PaintLayerId
-      for (const item of moving) item.layer = layer
+      const belowBase = position === 'after'
+      applyMovingLayerFlags(moving, dragged, layer, belowBase)
       dragged.parentId = undefined
-      const roots = rootIndicesOnLayer(remaining, layer)
-      // Panel order is the reverse of paint-array order on this base layer.
-      const insertAt =
-        position === 'after'
-          ? roots.length
-            ? roots[roots.length - 1] + 1
+      const aboveRoots = rootIndicesOnLayer(remaining, layer, false)
+      const belowRoots = rootIndicesOnLayer(remaining, layer, true)
+      let insertAt: number
+      if (belowBase) {
+        // Just below the Inner/Outer paint row — front of the below-base stack.
+        insertAt = belowRoots.length
+          ? belowRoots[belowRoots.length - 1] + 1
+          : aboveRoots.length
+            ? aboveRoots[0]
             : remaining.length
-          : roots.length
-            ? roots[0]
-            : remaining.length
+      } else {
+        // Just above the Inner/Outer paint row — back of the above-base stack.
+        insertAt = aboveRoots.length ? aboveRoots[0] : remaining.length
+      }
       remaining.splice(insertAt, 0, ...moving)
     } else {
       const targetId = targetKey.slice(7)
@@ -10886,7 +10961,8 @@ export function IconPaintEditor({
       if (targetIndex < 0) return false
       const target = remaining[targetIndex]
       const layer = vectorLayerOf(target)
-      for (const item of moving) item.layer = layer
+      const anchor = paintRootOf(target, remaining)
+      applyMovingLayerFlags(moving, dragged, layer, !!anchor.belowBase)
 
       if (position === 'inside' && target.type === 'group') {
         dragged.parentId = target.id
@@ -11132,6 +11208,7 @@ export function IconPaintEditor({
     const bottom = Math.max(...boxes.map((b) => b.y + b.h))
     const parents = new Set(selected.map((l) => l.parentId))
     const commonParentId = parents.size === 1 ? selected[0]?.parentId : undefined
+    const topRoot = paintRootOf(topmost, linesRef.current)
     const grouped: LineObj = {
       id: genId(),
       name: 'Group',
@@ -11143,7 +11220,8 @@ export function IconPaintEditor({
       thickness: 0,
       color: '#000000ff',
       layer: vectorLayerOf(topmost),
-      parentId: commonParentId
+      parentId: commonParentId,
+      belowBase: !!topRoot.belowBase
     }
 
     const topmostIndex = linesRef.current.findIndex((l) => l.id === topmost.id)
@@ -11252,7 +11330,10 @@ export function IconPaintEditor({
     (l) => selectedLayerIds.has(l.id) && !l.marqueeItem && !selectedLayerHasAncestor(l)
   ).length
   const selectedIsGroup = selectedObj?.type === 'group'
-  const panelObjectsForBase = (id: PaintLayerId): { l: LineObj; depth: number }[] => {
+  const panelObjectsForBase = (
+    id: PaintLayerId,
+    belowBase: boolean
+  ): { l: LineObj; depth: number }[] => {
     const result: { l: LineObj; depth: number }[] = []
     const appendChildren = (parentId: string, depth: number) => {
       for (const child of [...lines].filter((l) => l.parentId === parentId).reverse()) {
@@ -11263,7 +11344,14 @@ export function IconPaintEditor({
       }
     }
     const roots = [...lines]
-      .filter((l) => vectorLayerOf(l) === id && !l.marqueeItem && !l.punchMask && !l.parentId)
+      .filter(
+        (l) =>
+          vectorLayerOf(l) === id &&
+          !l.marqueeItem &&
+          !l.punchMask &&
+          !l.parentId &&
+          !!l.belowBase === belowBase
+      )
       .reverse()
     for (const root of roots) {
       result.push({ l: root, depth: 0 })
@@ -12485,7 +12573,7 @@ export function IconPaintEditor({
               }
               if (tool !== 'pointer') return
               const pt = toCanvas(e)
-              const hit = [...linesRef.current].reverse().find((l) => {
+              const hit = topmostPaintHit((l) => {
                 if (l.type !== 'text' || !isPaintHitVisible(l)) return false
                 const q = unmapObjDisplayPt(pt, l)
                 return pointInPoly(flattenLine(l), q)
@@ -12785,7 +12873,7 @@ export function IconPaintEditor({
           <div className="px-3 py-2 border-b border-border shrink-0">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">Layers</p>
             <p className="text-[9px] text-muted/70 mt-0.5">
-              Drag above/below · drop on group centre to nest
+              Drag above/below · drop on group centre to nest · below Inner/Outer paint to send behind
             </p>
           </div>
           <div
@@ -12803,7 +12891,9 @@ export function IconPaintEditor({
               const disabled = !isContent && !containerUsable
               return (
                 <React.Fragment key={id}>
-                  {panelObjectsForBase(id)
+                  {([false, true] as const).map((belowBase) => (
+                    <React.Fragment key={belowBase ? 'below' : 'above'}>
+                  {panelObjectsForBase(id, belowBase)
                     .map(({ l, depth }) => {
                       const key = `object:${l.id}`
                       const selected = selectedLayerIds.has(l.id)
@@ -13048,6 +13138,7 @@ export function IconPaintEditor({
                         </div>
                       )
                     })}
+                  {!belowBase && (
                   <div
                     draggable={!disabled}
                     onMouseDown={() => {
@@ -13159,6 +13250,9 @@ export function IconPaintEditor({
                     </span>
                     <span className="ml-auto text-[8px] uppercase tracking-wide text-muted/50">Overlay</span>
                   </div>
+                  )}
+                    </React.Fragment>
+                  ))}
                 </React.Fragment>
               )
             })}

@@ -399,6 +399,8 @@ export interface PaintVector {
   editable?: boolean
   /** Parent nondestructive group. Children remain independently editable. */
   parentId?: string
+  /** Root-only: render below the live base + overlay on this paint layer. */
+  belowBase?: boolean
   type: string
   pts: { x: number; y: number }[]
   startCap: string
