@@ -7337,7 +7337,13 @@ export function IconPaintEditor({
           const dx = nextCenter.x - sourceCenter.x
           const dy = nextCenter.y - sourceCenter.y
           current.pts = source.pts.map((point) => ({ x: point.x + dx, y: point.y + dy }))
-          current.rot = (source.rot ?? 0) + delta
+          if (source.reshapeQuad?.length === 4) {
+            rotateReshapeFromSnapshot(current, source, c, delta)
+            translateReshape(current, dx, dy)
+            current.rot = source.rot ?? 0
+          } else {
+            current.rot = (source.rot ?? 0) + delta
+          }
         }
         syncGroupBounds()
         const rotatedGroupIds = new Set([l.id, ...ids])
@@ -7362,15 +7368,26 @@ export function IconPaintEditor({
           }))
         }
       } else {
-        l.rot = nextRot
-        if (dr.snapshot) {
-          const source = dr.snapshot.find((item) => item.id === l.id)
-          if (source) rotateReshapeFromSnapshot(l, source, c, nextRot - (dr.startRot ?? 0))
+        const source = dr.snapshot?.find((item) => item.id === l.id)
+        const delta = nextRot - (dr.startRot ?? 0)
+        if (source?.reshapeQuad?.length === 4) {
+          // Rotation is baked into the warp quad — do not also bump l.rot or the
+          // unwarped source is rotated twice and the reshape looks wrong.
+          rotateReshapeFromSnapshot(l, source, c, delta)
+          l.rot = source.rot ?? 0
+        } else {
+          l.rot = nextRot
+          if (source) rotateReshapeFromSnapshot(l, source, c, delta)
         }
         syncGroupBounds()
       }
+      const guideSource = dr.snapshot?.find((item) => item.id === l.id)
       schedulePaintView(true, () => {
-        drawRotationGuide(l, snapped, l.type === 'group' ? nextRot : undefined)
+        drawRotationGuide(
+          l,
+          snapped,
+          guideSource?.reshapeQuad?.length === 4 || l.type === 'group' ? nextRot : undefined
+        )
       })
       return
     }
