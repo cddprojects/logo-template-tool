@@ -27,7 +27,12 @@ interface RowProps {
 export function Row({ label, children, hint }: RowProps): JSX.Element {
   return (
     <div className="flex items-center gap-2 py-1.5 min-w-0">
-      <label className="text-xs text-muted w-20 min-w-[5rem] shrink-0 truncate" title={label}>{label}</label>
+      <label
+        className="text-xs text-muted shrink-0 basis-[9rem] min-w-[9rem] max-w-[58%] leading-snug"
+        title={label}
+      >
+        {label}
+      </label>
       <div className="flex-1 min-w-0 overflow-hidden">{children}</div>
       {hint && <span className="text-[10px] text-muted/60 shrink-0 ml-1">{hint}</span>}
     </div>

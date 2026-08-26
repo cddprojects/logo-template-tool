@@ -248,7 +248,6 @@ export function installWebApi(): void {
       const result = await loadWorkspace()
       if (!result.ok) {
         console.error('[web] failed to load workspace from server:', result.error)
-        lastWorkspaceHistory = null
         return []
       }
       lastWorkspaceHistory = result.history
@@ -256,11 +255,25 @@ export function installWebApi(): void {
       return result.versions
     },
 
-    loadUndoHistory: async (): Promise<unknown> => lastWorkspaceHistory,
+    loadUndoHistory: async (): Promise<unknown> => {
+      // Prefer the history captured by the latest workspace load. If that race
+      // missed (or auth reload cleared memory), fetch once more from the server.
+      if (lastWorkspaceHistory != null) return lastWorkspaceHistory
+      const result = await loadWorkspace()
+      if (!result.ok) {
+        console.error('[web] failed to load undo history:', result.error)
+        return null
+      }
+      lastWorkspaceHistory = result.history
+      return lastWorkspaceHistory
+    },
 
     saveVersions: async (data: unknown[], history?: unknown): Promise<{ success: boolean; error?: string }> => {
+      // Always persist the latest known undo stack — never wipe server history
+      // by omitting it when a caller only saves versions.
+      const nextHistory = history !== undefined ? history : lastWorkspaceHistory
       if (history !== undefined) lastWorkspaceHistory = history
-      const result = await saveWorkspace(data, history)
+      const result = await saveWorkspace(data, nextHistory ?? null)
       if (!result.ok) {
         console.error('[web] failed to save workspace to server:', result.error)
         return { success: false, error: result.error }

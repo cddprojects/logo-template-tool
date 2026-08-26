@@ -44,22 +44,26 @@ export function setAuthUser(user: AuthUser | null): void {
 }
 
 const API_FETCH_TIMEOUT_MS = 8000
+/** Workspace payloads include undo history (full version snaps) and can be large. */
+const WORKSPACE_FETCH_TIMEOUT_MS = 60000
 
 async function api<T>(
   path: string,
-  init?: RequestInit
+  init?: RequestInit,
+  timeoutMs = API_FETCH_TIMEOUT_MS
 ): Promise<{ ok: true; data: T } | { ok: false; error: string; status: number }> {
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), API_FETCH_TIMEOUT_MS)
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
   try {
+    const { headers: initHeaders, signal: _ignoredSignal, ...restInit } = init ?? {}
     const res = await fetch(path, {
       credentials: 'include',
+      ...restInit,
       headers: {
         'Content-Type': 'application/json',
-        ...(init?.headers ?? {})
+        ...(initHeaders ?? {})
       },
-      signal: controller.signal,
-      ...init
+      signal: controller.signal
     })
     const text = await res.text()
     let body: unknown = null
@@ -185,7 +189,11 @@ export async function copyTemplate(
 export async function loadWorkspace(): Promise<
   { ok: true; versions: unknown[]; history: unknown } | { ok: false; error: string }
 > {
-  const result = await api<{ versions: unknown[]; history?: unknown }>('/api/workspace')
+  const result = await api<{ versions: unknown[]; history?: unknown }>(
+    '/api/workspace',
+    undefined,
+    WORKSPACE_FETCH_TIMEOUT_MS
+  )
   if (!result.ok) return { ok: false, error: result.error }
   return {
     ok: true,
@@ -198,10 +206,17 @@ export async function saveWorkspace(
   versions: unknown[],
   history?: unknown
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const result = await api<{ ok: boolean }>('/api/workspace', {
-    method: 'PUT',
-    body: JSON.stringify({ versions, history: history ?? null })
-  })
+  const body: { versions: unknown[]; history?: unknown } = { versions }
+  // Omit history when undefined so the server keeps the previously stored undo stack.
+  if (history !== undefined) body.history = history
+  const result = await api<{ ok: boolean }>(
+    '/api/workspace',
+    {
+      method: 'PUT',
+      body: JSON.stringify(body)
+    },
+    WORKSPACE_FETCH_TIMEOUT_MS
+  )
   if (!result.ok) return { ok: false, error: result.error }
   return { ok: true }
 }

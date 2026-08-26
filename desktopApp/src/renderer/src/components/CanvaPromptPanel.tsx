@@ -210,7 +210,7 @@ export function CanvaPromptPanel({
           : hasReference
             ? 'Opens Canva AI and fills the prompt. The reference image is on the clipboard — paste it (Ctrl+V), then press Send.'
             : 'Opens Canva AI and fills the prompt. Press Send in Canva.'}
-        {' '}App name (from Logo): {appName}.
+        {' '}Logo title (from Logo): {appName}.
       </p>
       <details className="text-[10px] text-muted">
         <summary className="cursor-pointer hover:text-text">Preview prompt</summary>

@@ -1,6 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 
 const MAX_HISTORY = 50
+/** Web workspace JSON includes full version snaps — keep persisted undo smaller than desktop. */
+const MAX_PERSISTED_HISTORY_WEB = 15
+
+function isWebRuntime(): boolean {
+  return typeof window !== 'undefined' && !!(window as Window & { __WEB__?: boolean }).__WEB__
+}
 import {
   Version,
   AssetVariant,
@@ -400,13 +406,16 @@ export function useVersions() {
     setHistoryMeta({ entries, index: past.length })
   }, [])
 
-  const serializeHistory = useCallback((): PersistedUndoHistory => ({
-    v: 1,
-    past: pastRef.current,
-    future: futureRef.current,
-    currentLabel: curLabelRef.current,
-    currentTime: curTimeRef.current
-  }), [])
+  const serializeHistory = useCallback((): PersistedUndoHistory => {
+    const maxPersist = isWebRuntime() ? MAX_PERSISTED_HISTORY_WEB : MAX_HISTORY
+    return {
+      v: 1,
+      past: pastRef.current.slice(-maxPersist),
+      future: futureRef.current.slice(0, maxPersist),
+      currentLabel: curLabelRef.current,
+      currentTime: curTimeRef.current
+    }
+  }, [])
 
   const applyHistory = useCallback((raw: unknown) => {
     const restored = parsePersistedHistory(raw)
@@ -423,6 +432,19 @@ export function useVersions() {
     }
     refreshMeta()
   }, [refreshMeta])
+
+  const flushPersist = useCallback(() => {
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current)
+      saveTimer.current = null
+    }
+    if (!loadedRef.current) return
+    void window.api.saveVersions(versionsRef.current, serializeHistory()).then((result) => {
+      if (result && result.success === false) {
+        console.error('[versions] flush save failed:', result.error)
+      }
+    })
+  }, [serializeHistory])
 
   // Load from file on mount + listen for template imports from main process
   useEffect(() => {
@@ -457,7 +479,18 @@ export function useVersions() {
       void window.api.loadUndoHistory().then(applyHistory)
     })
 
+    // Web: flush pending workspace+history before the tab is discarded so undo
+    // survives refresh / close within the login session.
+    const onPageHide = () => flushPersist()
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flushPersist()
+    }
+    window.addEventListener('pagehide', onPageHide)
+    document.addEventListener('visibilitychange', onVisibility)
+
     return () => {
+      window.removeEventListener('pagehide', onPageHide)
+      document.removeEventListener('visibilitychange', onVisibility)
       if (saveTimer.current) {
         clearTimeout(saveTimer.current)
         saveTimer.current = null

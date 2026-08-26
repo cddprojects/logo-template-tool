@@ -48,7 +48,7 @@ function UseGuide(): JSX.Element {
           <li><span className="text-text">+</span> — create a new version</li>
           <li><span className="text-text">Upload</span> — import an existing image as a new editable version</li>
           <li>Hover a version for duplicate, save template, delete; drag the grip to reorder</li>
-          <li>Use the top bar to export the selected version, open history, or undo/redo global edits. Undo history is kept when you close and reopen the app</li>
+          <li>Use the top bar to export the selected version, open history, or undo/redo global edits. Undo history is kept when you close and reopen the app (desktop file + web workspace)</li>
         </ul>
       </Section>
 

@@ -60,6 +60,9 @@ const IconPaintEditor = lazyWithRetry(() =>
 )
 
 const VARIANT_LABEL_SUGGESTIONS = ['Dark', 'Light', 'Primary', 'Inverted', 'Monochrome']
+/** Default style-panel width; also the minimum when dragging to resize. */
+const PANEL_MIN_WIDTH = 288
+const PANEL_MAX_WIDTH = 560
 
 /** True when the persisted synced icon should be rewritten from the favicon twin. */
 function syncedIconNeedsUpdate(
@@ -117,9 +120,9 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   const [exportNameStyle, setExportNameStyle] = useState<ExportNameStyle>(() => getStoredExportNameStyle())
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null)
   const [previewDims, setPreviewDims] = useState<{ w: number; h: number } | null>(null)
-  const [panelWidth, setPanelWidth] = useState(288)
+  const [panelWidth, setPanelWidth] = useState(PANEL_MIN_WIDTH)
   const panelRef = useRef<HTMLDivElement>(null)
-  const panelWidthRef = useRef(288)
+  const panelWidthRef = useRef(PANEL_MIN_WIDTH)
 
   // Keep name-style in sync with favicon editor (shared localStorage preference).
   useEffect(() => {
@@ -134,7 +137,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
     const startX = e.clientX
     const startWidth = panelWidthRef.current
     const onMove = (ev: MouseEvent) => {
-      const newWidth = Math.min(520, Math.max(240, startWidth + (startX - ev.clientX)))
+      const newWidth = Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, startWidth + (startX - ev.clientX)))
       panelWidthRef.current = newWidth
       if (panelRef.current) panelRef.current.style.width = `${newWidth}px`
     }
@@ -1279,11 +1282,13 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
           {/* Drag handle */}
           <div
             onMouseDown={onPanelDragStart}
-            className="absolute left-0 top-0 w-1.5 h-full cursor-col-resize z-10 hover:bg-accent/40 transition-colors group"
+            className="absolute left-0 top-0 -ml-1 w-3 h-full cursor-col-resize z-10 hover:bg-accent/40 active:bg-accent/50 transition-colors group"
             title="Drag to resize panel"
-          />
+          >
+            <span className="absolute left-1 top-1/2 -translate-y-1/2 w-0.5 h-8 rounded-full bg-border group-hover:bg-accent/70" />
+          </div>
           <Section title="Text">
-            <TextRow label="App name" value={safeConfig.text} placeholder="MyApp" onChange={(v) => setTitleText(v)} />
+            <TextRow label="Logo title" value={safeConfig.text} placeholder="MyApp" onChange={(v) => setTitleText(v)} />
             <ToggleRow label="Same text on all variants" value={safeConfig.textShared ?? false} onChange={toggleTitleShared} />
             <FontSelect label="Font" value={safeConfig.fontFamily} onChange={(v) => updateConfig({ fontFamily: v })} />
             <WeightSelect label="Weight" value={safeConfig.fontWeight} onChange={(v) => updateConfig({ fontWeight: v })} />

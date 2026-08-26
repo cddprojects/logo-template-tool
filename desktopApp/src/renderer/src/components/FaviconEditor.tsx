@@ -32,6 +32,9 @@ import { CanvaPromptPanel } from './CanvaPromptPanel'
 import { resolveCanvaAppName } from '../utils/canvaPrompt'
 
 const MAX_VARIANTS = Infinity
+/** Default style-panel width; also the minimum when dragging to resize. */
+const PANEL_MIN_WIDTH = 288
+const PANEL_MAX_WIDTH = 560
 
 // Default values extracted to module-level constants so useMemo comparisons
 // never see new object literals as dependencies.
@@ -148,11 +151,11 @@ export function FaviconEditor({
   const [exporting, setExporting] = useState<string | null>(null)
   const [exportNameStyle, setExportNameStyle] = useState<ExportNameStyle>(() => getStoredExportNameStyle())
   const [previewSize, setPreviewSize] = useState(512)
-  const [panelWidth, setPanelWidth] = useState(288)
+  const [panelWidth, setPanelWidth] = useState(PANEL_MIN_WIDTH)
   // Ref to the panel DOM node so we can update its width directly during drag
   // without a React state update (= no re-render = no spurious canvas redraw).
   const panelRef = useRef<HTMLDivElement>(null)
-  const panelWidthRef = useRef(288)
+  const panelWidthRef = useRef(PANEL_MIN_WIDTH)
 
   // Keep name-style in sync with logo editor (shared localStorage preference).
   useEffect(() => {
@@ -164,7 +167,7 @@ export function FaviconEditor({
     const startX = e.clientX
     const startWidth = panelWidthRef.current
     const onMove = (ev: MouseEvent) => {
-      const newWidth = Math.min(520, Math.max(240, startWidth + (startX - ev.clientX)))
+      const newWidth = Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, startWidth + (startX - ev.clientX)))
       panelWidthRef.current = newWidth
       if (panelRef.current) panelRef.current.style.width = `${newWidth}px`
     }
@@ -963,9 +966,11 @@ export function FaviconEditor({
           {/* Drag handle */}
           <div
             onMouseDown={onPanelDragStart}
-            className="absolute left-0 top-0 w-1.5 h-full cursor-col-resize z-10 hover:bg-accent/40 transition-colors"
+            className="absolute left-0 top-0 -ml-1 w-3 h-full cursor-col-resize z-10 hover:bg-accent/40 active:bg-accent/50 transition-colors group"
             title="Drag to resize panel"
-          />
+          >
+            <span className="absolute left-1 top-1/2 -translate-y-1/2 w-0.5 h-8 rounded-full bg-border group-hover:bg-accent/70" />
+          </div>
           <Section title="Container Shape">
             <div className="py-1.5">
               <p className="text-xs text-muted mb-1">Outer shape</p>

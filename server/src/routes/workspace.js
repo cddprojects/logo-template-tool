@@ -36,10 +36,15 @@ export function workspaceRoutes(_db, dataDir) {
       return
     }
     const file = workspaceFilePath(dataDir, req.user.id)
+    const existing = readWorkspace(file)
     const updatedAt = new Date().toISOString()
+    // Keep the previous undo stack when the client omits `history` (versions-only save).
+    const history = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'history')
+      ? req.body.history
+      : existing.history
     const payload = {
       versions,
-      history: req.body?.history ?? null,
+      history: history ?? null,
       updatedAt
     }
     try {
