@@ -802,8 +802,9 @@ export function FaviconEditor({
         </Suspense>
       )}
       {/* Variant tab bar */}
-      <div className="flex items-center gap-1 px-4 py-1.5 border-b border-border bg-surface shrink-0">
-        <span className="text-xs text-muted mr-2">Variant:</span>
+      <div className="flex items-center gap-1 px-4 py-1.5 border-b border-border bg-surface shrink-0 min-w-0">
+        <span className="text-xs text-muted mr-2 shrink-0">Variant:</span>
+        <div className="flex items-center gap-1 flex-1 min-w-0 overflow-x-auto overflow-y-hidden flex-nowrap">
         {variants.map((v, idx) => (
           <div key={v.id}
             draggable={editingLabel !== v.id}
@@ -811,7 +812,7 @@ export function FaviconEditor({
             onDragOver={(e) => { e.preventDefault(); if (dragOverId !== v.id) setDragOverId(v.id) }}
             onDragEnd={() => { dragIndexRef.current = null; setDragOverId(null) }}
             onDrop={(e) => { e.preventDefault(); handleVariantDrop(v.id) }}
-            className={`group flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium cursor-pointer transition-colors ${activeId === v.id ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text hover:bg-border'} ${dragOverId === v.id ? 'ring-2 ring-accent/60' : ''}`}
+            className={`group flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium cursor-pointer transition-colors shrink-0 ${activeId === v.id ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text hover:bg-border'} ${dragOverId === v.id ? 'ring-2 ring-accent/60' : ''}`}
             onClick={() => setActiveId(v.id)}
           >
             <GripVertical size={10} className={`shrink-0 cursor-grab ${activeId === v.id ? 'text-white/50' : 'text-muted/50'}`} />
@@ -861,18 +862,19 @@ export function FaviconEditor({
             )}
           </div>
         ))}
-        <button onClick={addVariant} className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-muted hover:text-text hover:bg-surface3 transition-colors border border-dashed border-border">
+        <button onClick={addVariant} className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-muted hover:text-text hover:bg-surface3 transition-colors border border-dashed border-border shrink-0">
           <Plus size={10} /> Add variant
         </button>
         {styleClipboard && (
           <button onClick={pasteStyle}
             title="Paste copied style onto the active variant"
-            className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-accent hover:bg-accent/10 transition-colors border border-dashed border-accent/50">
+            className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs text-accent hover:bg-accent/10 transition-colors border border-dashed border-accent/50 shrink-0">
             <ClipboardPaste size={10} /> Paste style
           </button>
         )}
+        </div>
         {variants.length > 1 && (
-          <div className="ml-auto flex items-center gap-1.5">
+          <div className="ml-1 flex items-center gap-1.5 shrink-0">
             <button
               type="button"
               onClick={applyActiveFaviconToAll}

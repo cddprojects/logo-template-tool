@@ -12,6 +12,7 @@ import type { Version, AssetVariant, LogoConfig, FaviconConfig } from './types'
 import { initFontLoading } from './utils/fontLoader'
 import { isIgTemplateFile } from './utils/templateFile'
 import { isBrowserWebBuild, lazyWithRetry } from './utils/lazyWithRetry'
+import { installHorizontalWheelScroll } from './utils/horizontalWheelScroll'
 
 // Lazy-load the heavy editors so they don't block the initial paint.
 const LogoEditor = lazyWithRetry(() => import('./components/LogoEditor').then((m) => ({ default: m.LogoEditor })))
@@ -123,6 +124,9 @@ export default function App(): JSX.Element {
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   }, [undo, redo])
+
+  // Mouse wheel → horizontal scroll on overflow-x strips (paint toolbars, etc.).
+  useEffect(() => installHorizontalWheelScroll(), [])
 
   // Bridge: the REST API server (main process) asks the renderer to draw to a
   // Canvas (DOM only), then sends the result back over IPC.
