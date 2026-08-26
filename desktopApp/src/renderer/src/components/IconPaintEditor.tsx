@@ -709,7 +709,9 @@ type PaintSlotStep =
   | { kind: 'overlay' }
   | { kind: 'object'; l: LineObj }
 
-/** Paint-order steps for one base slot: below-base objects → base → overlay → above-base objects. */
+/** Paint-order steps for one base slot: below-base objects → base → overlay → above-base objects.
+ * Within each bucket, roots follow the lines-array / Layers-panel order. Do not force
+ * linkedOutsideText / contentBound under session objects — that made one text always win. */
 function paintSlotStepsForRoots(
   roots: LineObj[],
   all: LineObj[],
@@ -722,20 +724,10 @@ function paintSlotStepsForRoots(
   const belowRoots = roots.filter((l) => l.belowBase).sort((a, b) => indexOf(a) - indexOf(b))
   const aboveRoots = roots.filter((l) => !l.belowBase).sort((a, b) => indexOf(a) - indexOf(b))
   const steps: PaintSlotStep[] = []
-  for (const l of belowRoots) {
-    if (isLiveInnerVector(l)) steps.push({ kind: 'object', l })
-  }
-  for (const l of belowRoots) {
-    if (!isLiveInnerVector(l)) steps.push({ kind: 'object', l })
-  }
+  for (const l of belowRoots) steps.push({ kind: 'object', l })
   if (opts?.base !== false) steps.push({ kind: 'base' })
-  for (const l of aboveRoots) {
-    if (isLiveInnerVector(l)) steps.push({ kind: 'object', l })
-  }
   if (opts?.overlay !== false) steps.push({ kind: 'overlay' })
-  for (const l of aboveRoots) {
-    if (!isLiveInnerVector(l)) steps.push({ kind: 'object', l })
-  }
+  for (const l of aboveRoots) steps.push({ kind: 'object', l })
   return steps
 }
 
@@ -4663,7 +4655,8 @@ export function IconPaintEditor({
     const useSlotCache = !!(liveDirty && !liveDirty.has(id))
     const cacheSlot = id === 'content' ? slotCacheContentRef : slotCacheContainerRef
 
-    // Paint order within a slot: below-base objects → base → live Inner → overlay → above-base objects.
+    // Paint order within a slot: below-base objects → base → overlay → above-base objects.
+    // Object order inside each bucket matches the Layers panel (lines-array index).
     // Punch-through must only cut what is already below the punched object, so
     // after each punch we redraw strictly-higher steps in this slot.
     const roots = linesRef.current.filter((l) => !l.parentId && vectorLayerOf(l) === id)
