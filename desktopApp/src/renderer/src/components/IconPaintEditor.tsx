@@ -3829,8 +3829,9 @@ const NO_DRAG = { WebkitAppRegion: 'no-drag' } as React.CSSProperties
 
 // Distance (px) the rotate pin sits above an object's top edge.
 const ROTATE_PIN_LEN = 30
-const ROTATE_PIN_HIT_HEAD = 16
-const ROTATE_PIN_HIT_STEM = 12
+const ROTATE_PIN_HIT_HEAD = 20
+const ROTATE_PIN_HIT_STEM = 14
+const ROTATE_PIN_HIT_PAD = 10
 
 function rotatePinAnchor(l: LineObj): Pt {
   const quad = l.reshapeQuad
@@ -3854,12 +3855,17 @@ function rotatePinTip(l: LineObj): Pt {
   return mapObjDisplayPt({ ...objTopCenter(l), y: objTopCenter(l).y - ROTATE_PIN_LEN }, l)
 }
 
-/** Hit-test the rotate pin head and stem (generous targets so objects underneath don't steal the click). */
+/** Hit-test the rotate pin head and stem (generous targets so empty-canvas deselect doesn't steal the click). */
 function rotatePinHit(l: LineObj, pt: Pt): boolean {
   const anchor = rotatePinAnchor(l)
   const tip = rotatePinTip(l)
   if (dist(pt, tip) <= ROTATE_PIN_HIT_HEAD) return true
-  return distPtToSegment(pt, anchor, tip) <= ROTATE_PIN_HIT_STEM
+  if (distPtToSegment(pt, anchor, tip) <= ROTATE_PIN_HIT_STEM) return true
+  const left = Math.min(anchor.x, tip.x) - ROTATE_PIN_HIT_PAD
+  const right = Math.max(anchor.x, tip.x) + ROTATE_PIN_HIT_PAD
+  const top = Math.min(anchor.y, tip.y) - ROTATE_PIN_HIT_PAD
+  const bottom = Math.max(anchor.y, tip.y) + ROTATE_PIN_HIT_PAD
+  return pt.x >= left && pt.x <= right && pt.y >= top && pt.y <= bottom
 }
 
 function contentRotatePinHit(
@@ -5936,6 +5942,20 @@ export function IconPaintEditor({
     p.restore()
   }
 
+  const startRotateDrag = (obj: LineObj, pt: Pt) => {
+    const center = objCenter(obj)
+    lineDragRef.current = {
+      kind: 'rotate',
+      id: obj.id,
+      center,
+      startAng: Math.atan2(pt.y - center.y, pt.x - center.x),
+      startRot: obj.rot ?? 0,
+      ...(obj.type === 'group' || obj.reshapeQuad?.length === 4
+        ? { snapshot: cloneLines(linesRef.current) }
+        : {})
+    }
+  }
+
   /** Live angle readout while rotating. Common 15° angles use a magenta snap guide. */
   const drawRotationGuide = (l: LineObj, snapped: boolean, rotationOverride?: number) => {
     const p = previewRef.current?.getContext('2d')
@@ -6635,15 +6655,7 @@ export function IconPaintEditor({
       const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
       if (sel && isVectorVisible(sel)) {
         if (rotatePinHit(sel, pt)) {
-          const center = objCenter(sel)
-          lineDragRef.current = {
-            kind: 'rotate', id: sel.id, center,
-            startAng: Math.atan2(pt.y - center.y, pt.x - center.x),
-            startRot: sel.rot ?? 0,
-            ...((sel.type === 'group' || sel.reshapeQuad?.length === 4)
-              ? { snapshot: cloneLines(linesRef.current) }
-              : {})
-          }
+          startRotateDrag(sel, pt)
           return
         }
         if (sel.reshapeQuad?.length === 4) {
@@ -6720,15 +6732,7 @@ export function IconPaintEditor({
       })
       if (hit) {
         if (sel && sel.id !== hit.id && isVectorVisible(sel) && rotatePinHit(sel, pt)) {
-          const center = objCenter(sel)
-          lineDragRef.current = {
-            kind: 'rotate', id: sel.id, center,
-            startAng: Math.atan2(pt.y - center.y, pt.x - center.x),
-            startRot: sel.rot ?? 0,
-            ...((sel.type === 'group' || sel.reshapeQuad?.length === 4)
-              ? { snapshot: cloneLines(linesRef.current) }
-              : {})
-          }
+          startRotateDrag(sel, pt)
           return
         }
         selectLine(hit)
@@ -6738,6 +6742,10 @@ export function IconPaintEditor({
       }
 
       // Empty Pointer click deselects canvas + layer panel.
+      if (sel && isVectorVisible(sel) && rotatePinHit(sel, pt)) {
+        startRotateDrag(sel, pt)
+        return
+      }
       lineDragRef.current = null
       selectedIdRef.current = null
       setSelectedId(null)
@@ -6752,6 +6760,10 @@ export function IconPaintEditor({
         selectedIdRef.current = sel.id
         setSelectedId(sel.id)
         setSelectedLayerIds(new Set([sel.id]))
+        if (rotatePinHit(sel, pt)) {
+          startRotateDrag(sel, pt)
+          return
+        }
         const ci = reshapeCornerAt(sel, pt)
         if (ci >= 0) {
           lineDragRef.current = {
@@ -12483,6 +12495,45 @@ export function IconPaintEditor({
                   }}
                 />
               </>
+            )
+          })()}
+          {(tool === 'pointer' || tool === 'reshape') && selectedId && !textEditId && !cropping && (() => {
+            const l =
+              lines.find((x) => x.id === selectedId) ??
+              linesRef.current.find((x) => x.id === selectedId)
+            if (!l || !isVectorVisible(l)) return null
+            const sx = stageSize.w / W
+            const sy = stageSize.h / H
+            const anchor = rotatePinAnchor(l)
+            const tip = rotatePinTip(l)
+            const pad = ROTATE_PIN_HIT_PAD
+            const left = Math.min(anchor.x, tip.x) - pad
+            const top = Math.min(anchor.y, tip.y) - pad
+            const hitW = Math.max(28, (Math.max(anchor.x, tip.x) - left + pad) * sx)
+            const hitH = Math.max(28, (Math.max(anchor.y, tip.y) - top + pad) * sy)
+            return (
+              <button
+                type="button"
+                title="Drag to rotate"
+                className="absolute z-20 cursor-grab active:cursor-grabbing"
+                style={{
+                  left: left * sx,
+                  top: top * sy,
+                  width: hitW,
+                  height: hitH,
+                  background: 'transparent',
+                  border: 'none',
+                  padding: 0
+                }}
+                onMouseDown={(e) => {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  const obj = linesRef.current.find((x) => x.id === selectedIdRef.current)
+                  if (!obj) return
+                  startRotateDrag(obj, clientToCanvas(e))
+                  beginWindowDrag()
+                }}
+              />
             )
           })()}
         </div>
