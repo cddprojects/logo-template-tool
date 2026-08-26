@@ -435,6 +435,26 @@ function paintRootOfLine(item: LineObj, items: LineObj[]): LineObj {
   return current
 }
 
+/** Index after an object and every nested descendant in the paint array. */
+function insertAfterSubtreeIndex(items: LineObj[], id: string): number {
+  const start = items.findIndex((item) => item.id === id)
+  if (start < 0) return items.length
+  const mark = new Set<string>([id])
+  let end = start
+  let changed = true
+  while (changed) {
+    changed = false
+    items.forEach((item, i) => {
+      if (item.parentId && mark.has(item.parentId) && !mark.has(item.id)) {
+        mark.add(item.id)
+        end = Math.max(end, i)
+        changed = true
+      }
+    })
+  }
+  return end + 1
+}
+
 /** Cache decoded stamp images so undo/redo redraws stay sync after the first load. */
 const stampImgCache = new Map<string, HTMLImageElement>()
 /** Sync punch-mask bitmaps so dest-out does not wait on image decode. */
@@ -692,10 +712,15 @@ type PaintSlotStep =
 /** Paint-order steps for one base slot: below-base objects → base → overlay → above-base objects. */
 function paintSlotStepsForRoots(
   roots: LineObj[],
+  all: LineObj[],
   opts?: { base?: boolean; overlay?: boolean }
 ): PaintSlotStep[] {
-  const belowRoots = roots.filter((l) => l.belowBase)
-  const aboveRoots = roots.filter((l) => !l.belowBase)
+  const indexOf = (l: LineObj): number => {
+    const i = all.findIndex((item) => item.id === l.id)
+    return i < 0 ? Number.MAX_SAFE_INTEGER : i
+  }
+  const belowRoots = roots.filter((l) => l.belowBase).sort((a, b) => indexOf(a) - indexOf(b))
+  const aboveRoots = roots.filter((l) => !l.belowBase).sort((a, b) => indexOf(a) - indexOf(b))
   const steps: PaintSlotStep[] = []
   for (const l of belowRoots) {
     if (isLiveInnerVector(l)) steps.push({ kind: 'object', l })
@@ -4642,7 +4667,7 @@ export function IconPaintEditor({
     // Punch-through must only cut what is already below the punched object, so
     // after each punch we redraw strictly-higher steps in this slot.
     const roots = linesRef.current.filter((l) => !l.parentId && vectorLayerOf(l) === id)
-    const steps = paintSlotStepsForRoots(roots, opts)
+    const steps = paintSlotStepsForRoots(roots, linesRef.current, opts)
 
     const paintObjectStep = (t: CanvasRenderingContext2D, l: LineObj) => {
       if (skip(l)) return
@@ -7774,8 +7799,9 @@ export function IconPaintEditor({
       : [...layerOrderRef.current].reverse()
     for (const id of ids) {
       const roots = linesRef.current.filter((l) => !l.parentId && vectorLayerOf(l) === id)
-      const belowRoots = roots.filter((l) => l.belowBase)
-      const aboveRoots = roots.filter((l) => !l.belowBase)
+      const indexOf = (l: LineObj) => linesRef.current.findIndex((item) => item.id === l.id)
+      const belowRoots = roots.filter((l) => l.belowBase).sort((a, b) => indexOf(a) - indexOf(b))
+      const aboveRoots = roots.filter((l) => !l.belowBase).sort((a, b) => indexOf(a) - indexOf(b))
       type DecorStep = { kind: 'object'; l: LineObj }
       const paintObjectStep = (t: CanvasRenderingContext2D, l: LineObj) => {
         renderObjectTree(t, l, linesRef.current, show)
@@ -10910,6 +10936,62 @@ export function IconPaintEditor({
     return last
   }
 
+  /** Compact roots by paint bucket while preserving z-order within each bucket. */
+  const normalizePaintArrayOrder = (items: LineObj[]): LineObj[] => {
+    const indexOf = (id: string) => items.findIndex((item) => item.id === id)
+    const roots = items.filter((l) => !l.parentId && !l.marqueeItem && !l.punchMask)
+    const used = new Set<string>()
+    const out: LineObj[] = []
+
+    const appendSubtree = (rootId: string) => {
+      if (used.has(rootId)) return
+      const stack: string[] = [rootId]
+      while (stack.length) {
+        const id = stack.pop()!
+        if (used.has(id)) continue
+        const node = items.find((l) => l.id === id)
+        if (!node) continue
+        used.add(id)
+        out.push(node)
+        const children = items
+          .filter((l) => l.parentId === id)
+          .sort((a, b) => indexOf(a.id) - indexOf(b.id))
+        for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]!.id)
+      }
+    }
+
+    for (const layer of layerOrderRef.current) {
+      for (const below of [true, false] as const) {
+        const layerRoots = roots
+          .filter((l) => vectorLayerOf(l) === layer && !!l.belowBase === below)
+          .sort((a, b) => indexOf(a.id) - indexOf(b.id))
+        for (const root of layerRoots) appendSubtree(root.id)
+      }
+    }
+    for (const item of items) {
+      if (!used.has(item.id)) out.push(item)
+    }
+    return out
+  }
+
+  const insertPeerRoot = (
+    items: LineObj[],
+    moving: LineObj[],
+    target: LineObj,
+    position: LayerDropPosition
+  ): void => {
+    const targetIndex = items.findIndex((l) => l.id === target.id)
+    if (targetIndex < 0) {
+      items.push(...moving)
+      return
+    }
+    const insertAt =
+      position === 'before'
+        ? insertAfterSubtreeIndex(items, target.id)
+        : targetIndex
+    items.splice(insertAt, 0, ...moving)
+  }
+
   const moveObjectLayer = (
     draggedId: string,
     targetKey: string,
@@ -10971,13 +11053,12 @@ export function IconPaintEditor({
         remaining.splice(insertAt + 1, 0, ...moving)
       } else {
         dragged.parentId = target.parentId
-        // Panel order is the reverse of paint-array order:
-        // "before" (above) inserts after; "after" (below) inserts before.
-        remaining.splice(targetIndex + (position === 'before' ? 1 : 0), 0, ...moving)
+        insertPeerRoot(remaining, moving, target, position)
       }
     }
-    syncGroupBounds(remaining)
-    commitLines(remaining)
+    const ordered = normalizePaintArrayOrder(remaining)
+    syncGroupBounds(ordered)
+    commitLines(ordered)
     redrawLines()
     drawHandles()
     pushHistory()
