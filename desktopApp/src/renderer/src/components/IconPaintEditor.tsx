@@ -1439,16 +1439,81 @@ function rotateReshapeFromSnapshot(l: LineObj, source: LineObj, center: Pt, delt
   }
 }
 
+/**
+ * Apply a canvas/object transform to reshape fields.
+ * reshapeSrc must stay axis-aligned and match unwarped content after the same
+ * transform; quad indices are remapped so TL/TR/BR/BL still match that rect
+ * (90° / flips move which old corner lands on the new AABB's top-left).
+ */
 function mapReshapeFields(
   l: LineObj,
   mapPt: (p: Pt) => Pt
 ): Pick<LineObj, 'reshapeQuad' | 'reshapeBaseQuad' | 'reshapeSrc'> {
   if (!l.reshapeQuad?.length) return {}
-  return {
-    reshapeQuad: l.reshapeQuad.map(mapPt),
-    reshapeBaseQuad: l.reshapeBaseQuad?.map(mapPt),
-    reshapeSrc: l.reshapeSrc
+  const mappedQuad = l.reshapeQuad.map(mapPt)
+  const mappedBase = l.reshapeBaseQuad?.map(mapPt)
+  const src = l.reshapeSrc
+  if (!src || src.w < 1 || src.h < 1) {
+    return {
+      reshapeQuad: mappedQuad,
+      reshapeBaseQuad: mappedBase,
+      reshapeSrc: src
+    }
   }
+  const oldCorners = [
+    { x: src.x, y: src.y },
+    { x: src.x + src.w, y: src.y },
+    { x: src.x + src.w, y: src.y + src.h },
+    { x: src.x, y: src.y + src.h }
+  ]
+  const mappedCorners = oldCorners.map(mapPt)
+  const xs = mappedCorners.map((p) => p.x)
+  const ys = mappedCorners.map((p) => p.y)
+  const x = Math.min(...xs)
+  const y = Math.min(...ys)
+  const reshapeSrc = {
+    x,
+    y,
+    w: Math.max(1, Math.max(...xs) - x),
+    h: Math.max(1, Math.max(...ys) - y)
+  }
+  const newStd = [
+    { x: reshapeSrc.x, y: reshapeSrc.y },
+    { x: reshapeSrc.x + reshapeSrc.w, y: reshapeSrc.y },
+    { x: reshapeSrc.x + reshapeSrc.w, y: reshapeSrc.y + reshapeSrc.h },
+    { x: reshapeSrc.x, y: reshapeSrc.y + reshapeSrc.h }
+  ]
+  const reshapeQuad: Pt[] = [
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+    { x: 0, y: 0 },
+    { x: 0, y: 0 }
+  ]
+  const reshapeBaseQuad = mappedBase
+    ? [
+        { x: 0, y: 0 },
+        { x: 0, y: 0 },
+        { x: 0, y: 0 },
+        { x: 0, y: 0 }
+      ]
+    : undefined
+  const used = new Set<number>()
+  for (let i = 0; i < 4; i++) {
+    let best = 0
+    let bestD = Infinity
+    for (let j = 0; j < 4; j++) {
+      if (used.has(j)) continue
+      const d = dist(mappedCorners[i], newStd[j])
+      if (d < bestD) {
+        bestD = d
+        best = j
+      }
+    }
+    used.add(best)
+    reshapeQuad[best] = mappedQuad[i]
+    if (reshapeBaseQuad && mappedBase) reshapeBaseQuad[best] = mappedBase[i]
+  }
+  return { reshapeQuad, reshapeBaseQuad, reshapeSrc }
 }
 
 function reshapeCornerAt(l: LineObj, pt: Pt): number {
@@ -3309,6 +3374,9 @@ function transformLineObj(l: LineObj, mode: CanvasXform, S: number, opts?: Xform
     canvasSpace
       ? mapCanvasPt(rotatePt(p, c, rot), mode, S)
       : mapLocalPt(rotatePt(p, c, rot), mode, pivot)
+  // Reshape quads/src are already in canvas space — do not pre-rotate them again.
+  const mapReshapePt = (p: Pt) =>
+    canvasSpace ? mapCanvasPt(p, mode, S) : mapLocalPt(p, mode, pivot)
 
   if ((l.type === 'shape' || l.type === 'stamp') && l.pts.length === 2) {
     const x0 = Math.min(l.pts[0].x, l.pts[1].x)
@@ -3330,18 +3398,20 @@ function transformLineObj(l: LineObj, mode: CanvasXform, S: number, opts?: Xform
         { x: Math.max(...xs), y: Math.max(...ys) }
       ],
       rot: 0,
-      ...mapReshapeFields(l, mapPt)
+      ...mapReshapeFields(l, mapReshapePt)
     }
   }
   const pts = l.pts.map((p) => mapPt(p))
-  return { ...l, pts, rot: 0, ...mapReshapeFields(l, mapPt) }
+  return { ...l, pts, rot: 0, ...mapReshapeFields(l, mapReshapePt) }
 }
 
 /** Rotate / flip stamps and oriented boxes without baking a wrong AABB. */
 function transformStampLineObj(l: LineObj, mode: CanvasXform, S: number, opts?: XformOpts): LineObj {
   // Rotated/scaled 2-pt shapes must keep rot+scale — AABB bake only works at 90° steps.
+  // Reshaped objects also need the oriented path so warp src/quad stay paired with rot.
   if (
     l.type === 'stamp' ||
+    l.reshapeQuad?.length === 4 ||
     (l.type === 'shape' && l.pts.length === 2 && (l.contentBound || lineNeedsDisplayTransform(l)))
   ) {
     return transformOrientedBox(l, mode, S, opts ?? { canvasSpace: false })
