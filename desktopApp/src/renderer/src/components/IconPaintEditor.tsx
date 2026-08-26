@@ -5879,11 +5879,26 @@ export function IconPaintEditor({
   redrawLinesRef.current = redrawLines
 
   // Screen position of the rotate pin (a small handle above the object's top edge).
-  const rotatePinAt = (l: LineObj): Pt =>
-    mapObjDisplayPt({ ...objTopCenter(l), y: objTopCenter(l).y - ROTATE_PIN_LEN }, l)
+  const rotatePinAt = (l: LineObj): Pt => {
+    const quad = l.reshapeQuad
+    if (quad?.length === 4) {
+      const anchor = { x: (quad[0].x + quad[1].x) / 2, y: (quad[0].y + quad[1].y) / 2 }
+      const cx = (quad[0].x + quad[1].x + quad[2].x + quad[3].x) / 4
+      const cy = (quad[0].y + quad[1].y + quad[2].y + quad[3].y) / 4
+      const dx = anchor.x - cx
+      const dy = anchor.y - cy
+      const len = Math.hypot(dx, dy) || 1
+      return { x: anchor.x + (dx / len) * ROTATE_PIN_LEN, y: anchor.y + (dy / len) * ROTATE_PIN_LEN }
+    }
+    return mapObjDisplayPt({ ...objTopCenter(l), y: objTopCenter(l).y - ROTATE_PIN_LEN }, l)
+  }
 
   const drawRotatePin = (p: CanvasRenderingContext2D, l: LineObj) => {
-    const anchor = mapObjDisplayPt(objTopCenter(l), l)
+    const quad = l.reshapeQuad
+    const anchor =
+      quad?.length === 4
+        ? { x: (quad[0].x + quad[1].x) / 2, y: (quad[0].y + quad[1].y) / 2 }
+        : mapObjDisplayPt(objTopCenter(l), l)
     const pin = rotatePinAt(l)
     p.save()
     p.strokeStyle = '#10b981'
@@ -6114,7 +6129,10 @@ export function IconPaintEditor({
       if (!l.reshapeQuad?.length) l = ensureReshapeInit(l.id) ?? l
     }
     if (activeTool === 'reshape' || l.reshapeQuad?.length === 4) {
-      if (drawReshapeHandles(p, l)) return
+      if (drawReshapeHandles(p, l)) {
+        drawRotatePin(p, l)
+        return
+      }
       if (activeTool === 'reshape') return
     }
     if (l.type === 'text') {
