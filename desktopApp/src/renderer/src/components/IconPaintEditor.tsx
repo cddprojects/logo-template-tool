@@ -3829,6 +3829,48 @@ const NO_DRAG = { WebkitAppRegion: 'no-drag' } as React.CSSProperties
 
 // Distance (px) the rotate pin sits above an object's top edge.
 const ROTATE_PIN_LEN = 30
+const ROTATE_PIN_HIT_HEAD = 16
+const ROTATE_PIN_HIT_STEM = 12
+
+function rotatePinAnchor(l: LineObj): Pt {
+  const quad = l.reshapeQuad
+  if (quad?.length === 4) {
+    return { x: (quad[0].x + quad[1].x) / 2, y: (quad[0].y + quad[1].y) / 2 }
+  }
+  return mapObjDisplayPt(objTopCenter(l), l)
+}
+
+function rotatePinTip(l: LineObj): Pt {
+  const quad = l.reshapeQuad
+  if (quad?.length === 4) {
+    const anchor = rotatePinAnchor(l)
+    const cx = (quad[0].x + quad[1].x + quad[2].x + quad[3].x) / 4
+    const cy = (quad[0].y + quad[1].y + quad[2].y + quad[3].y) / 4
+    const dx = anchor.x - cx
+    const dy = anchor.y - cy
+    const len = Math.hypot(dx, dy) || 1
+    return { x: anchor.x + (dx / len) * ROTATE_PIN_LEN, y: anchor.y + (dy / len) * ROTATE_PIN_LEN }
+  }
+  return mapObjDisplayPt({ ...objTopCenter(l), y: objTopCenter(l).y - ROTATE_PIN_LEN }, l)
+}
+
+/** Hit-test the rotate pin head and stem (generous targets so objects underneath don't steal the click). */
+function rotatePinHit(l: LineObj, pt: Pt): boolean {
+  const anchor = rotatePinAnchor(l)
+  const tip = rotatePinTip(l)
+  if (dist(pt, tip) <= ROTATE_PIN_HIT_HEAD) return true
+  return distPtToSegment(pt, anchor, tip) <= ROTATE_PIN_HIT_STEM
+}
+
+function contentRotatePinHit(
+  bounds: { x: number; y: number; w: number; h: number },
+  pt: Pt
+): boolean {
+  const anchor = { x: bounds.x + bounds.w / 2, y: bounds.y }
+  const tip = { x: anchor.x, y: anchor.y - ROTATE_PIN_LEN }
+  if (dist(pt, tip) <= ROTATE_PIN_HIT_HEAD) return true
+  return distPtToSegment(pt, anchor, tip) <= ROTATE_PIN_HIT_STEM
+}
 
 // ── Colour helpers (#RRGGBBAA + CSS gradients) ───────────────────────────────
 function normalizeHex(input: string): string | null {
@@ -5879,27 +5921,11 @@ export function IconPaintEditor({
   redrawLinesRef.current = redrawLines
 
   // Screen position of the rotate pin (a small handle above the object's top edge).
-  const rotatePinAt = (l: LineObj): Pt => {
-    const quad = l.reshapeQuad
-    if (quad?.length === 4) {
-      const anchor = { x: (quad[0].x + quad[1].x) / 2, y: (quad[0].y + quad[1].y) / 2 }
-      const cx = (quad[0].x + quad[1].x + quad[2].x + quad[3].x) / 4
-      const cy = (quad[0].y + quad[1].y + quad[2].y + quad[3].y) / 4
-      const dx = anchor.x - cx
-      const dy = anchor.y - cy
-      const len = Math.hypot(dx, dy) || 1
-      return { x: anchor.x + (dx / len) * ROTATE_PIN_LEN, y: anchor.y + (dy / len) * ROTATE_PIN_LEN }
-    }
-    return mapObjDisplayPt({ ...objTopCenter(l), y: objTopCenter(l).y - ROTATE_PIN_LEN }, l)
-  }
+  const rotatePinAt = (l: LineObj): Pt => rotatePinTip(l)
 
   const drawRotatePin = (p: CanvasRenderingContext2D, l: LineObj) => {
-    const quad = l.reshapeQuad
-    const anchor =
-      quad?.length === 4
-        ? { x: (quad[0].x + quad[1].x) / 2, y: (quad[0].y + quad[1].y) / 2 }
-        : mapObjDisplayPt(objTopCenter(l), l)
-    const pin = rotatePinAt(l)
+    const anchor = rotatePinAnchor(l)
+    const pin = rotatePinTip(l)
     p.save()
     p.strokeStyle = '#10b981'
     p.lineWidth = 2
@@ -6505,8 +6531,7 @@ export function IconPaintEditor({
     const source = cloneCanvas(canvas)
     const baseSource = cloneCanvas(baseCanvas('content'))
     const punchStamps = snapshotContentPunchStamps()
-    const pin = { x: bounds.x + bounds.w / 2, y: bounds.y - ROTATE_PIN_LEN }
-    if (dist(pin, pt) <= 12) {
+    if (contentRotatePinHit(bounds, pt)) {
       const center = { x: bounds.x + bounds.w / 2, y: bounds.y + bounds.h / 2 }
       baseTransformRef.current = {
         kind: 'rotate',
@@ -6556,7 +6581,7 @@ export function IconPaintEditor({
       if (editing?.type === 'text') {
         const q = unmapObjDisplayPt(pt, editing)
         const onText = pointInPoly(flattenLine(editing), q)
-        const onHandle = handleIndexAt(editing, pt) >= 0 || dist(rotatePinAt(editing), pt) <= 12
+        const onHandle = handleIndexAt(editing, pt) >= 0 || rotatePinHit(editing, pt)
         if (onText && !onHandle) return // keep caret in the textarea
         endTextEditRef.current()
         // Corner / pin: fall through so rotate/move can start on this click.
@@ -6609,7 +6634,7 @@ export function IconPaintEditor({
       // 1. Dragging the rotate pin or a handle of the selected object.
       const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
       if (sel && isVectorVisible(sel)) {
-        if (dist(rotatePinAt(sel), pt) <= 12) {
+        if (rotatePinHit(sel, pt)) {
           const center = objCenter(sel)
           lineDragRef.current = {
             kind: 'rotate', id: sel.id, center,
@@ -6694,6 +6719,18 @@ export function IconPaintEditor({
             ((l.type === 'stamp' || l.type === 'group') && l.pts.length >= 2 && pointInRect(l.pts[0], l.pts[1], q))
       })
       if (hit) {
+        if (sel && sel.id !== hit.id && isVectorVisible(sel) && rotatePinHit(sel, pt)) {
+          const center = objCenter(sel)
+          lineDragRef.current = {
+            kind: 'rotate', id: sel.id, center,
+            startAng: Math.atan2(pt.y - center.y, pt.x - center.x),
+            startRot: sel.rot ?? 0,
+            ...((sel.type === 'group' || sel.reshapeQuad?.length === 4)
+              ? { snapshot: cloneLines(linesRef.current) }
+              : {})
+          }
+          return
+        }
         selectLine(hit)
         lineDragRef.current = { kind: 'move', id: selectedIdRef.current ?? hit.id, grab: pt }
         redrawLines(); drawHandles()
