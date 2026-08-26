@@ -8197,22 +8197,26 @@ export function IconPaintEditor({
     if (!n) return false
     const cx = sx / n
     const cy = sy / n
-    const candidates = linesRef.current.filter((item) => {
-      if (item.punchMask || item.marqueeItem || item.type === 'group') return false
-      if (item.type !== 'stamp' && item.type !== 'shape' && item.type !== 'poly' && item.type !== 'text') {
-        return false
-      }
-      if (!isVectorVisible(item)) return false
-      const box = punchLocalBox(item)
-      if (!box) return false
-      const local = unmapObjDisplayPt({ x: cx, y: cy }, item)
-      return (
-        local.x >= box.x &&
-        local.y >= box.y &&
-        local.x <= box.x + box.w &&
-        local.y <= box.y + box.h
-      )
-    })
+    const candidates = linesRef.current
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => {
+        if (item.punchMask || item.marqueeItem || item.type === 'group') return false
+        if (item.type !== 'stamp' && item.type !== 'shape' && item.type !== 'poly' && item.type !== 'text') {
+          return false
+        }
+        if (!isVectorVisible(item)) return false
+        const box = punchLocalBox(item)
+        if (!box) return false
+        const local = unmapObjDisplayPt({ x: cx, y: cy }, item)
+        return (
+          local.x >= box.x &&
+          local.y >= box.y &&
+          local.x <= box.x + box.w &&
+          local.y <= box.y + box.h
+        )
+      })
+      // Score ties favour lower paint-order objects (earlier in the array).
+      .sort((a, b) => a.index - b.index)
     if (!candidates.length) return false
 
     // Prefer the object whose silhouette actually rings the hole (not merely the
@@ -8221,7 +8225,7 @@ export function IconPaintEditor({
     let owner: LineObj | null = null
     let bestScore = -Infinity
     const dirs4: [number, number][] = [[-1, 0], [1, 0], [0, -1], [0, 1]]
-    for (const item of candidates) {
+    for (const { item } of candidates) {
       const probe = takeCanvas(W, H)
       try {
         const pctx = probe.getContext('2d')!
@@ -8259,8 +8263,8 @@ export function IconPaintEditor({
         releaseCanvas(probe)
       }
     }
-    // Fallback: earliest candidate (lowest in paint order) whose bbox contains the hole.
-    if (!owner) owner = candidates[0] ?? null
+    // Fallback: lowest candidate in paint order whose bbox contains the hole.
+    if (!owner) owner = candidates[0]?.item ?? null
     if (!owner) return false
 
     // Keep the stored hole strictly inside the counter — never on glyph AA —
@@ -10820,6 +10824,22 @@ export function IconPaintEditor({
     pushHistory()
   }
 
+  const rootIndicesOnLayer = (items: LineObj[], layer: PaintLayerId): number[] => {
+    const indices: number[] = []
+    items.forEach((item, i) => {
+      if (!item.parentId && vectorLayerOf(item) === layer) indices.push(i)
+    })
+    return indices
+  }
+
+  const lastDirectChildIndex = (items: LineObj[], groupId: string, groupIndex: number): number => {
+    let last = groupIndex
+    items.forEach((item, i) => {
+      if (item.parentId === groupId) last = i
+    })
+    return last
+  }
+
   const moveObjectLayer = (
     draggedId: string,
     targetKey: string,
@@ -10848,7 +10868,17 @@ export function IconPaintEditor({
       const layer = targetKey.slice(5) as PaintLayerId
       for (const item of moving) item.layer = layer
       dragged.parentId = undefined
-      remaining.push(...moving) // topmost object/group within the target base layer
+      const roots = rootIndicesOnLayer(remaining, layer)
+      // Panel order is the reverse of paint-array order on this base layer.
+      const insertAt =
+        position === 'after'
+          ? roots.length
+            ? roots[roots.length - 1] + 1
+            : remaining.length
+          : roots.length
+            ? roots[0]
+            : remaining.length
+      remaining.splice(insertAt, 0, ...moving)
     } else {
       const targetId = targetKey.slice(7)
       if (movingIds.has(targetId)) return false
@@ -10860,8 +10890,9 @@ export function IconPaintEditor({
 
       if (position === 'inside' && target.type === 'group') {
         dragged.parentId = target.id
-        // Higher array index appears higher in the panel.
-        remaining.splice(targetIndex + 1, 0, ...moving)
+        // Nest on top of existing group children (higher array index = higher in panel).
+        const insertAt = lastDirectChildIndex(remaining, target.id, targetIndex)
+        remaining.splice(insertAt + 1, 0, ...moving)
       } else {
         dragged.parentId = target.parentId
         // Panel order is the reverse of paint-array order:
@@ -11116,10 +11147,18 @@ export function IconPaintEditor({
     }
 
     const topmostIndex = linesRef.current.findIndex((l) => l.id === topmost.id)
-    const next = linesRef.current.map((l) =>
-      ids.has(l.id) ? { ...l, parentId: grouped.id } : l
-    )
-    next.splice(topmostIndex + 1, 0, grouped)
+    // Keep grouped children contiguous in paint order (bottom → top matches panel top → bottom).
+    const groupedChildren = [...linesRef.current]
+      .reverse()
+      .filter((l) => ids.has(l.id))
+      .reverse()
+      .map((l) => ({ ...l, parentId: grouped.id }))
+    let insertAt = topmostIndex
+    for (let i = 0; i < topmostIndex; i++) {
+      if (ids.has(linesRef.current[i].id)) insertAt--
+    }
+    const next = linesRef.current.filter((l) => !ids.has(l.id))
+    next.splice(insertAt, 0, grouped, ...groupedChildren)
     syncGroupBounds(next)
     commitLines(next)
     selectedIdRef.current = grouped.id
