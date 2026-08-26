@@ -2164,6 +2164,18 @@ function objCenter(l: LineObj): Pt {
   }
   return { x: (minX + maxX) / 2, y: (minY + maxY) / 2 }
 }
+
+/** Canvas-space pivot for the rotate pin — follows the warped quad when reshaped. */
+function rotationCenter(l: LineObj): Pt {
+  const quad = l.reshapeQuad
+  if (quad?.length === 4) {
+    return {
+      x: (quad[0].x + quad[1].x + quad[2].x + quad[3].x) / 4,
+      y: (quad[0].y + quad[1].y + quad[2].y + quad[3].y) / 4
+    }
+  }
+  return objCenter(l)
+}
 // Rotate point p by `ang` (radians) around centre c.
 function rotatePt(p: Pt, c: Pt, ang: number): Pt {
   if (!ang) return p
@@ -5943,7 +5955,7 @@ export function IconPaintEditor({
   }
 
   const startRotateDrag = (obj: LineObj, pt: Pt) => {
-    const center = objCenter(obj)
+    const center = rotationCenter(obj)
     lineDragRef.current = {
       kind: 'rotate',
       id: obj.id,
@@ -5962,9 +5974,11 @@ export function IconPaintEditor({
     if (!p) return
     const rect = previewRef.current?.getBoundingClientRect()
     const scale = rect?.width ? W / rect.width : 1
-    const c = objCenter(l)
+    const c = rotationCenter(l)
     const rot = rotationOverride ?? l.rot ?? 0
-    const radius = Math.max(34 * scale, dist(c, objTopCenter(l)) + 12 * scale)
+    const radius = l.reshapeQuad?.length === 4
+      ? Math.max(34 * scale, dist(c, rotatePinAnchor(l)) + 12 * scale)
+      : Math.max(34 * scale, dist(c, objTopCenter(l)) + 12 * scale)
     const start = -Math.PI / 2
     const end = start + rot
     const reference = { x: c.x, y: c.y - radius }
@@ -7332,10 +7346,10 @@ export function IconPaintEditor({
           if (!ids.has(current.id) || current.type === 'group') continue
           const source = snapshot.find((item) => item.id === current.id)
           if (!source) continue
-          const sourceCenter = objCenter(source)
-          const nextCenter = rotatePt(sourceCenter, c, delta)
-          const dx = nextCenter.x - sourceCenter.x
-          const dy = nextCenter.y - sourceCenter.y
+          const pivot = rotationCenter(source)
+          const nextPivot = rotatePt(pivot, c, delta)
+          const dx = nextPivot.x - pivot.x
+          const dy = nextPivot.y - pivot.y
           current.pts = source.pts.map((point) => ({ x: point.x + dx, y: point.y + dy }))
           if (source.reshapeQuad?.length === 4) {
             rotateReshapeFromSnapshot(current, source, c, delta)
