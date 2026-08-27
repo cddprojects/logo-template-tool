@@ -4827,7 +4827,11 @@ export function IconPaintEditor({
     scaleX?: number
     scaleY?: number
   } | null>(null)
-  const floatDragRef = useRef<Pt | null>(null)
+  const floatDragRef = useRef<{
+    startPt: Pt
+    originFx: number
+    originFy: number
+  } | null>(null)
   /** Corner drag: coverage resizes the marquee rect; scale resizes the float bitmap. */
   const floatResizeRef = useRef<{
     corner: 'nw' | 'ne' | 'sw' | 'se'
@@ -10326,14 +10330,15 @@ export function IconPaintEditor({
     const sc = state.sourcePivot
     const dp = floatDestPivot(f, state.sourceRect)
     const selected = new Set(state.selectedIds)
-    const next = cloneLines(snapshot)
+    const next = cloneLines(linesRef.current)
 
     const transformId = (id: string) => {
       const source = snapshot.find((item) => item.id === id)
       if (!source) return
+      const transformed = applyMarqueeTransformToLine(source, sc, dp, sx, sy, rot)
       const idx = next.findIndex((item) => item.id === id)
-      if (idx < 0) return
-      next[idx] = applyMarqueeTransformToLine(source, sc, dp, sx, sy, rot)
+      if (idx >= 0) next[idx] = transformed
+      else next.push(transformed)
     }
 
     for (const id of selected) {
@@ -10431,14 +10436,19 @@ export function IconPaintEditor({
     const compositeCtx = canvas.getContext('2d')!
     for (const item of layerCanvases) compositeCtx.drawImage(item.canvas, 0, 0)
 
-    // Marquee also transforms any visible top-level paint objects it touches.
-    // Keep their complete subtrees so groups remain groups after the edit.
-    const intersectsMarquee = (line: LineObj) => {
+    // Only lift vector objects fully contained in the marquee. Partial overlap
+    // stays on the canvas (raster pixels in the box are still lifted).
+    const fullyInsideMarquee = (line: LineObj) => {
       const b = boundsForLine(line)
-      return b.x + b.w >= x && b.x <= x + w && b.y + b.h >= y && b.y <= y + h
+      return (
+        b.x >= x &&
+        b.y >= y &&
+        b.x + b.w <= x + w &&
+        b.y + b.h <= y + h
+      )
     }
     const roots = linesRef.current.filter(
-      (line) => !line.parentId && isVectorVisible(line) && intersectsMarquee(line)
+      (line) => !line.parentId && isVectorVisible(line) && fullyInsideMarquee(line)
     )
     const selectedIds = new Set<string>()
     const includeSubtree = (id: string) => {
@@ -11002,17 +11012,19 @@ export function IconPaintEditor({
       }
       const g = floatDragRef.current
       if (g && f) {
-        f.x += pt.x - g.x
-        f.y += pt.y - g.y
-        const snap = snapRectToCanvas(floatAxisBounds(f))
-        f.x += snap.dx
-        f.y += snap.dy
-        floatDragRef.current = {
-          x: snap.x ? g.x : pt.x,
-          y: snap.y ? g.y : pt.y
+        f.x = g.originFx + (pt.x - g.startPt.x)
+        f.y = g.originFy + (pt.y - g.startPt.y)
+        const rot = f.rot ?? 0
+        const flipSx = f.scaleX ?? 1
+        const flipSy = f.scaleY ?? 1
+        const hasLiveTransform = Math.abs(rot) > 0.001 || flipSx !== 1 || flipSy !== 1
+        if (!hasLiveTransform) {
+          const snap = snapRectToCanvas(floatAxisBounds(f))
+          f.x += snap.dx
+          f.y += snap.dy
+          drawAlignmentGuides(snap)
         }
         drawSelOverlay()
-        drawAlignmentGuides(snap)
         return
       }
       const s = marqueeStartRef.current
@@ -11214,7 +11226,7 @@ export function IconPaintEditor({
           return
         }
         if (pointInRotatedRect(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)) {
-          floatDragRef.current = pt
+          floatDragRef.current = { startPt: pt, originFx: f.x, originFy: f.y }
           startPointerDragCapture()
           return
         }
@@ -11262,7 +11274,10 @@ export function IconPaintEditor({
         if (pt.x >= m.x && pt.x <= m.x + m.w && pt.y >= m.y && pt.y <= m.y + m.h) {
           // Drag inside → lift and move
           liftMarquee()
-          floatDragRef.current = pt
+          const fl = floatRef.current
+          if (fl) {
+            floatDragRef.current = { startPt: pt, originFx: fl.x, originFy: fl.y }
+          }
           setMarqueeMode('scale')
           startPointerDragCapture()
           return
