@@ -222,38 +222,36 @@ export function Sidebar({
           </div>
         )}
 
-        <div className="border-b border-border px-2 py-1.5">
-          <div className="flex items-center gap-1">
-            <div className="flex min-w-0 flex-1 items-center gap-1.5 px-2 h-7 rounded-md bg-surface2 border border-transparent focus-within:border-accent/50 transition-colors">
-              <Search size={11} className="text-muted shrink-0" />
-              <input
-                ref={searchRef}
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search versions…"
-                className="flex-1 min-w-0 bg-transparent text-xs text-text placeholder-muted outline-none"
-              />
-              {query && (
-                <button
-                  onClick={() => {
-                    setQuery('')
-                    searchRef.current?.focus()
-                  }}
-                  className="text-muted hover:text-text transition-colors"
-                >
-                  <X size={10} />
-                </button>
-              )}
-            </div>
-            <TemplateSortSelect
-              id="versions-sort"
-              value={sortKey}
-              onChange={handleSortChange}
-              options={VERSION_SORT_OPTIONS}
-              ariaLabel="Sort versions"
-              className="h-7 shrink-0 max-w-[5.25rem] rounded-md border border-border bg-surface2 px-1 py-0.5 text-[9px] text-text outline-none focus:border-accent"
+        <div className="space-y-1.5 border-b border-border px-2 py-1.5">
+          <div className="flex items-center gap-1.5 px-2 h-7 rounded-md bg-surface2 border border-transparent focus-within:border-accent/50 transition-colors">
+            <Search size={11} className="text-muted shrink-0" />
+            <input
+              ref={searchRef}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search versions…"
+              className="flex-1 min-w-0 bg-transparent text-xs text-text placeholder-muted outline-none"
             />
+            {query && (
+              <button
+                onClick={() => {
+                  setQuery('')
+                  searchRef.current?.focus()
+                }}
+                className="text-muted hover:text-text transition-colors"
+              >
+                <X size={10} />
+              </button>
+            )}
           </div>
+          <TemplateSortSelect
+            id="versions-sort"
+            value={sortKey}
+            onChange={handleSortChange}
+            options={VERSION_SORT_OPTIONS}
+            ariaLabel="Sort versions"
+            className="h-7 w-full rounded-md border border-border bg-surface2 px-2 py-0.5 text-[10px] text-text outline-none focus:border-accent"
+          />
         </div>
 
         {isWebApp && displayVersions.length > 0 && (
