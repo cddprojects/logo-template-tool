@@ -3318,13 +3318,14 @@ function lineNeedsDisplayTransform(l: LineObj): boolean {
   return (l.rot ?? 0) !== 0 || (l.scaleX ?? 1) !== 1 || (l.scaleY ?? 1) !== 1
 }
 
-function marqueeOrientedObject(l: LineObj): boolean {
+function marqueePointBasedLine(source: LineObj): boolean {
   return (
-    l.type === 'stamp' ||
-    l.type === 'shape' ||
-    l.type === 'text' ||
-    l.type === 'group' ||
-    lineNeedsDisplayTransform(l)
+    source.type === 'polyline' ||
+    source.type === 'poly' ||
+    source.type === 'straight' ||
+    source.type === 'curved' ||
+    source.type === 'free' ||
+    source.type === 'drawn'
   )
 }
 
@@ -3345,7 +3346,8 @@ function floatDestPivot(
   return rectCenter(f.x, f.y, f.canvas.width, f.canvas.height)
 }
 
-function transformMarqueeLineFromSource(
+/** Apply marquee scale/rotate/move to one vector object (from its lift snapshot). */
+function applyMarqueeTransformToLine(
   source: LineObj,
   sc: Pt,
   dp: Pt,
@@ -3358,10 +3360,7 @@ function transformMarqueeLineFromSource(
     x: sc.x + (p.x - sc.x) * sx,
     y: sc.y + (p.y - sc.y) * sy
   })
-  const mapScaledRotated = (p: Pt): Pt => {
-    const scaled = scalePt(p)
-    return rot ? rotatePt(scaled, dp, rot) : scaled
-  }
+  const mapPt = (p: Pt) => mapMarqueePoint(p, sc, dp, sx, sy, rot)
 
   const line: LineObj = {
     ...source,
@@ -3375,22 +3374,22 @@ function transformMarqueeLineFromSource(
   }
 
   if (source.reshapeQuad?.length === 4) {
-    line.reshapeQuad = source.reshapeQuad.map(mapScaledRotated)
-  }
-  if (source.reshapeBaseQuad?.length === 4) {
-    line.reshapeBaseQuad = source.reshapeBaseQuad.map(mapScaledRotated)
-  }
-
-  if (marqueeOrientedObject(source) && source.pts.length >= 2) {
-    const scaledPts = source.pts.map(scalePt)
-    const center = rotationCenter({ ...source, pts: scaledPts })
-    const newCenter = rot ? rotatePt(center, dp, rot) : center
-    const dx = newCenter.x - center.x
-    const dy = newCenter.y - center.y
-    line.pts = scaledPts.map((p) => ({ x: p.x + dx, y: p.y + dy }))
-    if (rot) line.rot = (source.rot ?? 0) + rot
+    line.reshapeQuad = source.reshapeQuad.map(mapPt)
+    if (source.reshapeBaseQuad?.length === 4) {
+      line.reshapeBaseQuad = source.reshapeBaseQuad.map(mapPt)
+    }
+    line.pts = source.pts.map(mapPt)
+    line.rot = source.rot ?? 0
+  } else if (marqueePointBasedLine(source)) {
+    line.pts = source.pts.map(mapPt)
   } else {
-    line.pts = source.pts.map((p) => mapMarqueePoint(p, sc, dp, sx, sy, rot))
+    const scaledPts = source.pts.map(scalePt)
+    const pivot = rotationCenter({ ...source, pts: scaledPts })
+    const nextPivot = rot ? rotatePt(pivot, dp, rot) : pivot
+    const dx = nextPivot.x - pivot.x
+    const dy = nextPivot.y - pivot.y
+    line.pts = scaledPts.map((p) => ({ x: p.x + dx, y: p.y + dy }))
+    line.rot = rot ? (source.rot ?? 0) + rot : (source.rot ?? 0)
   }
 
   if (source.type === 'text') {
@@ -10164,18 +10163,40 @@ export function IconPaintEditor({
   ) => {
     const state = f.vectorState
     if (!state) return
+    const snapshot = state.originalLines
     const sx = f.canvas.width / Math.max(1, state.sourceRect.w)
     const sy = f.canvas.height / Math.max(1, state.sourceRect.h)
     const rot = rotOverride ?? f.rot ?? 0
     const sc = state.sourcePivot
     const dp = floatDestPivot(f, state.sourceRect)
     const selected = new Set(state.selectedIds)
-    const next = cloneLines(state.originalLines).map((line) => {
-      if (!selected.has(line.id)) return line
-      const source = state.originalLines.find((item) => item.id === line.id)
-      if (!source) return line
-      return transformMarqueeLineFromSource(source, sc, dp, sx, sy, rot)
-    })
+    const next = cloneLines(snapshot)
+
+    const transformId = (id: string) => {
+      const source = snapshot.find((item) => item.id === id)
+      if (!source) return
+      const idx = next.findIndex((item) => item.id === id)
+      if (idx < 0) return
+      next[idx] = applyMarqueeTransformToLine(source, sc, dp, sx, sy, rot)
+    }
+
+    for (const id of selected) {
+      const source = snapshot.find((item) => item.id === id)
+      if (!source) continue
+      if (source.parentId && selected.has(source.parentId)) continue
+
+      if (source.type === 'group') {
+        for (const childId of descendantIds(id, snapshot)) {
+          if (!selected.has(childId)) continue
+          const child = snapshot.find((item) => item.id === childId)
+          if (!child || child.type === 'group') continue
+          transformId(childId)
+        }
+      } else {
+        transformId(id)
+      }
+    }
+
     linesRef.current = next
     syncGroupBounds(next)
     commitLines(next)
