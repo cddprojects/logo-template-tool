@@ -1212,12 +1212,8 @@ function alphaBoundsFromCanvas(canvas: HTMLCanvasElement | null): { x: number; y
     : { x: left, y: top, w: right - left + 1, h: bottom - top + 1 }
 }
 
-/** Canvas-space pivot for lifted marquee pixels — matches content-layer rotate (alpha center). */
+/** Canvas-space pivot for lifted marquee pixels (box center, adjusted when moved). */
 function floatRotationPivot(f: { x: number; y: number; canvas: HTMLCanvasElement }): Pt {
-  const ab = alphaBoundsFromCanvas(f.canvas)
-  if (ab) {
-    return { x: f.x + ab.x + ab.w / 2, y: f.y + ab.y + ab.h / 2 }
-  }
   return rectCenter(f.x, f.y, f.canvas.width, f.canvas.height)
 }
 
@@ -3322,6 +3318,94 @@ function lineNeedsDisplayTransform(l: LineObj): boolean {
   return (l.rot ?? 0) !== 0 || (l.scaleX ?? 1) !== 1 || (l.scaleY ?? 1) !== 1
 }
 
+function marqueeOrientedObject(l: LineObj): boolean {
+  return (
+    l.type === 'stamp' ||
+    l.type === 'shape' ||
+    l.type === 'text' ||
+    l.type === 'group' ||
+    lineNeedsDisplayTransform(l)
+  )
+}
+
+function mapMarqueePoint(p: Pt, sc: Pt, dp: Pt, sx: number, sy: number, rot: number): Pt {
+  const local = { x: (p.x - sc.x) * sx, y: (p.y - sc.y) * sy }
+  const rotated = rot ? rotatePt(local, { x: 0, y: 0 }, rot) : local
+  return { x: dp.x + rotated.x, y: dp.y + rotated.y }
+}
+
+function floatDestPivot(
+  f: { x: number; y: number; canvas: HTMLCanvasElement; originX?: number; originY?: number },
+  sourceRect: { x: number; y: number; w: number; h: number }
+): Pt {
+  const sc = rectCenter(sourceRect.x, sourceRect.y, sourceRect.w, sourceRect.h)
+  if (f.originX != null && f.originY != null) {
+    return { x: sc.x + (f.x - f.originX), y: sc.y + (f.y - f.originY) }
+  }
+  return rectCenter(f.x, f.y, f.canvas.width, f.canvas.height)
+}
+
+function transformMarqueeLineFromSource(
+  source: LineObj,
+  sc: Pt,
+  dp: Pt,
+  sx: number,
+  sy: number,
+  rot: number
+): LineObj {
+  const strokeScale = Math.min(Math.abs(sx), Math.abs(sy))
+  const scalePt = (p: Pt): Pt => ({
+    x: sc.x + (p.x - sc.x) * sx,
+    y: sc.y + (p.y - sc.y) * sy
+  })
+  const mapScaledRotated = (p: Pt): Pt => {
+    const scaled = scalePt(p)
+    return rot ? rotatePt(scaled, dp, rot) : scaled
+  }
+
+  const line: LineObj = {
+    ...source,
+    pts: source.pts.map((p) => ({ ...p })),
+    reshapeQuad: source.reshapeQuad?.map((p) => ({ ...p })),
+    reshapeBaseQuad: source.reshapeBaseQuad?.map((p) => ({ ...p })),
+    paintStrokes: source.paintStrokes?.map((stroke) => ({
+      ...stroke,
+      pts: stroke.pts.map((p) => ({ ...p }))
+    }))
+  }
+
+  if (source.reshapeQuad?.length === 4) {
+    line.reshapeQuad = source.reshapeQuad.map(mapScaledRotated)
+  }
+  if (source.reshapeBaseQuad?.length === 4) {
+    line.reshapeBaseQuad = source.reshapeBaseQuad.map(mapScaledRotated)
+  }
+
+  if (marqueeOrientedObject(source) && source.pts.length >= 2) {
+    const scaledPts = source.pts.map(scalePt)
+    const center = rotationCenter({ ...source, pts: scaledPts })
+    const newCenter = rot ? rotatePt(center, dp, rot) : center
+    const dx = newCenter.x - center.x
+    const dy = newCenter.y - center.y
+    line.pts = scaledPts.map((p) => ({ x: p.x + dx, y: p.y + dy }))
+    if (rot) line.rot = (source.rot ?? 0) + rot
+  } else {
+    line.pts = source.pts.map((p) => mapMarqueePoint(p, sc, dp, sx, sy, rot))
+  }
+
+  if (source.type === 'text') {
+    line.fontSize = Math.max(1, (source.fontSize ?? 48) * strokeScale)
+  }
+  if (source.keepStrokeOnResize === false) {
+    line.thickness = Math.max(0.1, source.thickness * strokeScale)
+    if (source.borderWidth != null) {
+      line.borderWidth = Math.max(0, source.borderWidth * strokeScale)
+    }
+  }
+
+  return line
+}
+
 function textInkCenter(l: LineObj): Pt {
   const b = textInkBBox(l)
   return { x: b.x + b.w / 2, y: b.y + b.h / 2 }
@@ -4635,8 +4719,6 @@ export function IconPaintEditor({
     }
     /** Rotation applied while the selection is lifted (scale mode). */
     rot?: number
-    /** Rotation baked into the float canvas (for vector restore after live bake). */
-    vectorRot?: number
   } | null>(null)
   const floatDragRef = useRef<Pt | null>(null)
   /** Corner drag: coverage resizes the marquee rect; scale resizes the float bitmap. */
@@ -9871,7 +9953,9 @@ export function IconPaintEditor({
     }
     const f = floatRef.current
     if (f) {
-      const pivot = floatRotationPivot(f)
+      const pivot = f.vectorState
+        ? floatDestPivot(f, f.vectorState.sourceRect)
+        : floatRotationPivot(f)
       box(f.x, f.y, f.canvas.width, f.canvas.height, true, f.rot ?? 0, f.canvas, pivot)
       return
     }
@@ -10024,7 +10108,9 @@ export function IconPaintEditor({
     const rot = f.rot ?? 0
     const w = f.canvas.width
     const h = f.canvas.height
-    const pivot = floatRotationPivot(f)
+    const pivot = f.vectorState
+      ? floatDestPivot(f, f.vectorState.sourceRect)
+      : floatRotationPivot(f)
     const drawAt = (dest: CanvasRenderingContext2D, src: HTMLCanvasElement, sw = w, sh = h) => {
       drawCanvasRotatedAt(dest, src, f.x, f.y, sw, sh, pivot, rot)
     }
@@ -10080,37 +10166,15 @@ export function IconPaintEditor({
     if (!state) return
     const sx = f.canvas.width / Math.max(1, state.sourceRect.w)
     const sy = f.canvas.height / Math.max(1, state.sourceRect.h)
-    const strokeScale = Math.min(Math.abs(sx), Math.abs(sy))
     const rot = rotOverride ?? f.rot ?? 0
-    const pivot = floatRotationPivot(f)
-    const sc = state.sourcePivot ?? rectCenter(
-      state.sourceRect.x,
-      state.sourceRect.y,
-      state.sourceRect.w,
-      state.sourceRect.h
-    )
+    const sc = state.sourcePivot
+    const dp = floatDestPivot(f, state.sourceRect)
     const selected = new Set(state.selectedIds)
     const next = cloneLines(state.originalLines).map((line) => {
       if (!selected.has(line.id)) return line
-      line.pts = line.pts.map((point) => {
-        const local = {
-          x: (point.x - sc.x) * sx,
-          y: (point.y - sc.y) * sy
-        }
-        const rotated = rot ? rotatePt(local, { x: 0, y: 0 }, rot) : local
-        return { x: pivot.x + rotated.x, y: pivot.y + rotated.y }
-      })
-      if (rot) line.rot = (line.rot ?? 0) + rot
-      if (line.type === 'text') {
-        line.fontSize = Math.max(1, (line.fontSize ?? 48) * strokeScale)
-      }
-      if (line.keepStrokeOnResize === false) {
-        line.thickness = Math.max(0.1, line.thickness * strokeScale)
-        if (line.borderWidth != null) {
-          line.borderWidth = Math.max(0, line.borderWidth * strokeScale)
-        }
-      }
-      return line
+      const source = state.originalLines.find((item) => item.id === line.id)
+      if (!source) return line
+      return transformMarqueeLineFromSource(source, sc, dp, sx, sy, rot)
     })
     linesRef.current = next
     syncGroupBounds(next)
@@ -10156,12 +10220,11 @@ export function IconPaintEditor({
       pushHistory()
       return
     }
-    const savedRot = (f.vectorRot ?? 0) + (f.rot ?? 0)
+    const savedRot = f.rot ?? 0
     const rotatedBounds = Math.abs(savedRot) > 0.001 ? floatAxisBounds(f) : null
-    clearFloatCommitAreas(f, rotatedBounds)
-    if (Math.abs(f.rot ?? 0) > 0.001) bakeFloatRotation(f)
-    rasterizeFloatToOriginalLayers(f)
     restoreTransformedMarqueeVectors(f, savedRot)
+    clearFloatCommitAreas(f, rotatedBounds)
+    rasterizeFloatToOriginalLayers(f)
     floatRef.current = null
     setHasMarquee(false)
     drawSelOverlay()
@@ -10206,7 +10269,7 @@ export function IconPaintEditor({
       }
     }
     for (const root of roots) includeSubtree(root.id)
-    const sourcePivot = floatRotationPivot({ x, y, canvas })
+    const sourcePivot = rectCenter(x, y, w, h)
     const vectorState = selectedIds.size
       ? {
           originalLines: cloneLines(linesRef.current),
@@ -10268,13 +10331,19 @@ export function IconPaintEditor({
   const floatToCoverageMarquee = () => {
     const f = floatRef.current
     if (!f) return
-    const savedRot = (f.vectorRot ?? 0) + (f.rot ?? 0)
-    const rotatedBounds = Math.abs(savedRot) > 0.001 ? floatAxisBounds(f) : null
-    clearFloatCommitAreas(f, rotatedBounds)
-    if (Math.abs(f.rot ?? 0) > 0.001) bakeFloatRotation(f)
-    rasterizeFloatToOriginalLayers(f)
+    const savedRot = f.rot ?? 0
+    const coverageBounds = Math.abs(savedRot) > 0.001
+      ? floatAxisBounds(f)
+      : { x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height }
     restoreTransformedMarqueeVectors(f, savedRot)
-    marqueeRef.current = { x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height }
+    clearFloatCommitAreas(f, Math.abs(savedRot) > 0.001 ? coverageBounds : null)
+    rasterizeFloatToOriginalLayers(f)
+    marqueeRef.current = {
+      x: coverageBounds.x,
+      y: coverageBounds.y,
+      w: coverageBounds.w,
+      h: coverageBounds.h
+    }
     floatRef.current = null
     setHasMarquee(true)
     redrawLines()
@@ -10851,11 +10920,6 @@ export function IconPaintEditor({
     if (tool === 'line' || tool === 'freepoly' || tool === 'pointer' || tool === 'shape' || tool === 'text' || tool === 'reshape') { lineUp(pt); return }
     if (tool === 'select') {
       if (floatRotateRef.current) {
-        const f = floatRef.current
-        if (f && Math.abs(f.rot ?? 0) > 0.001) {
-          f.vectorRot = (f.vectorRot ?? 0) + (f.rot ?? 0)
-          bakeFloatRotation(f)
-        }
         floatRotateRef.current = null
         drawSelOverlay()
         return
@@ -10931,7 +10995,9 @@ export function IconPaintEditor({
       // Floating selection (scale mode)
       if (f) {
         const rot = f.rot ?? 0
-        const pivot = floatRotationPivot(f)
+        const pivot = f.vectorState
+          ? floatDestPivot(f, f.vectorState.sourceRect)
+          : floatRotationPivot(f)
         if (rectRotatePinHit(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)) {
           floatRotateRef.current = {
             center: pivot,
