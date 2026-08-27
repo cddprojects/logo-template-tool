@@ -1406,16 +1406,41 @@ function pointInMarqueeFloat(f: MarqueeFloatLike, pt: Pt): boolean {
 }
 
 function marqueeFloatRotatePinHit(f: MarqueeFloatLike, pt: Pt): boolean {
-  const w = f.canvas.width
-  const h = f.canvas.height
+  const sr = marqueeFloatSourceRect(f)
   const { dp, rot } = marqueeFloatTransform(f)
-  return rectRotatePinHit(f.x, f.y, w, h, pt, rot, dp)
+  return rectRotatePinHit(sr.x, sr.y, sr.w, sr.h, pt, rot, dp)
+}
+
+function marqueeFloatDrawParams(
+  f: MarqueeFloatLike & { canvas: HTMLCanvasElement }
+): {
+  sr: { x: number; y: number; w: number; h: number }
+  sc: Pt
+  dp: Pt
+  rot: number
+  flipSx: number
+  flipSy: number
+  sw: number
+  sh: number
+} {
+  const sr = marqueeFloatSourceRect(f)
+  const { sc, dp, rot, flipSx, flipSy } = marqueeFloatTransform(f)
+  return {
+    sr,
+    sc,
+    dp,
+    rot,
+    flipSx,
+    flipSy,
+    sw: f.canvas.width,
+    sh: f.canvas.height
+  }
 }
 
 function bakeMarqueeFloatCanvas(
   f: MarqueeFloatLike & { canvas: HTMLCanvasElement }
 ): { canvas: HTMLCanvasElement; bounds: { x: number; y: number; w: number; h: number } } {
-  const { sc, dp, rot, flipSx, flipSy } = marqueeFloatTransform(f)
+  const { sr, sc, dp, rot, flipSx, flipSy, sw, sh } = marqueeFloatDrawParams(f)
   const bounds = floatTransformBounds(f)
   const out = document.createElement('canvas')
   out.width = Math.ceil(bounds.w)
@@ -1425,19 +1450,7 @@ function bakeMarqueeFloatCanvas(
   ctx.imageSmoothingQuality = 'high'
   ctx.save()
   ctx.translate(-bounds.x, -bounds.y)
-  drawCanvasAtMarqueeTransform(
-    ctx,
-    f.canvas,
-    f.x,
-    f.y,
-    f.canvas.width,
-    f.canvas.height,
-    sc,
-    dp,
-    rot,
-    flipSx,
-    flipSy
-  )
+  drawCanvasAtMarqueeTransform(ctx, f.canvas, sr.x, sr.y, sw, sh, sc, dp, rot, flipSx, flipSy)
   ctx.restore()
   return { canvas: out, bounds }
 }
@@ -10245,10 +10258,10 @@ export function IconPaintEditor({
       const h = f.canvas.height
       const isMarquee = !!(f.layerCanvases?.length || f.sourceLayer)
       if (isMarquee) {
-        const { sc, dp, rot, flipSx, flipSy } = marqueeFloatTransform(f)
+        const { sr, sc, dp, rot, flipSx, flipSy, sw, sh } = marqueeFloatDrawParams(f)
         const corners = marqueeFloatCorners(f)
         const color = '#f59e0b'
-        drawCanvasAtMarqueeTransform(p, f.canvas, f.x, f.y, w, h, sc, dp, rot, flipSx, flipSy)
+        drawCanvasAtMarqueeTransform(p, f.canvas, sr.x, sr.y, sw, sh, sc, dp, rot, flipSx, flipSy)
         p.save()
         p.lineWidth = 1.5
         p.setLineDash([6, 4])
@@ -10274,7 +10287,7 @@ export function IconPaintEditor({
           p.stroke()
         }
         p.restore()
-        drawRectRotatePin(p, f.x, f.y, w, h, rot, dp)
+        drawRectRotatePin(p, sr.x, sr.y, sr.w, sr.h, rot, dp)
         return
       }
       const pivot = floatRotationPivot(f)
@@ -10436,14 +10449,14 @@ export function IconPaintEditor({
     f: NonNullable<typeof floatRef.current>
   ) => {
     if (!f.layerCanvases?.length) return
-    const { sc, dp, rot, flipSx, flipSy } = marqueeFloatTransform(f)
+    const { sr, sc, dp, rot, flipSx, flipSy } = marqueeFloatDrawParams(f)
     const drawAt = (
       dest: CanvasRenderingContext2D,
       src: HTMLCanvasElement,
       sw: number,
       sh: number
     ) => {
-      drawCanvasAtMarqueeTransform(dest, src, f.x, f.y, sw, sh, sc, dp, rot, flipSx, flipSy)
+      drawCanvasAtMarqueeTransform(dest, src, sr.x, sr.y, sw, sh, sc, dp, rot, flipSx, flipSy)
     }
     for (const item of f.layerCanvases) {
       const overlayCtx = layerCanvas(item.layer)?.getContext('2d')
@@ -10786,20 +10799,8 @@ export function IconPaintEditor({
     if (hasPartial || !liftedVectors) {
       const ctx = topEditableCtx()
       if (ctx) {
-        const { sc, dp, rot, flipSx: fx, flipSy: fy } = marqueeFloatTransform(f)
-        drawCanvasAtMarqueeTransform(
-          ctx,
-          f.canvas,
-          f.x,
-          f.y,
-          f.canvas.width,
-          f.canvas.height,
-          sc,
-          dp,
-          rot,
-          fx,
-          fy
-        )
+        const { sr, sc, dp, rot, flipSx: fx, flipSy: fy, sw, sh } = marqueeFloatDrawParams(f)
+        drawCanvasAtMarqueeTransform(ctx, f.canvas, sr.x, sr.y, sw, sh, sc, dp, rot, fx, fy)
       }
     }
     partialVectorMaskRef.current = null
@@ -11304,9 +11305,16 @@ export function IconPaintEditor({
         const flipSy = f.scaleY ?? 1
         const hasLiveTransform = Math.abs(rot) > 0.001 || flipSx !== 1 || flipSy !== 1
         if (!hasLiveTransform) {
-          const snap = snapRectToCanvas(floatAxisBounds(f))
-          f.x += snap.dx
-          f.y += snap.dy
+          let snap
+          if (g.isMarquee) {
+            snap = snapRectToCanvas(floatTransformBounds(f))
+            const dp = marqueeFloatDestPivot(f)
+            setMarqueeFloatPosition(f, { x: dp.x + snap.dx, y: dp.y + snap.dy })
+          } else {
+            snap = snapRectToCanvas(floatAxisBounds(f))
+            f.x += snap.dx
+            f.y += snap.dy
+          }
           drawAlignmentGuides(snap)
         }
         drawSelOverlay()
@@ -11401,7 +11409,9 @@ export function IconPaintEditor({
     if (tool === 'select') {
       if (floatRotateRef.current) {
         floatRotateRef.current = null
-        redrawLines()
+        const mf = floatRef.current
+        const isMarquee = !!(mf && (mf.layerCanvases?.length || mf.sourceLayer))
+        if (!isMarquee) redrawLines()
         drawSelOverlay()
         return
       }
@@ -11419,8 +11429,9 @@ export function IconPaintEditor({
         return
       }
       if (floatDragRef.current) {
+        const wasMarquee = floatDragRef.current.isMarquee
         floatDragRef.current = null
-        redrawLines()
+        if (!wasMarquee) redrawLines()
         drawSelOverlay()
         return
       }
@@ -11479,9 +11490,12 @@ export function IconPaintEditor({
       if (f) {
         const isMarquee = !!(f.layerCanvases?.length || f.sourceLayer)
         const rot = f.rot ?? 0
-        const pivot = f.vectorState
-          ? floatDestPivot(f, f.vectorState.sourceRect)
-          : floatRotationPivot(f)
+        const sr = isMarquee ? marqueeFloatSourceRect(f) : null
+        const pivot = isMarquee
+          ? marqueeFloatDestPivot(f)
+          : f.vectorState
+            ? floatDestPivot(f, f.vectorState.sourceRect)
+            : floatRotationPivot(f)
         const pinHit = isMarquee
           ? marqueeFloatRotatePinHit(f, pt)
           : rectRotatePinHit(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)
@@ -11494,7 +11508,9 @@ export function IconPaintEditor({
           startPointerDragCapture()
           return
         }
-        const corner = hitRectCorner(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)
+        const corner = isMarquee && sr
+          ? hitRectCorner(sr.x, sr.y, sr.w, sr.h, pt, rot, pivot)
+          : hitRectCorner(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)
         if (corner) {
           if (Math.abs(rot) > 0.001) bakeFloatRotation(f)
           if (marqueeMode === 'coverage') {
@@ -11535,7 +11551,8 @@ export function IconPaintEditor({
         if (f.selectable) {
           commitFloat()
         } else if (isMarquee) {
-          // Keep the lifted selection active — do not stamp back on a canvas miss.
+          // Keep the lifted selection active — refresh overlay only, no commit.
+          drawSelOverlay()
           return
         } else {
           commitFloat()
