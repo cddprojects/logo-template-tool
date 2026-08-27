@@ -1318,6 +1318,25 @@ function marqueeFloatSourceRect(f: MarqueeFloatLike): { x: number; y: number; w:
   }
 }
 
+function marqueeFloatDestPivot(f: MarqueeFloatLike): Pt {
+  const sourceRect = marqueeFloatSourceRect(f)
+  return f.vectorState
+    ? floatDestPivot(f, sourceRect)
+    : floatRotationPivot(f)
+}
+
+function setMarqueeFloatPosition(f: MarqueeFloatLike, dp: Pt): void {
+  const sourceRect = marqueeFloatSourceRect(f)
+  const sc = f.vectorState?.sourcePivot ?? rectCenter(sourceRect.x, sourceRect.y, sourceRect.w, sourceRect.h)
+  if (f.vectorState && f.originX != null && f.originY != null) {
+    f.x = f.originX + (dp.x - sc.x)
+    f.y = f.originY + (dp.y - sc.y)
+  } else {
+    f.x = dp.x - f.canvas.width / 2
+    f.y = dp.y - f.canvas.height / 2
+  }
+}
+
 function marqueeFloatTransform(
   f: MarqueeFloatLike
 ): { sc: Pt; dp: Pt; rot: number; sx: number; sy: number; flipSx: number; flipSy: number } {
@@ -4846,11 +4865,18 @@ export function IconPaintEditor({
     /** Mirror scale accumulated while lifted (±1 toggles on flip). */
     scaleX?: number
     scaleY?: number
+    /** Partially overlapped vectors: punch this origin rect while the float is active. */
+    partialVectorMask?: {
+      rect: { x: number; y: number; w: number; h: number }
+      ids: string[]
+    }
   } | null>(null)
   const floatDragRef = useRef<{
     startPt: Pt
-    originFx: number
-    originFy: number
+    startDp: Pt
+    startFx: number
+    startFy: number
+    isMarquee: boolean
   } | null>(null)
   /** Corner drag: coverage resizes the marquee rect; scale resizes the float bitmap. */
   const floatResizeRef = useRef<{
@@ -4866,6 +4892,11 @@ export function IconPaintEditor({
     center: Pt
     startAng: number
     startRot: number
+  } | null>(null)
+  /** Partial vector punch-out that persists in coverage mode after the float is released. */
+  const partialVectorMaskRef = useRef<{
+    rect: { x: number; y: number; w: number; h: number }
+    ids: string[]
   } | null>(null)
   /** Hysteresis keeps a 50% resize snap engaged until the pointer moves clearly away. */
   const resizeSnapLockRef = useRef({ width: false, height: false })
@@ -5026,7 +5057,20 @@ export function IconPaintEditor({
 
     const paintObjectStep = (t: CanvasRenderingContext2D, l: LineObj) => {
       if (skip(l)) return
-      renderObjectTree(t, l, linesRef.current, vis)
+      const partialMask = floatRef.current?.partialVectorMask ?? partialVectorMaskRef.current
+      const punchPartial = partialMask?.ids.includes(l.id)
+      if (punchPartial && partialMask) {
+        const r = partialMask.rect
+        t.save()
+        t.beginPath()
+        t.rect(0, 0, W, H)
+        t.rect(r.x, r.y, r.w, r.h)
+        t.clip('evenodd')
+        renderObjectTree(t, l, linesRef.current, vis)
+        t.restore()
+      } else {
+        renderObjectTree(t, l, linesRef.current, vis)
+      }
       if (vis(l) && l.punchMask && !l.punchThrough) destOutLocalPunch(t, l)
     }
 
@@ -5616,6 +5660,7 @@ export function IconPaintEditor({
     marqueeResizeRef.current = null
     marqueeRef.current = null
     marqueeStartRef.current = null
+    partialVectorMaskRef.current = null
     setHasMarquee(false)
     const p = previewRef.current?.getContext('2d')
     if (p) p.clearRect(0, 0, W, H)
@@ -10165,8 +10210,8 @@ export function IconPaintEditor({
     }
     const f = floatRef.current
     if (f) {
-      f.x += dx
-      f.y += dy
+      const dp = marqueeFloatDestPivot(f)
+      setMarqueeFloatPosition(f, { x: dp.x + dx, y: dp.y + dy })
       drawSelOverlay()
       return
     }
@@ -10293,6 +10338,12 @@ export function IconPaintEditor({
     const { sc, dp, rot, flipSx, flipSy } = marqueeFloatTransform(f)
     const drawAt = (dest: CanvasRenderingContext2D, src: HTMLCanvasElement, sw = w, sh = h) => {
       drawCanvasAtMarqueeTransform(dest, src, f.x, f.y, sw, sh, sc, dp, rot, flipSx, flipSy)
+    }
+    // Partial vector cuts only exist in the composite canvas, not per-layer crops.
+    if (f.partialVectorMask?.ids.length) {
+      const ctx = topEditableCtx()
+      if (ctx) drawAt(ctx, f.canvas)
+      return
     }
     if (f.layerCanvases?.length) {
       for (const item of f.layerCanvases) {
@@ -10430,6 +10481,11 @@ export function IconPaintEditor({
     restoreTransformedMarqueeVectors(f, savedRot)
     clearFloatCommitAreas(f, transformedBounds)
     rasterizeFloatToOriginalLayers(f)
+    if (f.partialVectorMask) {
+      partialVectorMaskRef.current = f.partialVectorMask
+    } else {
+      partialVectorMaskRef.current = null
+    }
     floatRef.current = null
     setHasMarquee(false)
     drawSelOverlay()
@@ -10441,6 +10497,7 @@ export function IconPaintEditor({
   const liftMarquee = () => {
     const m = marqueeRef.current
     if (!m || m.w < 3 || m.h < 3) { marqueeRef.current = null; setHasMarquee(false); drawSelOverlay(); return }
+    partialVectorMaskRef.current = null
     const x = Math.round(m.x), y = Math.round(m.y), w = Math.round(m.w), h = Math.round(m.h)
     const activeLayers = [...layerOrderRef.current].reverse().filter(layerIsEditable)
     const layerCanvases = activeLayers.map((layer) => {
@@ -10486,6 +10543,16 @@ export function IconPaintEditor({
       }
     }
     for (const root of liftRoots) includeSubtree(root.id)
+    const partialRoots = previewRoots.filter((line) => !fullyInsideMarquee(line))
+    const partialMaskIds = new Set<string>()
+    const includePartialSubtree = (id: string) => {
+      if (partialMaskIds.has(id)) return
+      partialMaskIds.add(id)
+      for (const child of linesRef.current) {
+        if (child.parentId === id) includePartialSubtree(child.id)
+      }
+    }
+    for (const root of partialRoots) includePartialSubtree(root.id)
     const sourcePivot = rectCenter(x, y, w, h)
     const vectorState = selectedIds.size
       ? {
@@ -10534,6 +10601,9 @@ export function IconPaintEditor({
       sourceLayer: layerOrderRef.current.find(layerIsEditable),
       layerCanvases,
       vectorState,
+      partialVectorMask: partialMaskIds.size
+        ? { rect: { x, y, w, h }, ids: [...partialMaskIds] }
+        : undefined,
       rot: 0
     }
     marqueeRef.current = null
@@ -10556,6 +10626,7 @@ export function IconPaintEditor({
     restoreTransformedMarqueeVectors(f, savedRot)
     clearFloatCommitAreas(f, Math.abs(savedRot) > 0.001 || flipSx !== 1 || flipSy !== 1 ? coverageBounds : null)
     rasterizeFloatToOriginalLayers(f)
+    partialVectorMaskRef.current = f.partialVectorMask ?? null
     marqueeRef.current = {
       x: coverageBounds.x,
       y: coverageBounds.y,
@@ -10930,7 +11001,13 @@ export function IconPaintEditor({
     commitFloat,
     // Escape/cancel restores a lifted marquee to its original source layers.
     discardFloat: cancelFloating,
-    clearSel: () => { marqueeRef.current = null; setHasMarquee(false); drawSelOverlay() },
+    clearSel: () => {
+      partialVectorMaskRef.current = null
+      marqueeRef.current = null
+      setHasMarquee(false)
+      drawSelOverlay()
+      redrawLines()
+    },
     clearRegion: () => {
       const m = marqueeRef.current
       if (!m) return
@@ -11037,8 +11114,14 @@ export function IconPaintEditor({
       }
       const g = floatDragRef.current
       if (g && f) {
-        f.x = g.originFx + (pt.x - g.startPt.x)
-        f.y = g.originFy + (pt.y - g.startPt.y)
+        const dx = pt.x - g.startPt.x
+        const dy = pt.y - g.startPt.y
+        if (g.isMarquee) {
+          setMarqueeFloatPosition(f, { x: g.startDp.x + dx, y: g.startDp.y + dy })
+        } else {
+          f.x = g.startFx + dx
+          f.y = g.startFy + dy
+        }
         const rot = f.rot ?? 0
         const flipSx = f.scaleX ?? 1
         const flipSy = f.scaleY ?? 1
@@ -11258,14 +11341,22 @@ export function IconPaintEditor({
           ? pointInMarqueeFloat(f, pt)
           : pointInRotatedRect(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)
         if (inside) {
-          floatDragRef.current = { startPt: pt, originFx: f.x, originFy: f.y }
+          const isMarquee = !!(f.layerCanvases?.length || f.sourceLayer)
+          floatDragRef.current = {
+            startPt: pt,
+            startDp: marqueeFloatDestPivot(f),
+            startFx: f.x,
+            startFy: f.y,
+            isMarquee
+          }
           startPointerDragCapture()
           return
         }
         if (f.selectable) {
           commitFloat()
         } else if (isMarquee) {
-          floatToCoverageMarquee()
+          // Keep the lifted selection active — do not stamp back on a canvas miss.
+          return
         } else {
           commitFloat()
         }
@@ -11317,7 +11408,13 @@ export function IconPaintEditor({
           liftMarquee()
           const fl = floatRef.current
           if (fl) {
-            floatDragRef.current = { startPt: pt, originFx: fl.x, originFy: fl.y }
+            floatDragRef.current = {
+              startPt: pt,
+              startDp: marqueeFloatDestPivot(fl),
+              startFx: fl.x,
+              startFy: fl.y,
+              isMarquee: true
+            }
           }
           setMarqueeMode('scale')
           startPointerDragCapture()
