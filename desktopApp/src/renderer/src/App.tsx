@@ -11,7 +11,7 @@ import { useVersions } from './hooks/useVersions'
 import type { Version, AssetVariant, LogoConfig, FaviconConfig } from './types'
 import { initFontLoading } from './utils/fontLoader'
 import { isIgTemplateFile } from './utils/templateFile'
-import { isBrowserWebBuild, lazyWithRetry } from './utils/lazyWithRetry'
+import { isBrowserWebBuild, isChunkLoadError, chunkReloadsExhausted, lazyWithRetry } from './utils/lazyWithRetry'
 import { installHorizontalWheelScroll } from './utils/horizontalWheelScroll'
 
 // Lazy-load the heavy editors so they don't block the initial paint.
@@ -43,19 +43,17 @@ class EditorErrorBoundary extends Component<{ children: React.ReactNode; onReset
     if (this.state.error) {
       const chunkStale =
         isBrowserWebBuild() &&
-        /Failed to fetch dynamically imported module|Importing a module script failed|Loading chunk [\d]+ failed/i.test(
-          this.state.error.message
-        )
+        (isChunkLoadError(this.state.error) || chunkReloadsExhausted())
       return (
         <div className="flex flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
           <AlertTriangle size={32} className="text-yellow-400" />
           <div>
             <p className="text-sm font-semibold text-text mb-1">
-              {chunkStale ? 'App update available' : 'Rendering error'}
+              {chunkStale ? 'App update or cache issue' : 'Rendering error'}
             </p>
             <p className="text-xs text-muted max-w-md">
               {chunkStale
-                ? 'A new version was deployed. Refresh the page to load the latest files.'
+                ? 'Your browser may be serving an old copy of the app (common after a deploy). Hard refresh the page (Ctrl+Shift+R) or clear site data for this URL, then open it again.'
                 : null}
             </p>
             <p className="text-xs text-muted font-mono bg-surface3 rounded px-3 py-2 max-w-md break-all mt-2">
@@ -73,7 +71,7 @@ class EditorErrorBoundary extends Component<{ children: React.ReactNode; onReset
             }}
             className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-medium bg-accent text-white hover:bg-accent-hover"
           >
-            <RefreshCw size={12} /> {chunkStale ? 'Refresh page' : 'Retry'}
+            <RefreshCw size={12} /> {chunkStale ? 'Reload page' : 'Retry'}
           </button>
         </div>
       )
