@@ -24,6 +24,7 @@ COPY --from=build /app/webApp/dist /usr/share/nginx/html
 COPY --from=server-deps /app/server/node_modules /app/server/node_modules
 COPY server/package.json /app/server/package.json
 COPY server/src /app/server/src
+COPY server/scripts /app/server/scripts
 COPY docker/start.sh /start.sh
 RUN chmod +x /start.sh && mkdir -p /data /run/nginx
 

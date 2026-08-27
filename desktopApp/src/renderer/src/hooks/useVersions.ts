@@ -375,6 +375,8 @@ export function useVersions() {
   const [loaded, setLoaded] = useState(false)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const loadedRef = useRef(false)
+  /** Web: false until the server workspace load succeeds — blocks accidental empty saves. */
+  const serverHydratedRef = useRef(!isWebRuntime())
 
   // Always-current ref so callbacks never need to close over `versions` state.
   // This lets us declare all callbacks with stable identities (empty / [save] deps).
@@ -438,7 +440,7 @@ export function useVersions() {
       clearTimeout(saveTimer.current)
       saveTimer.current = null
     }
-    if (!loadedRef.current) return
+    if (!loadedRef.current || !serverHydratedRef.current) return
     void window.api.saveVersions(versionsRef.current, serializeHistory()).then((result) => {
       if (result && result.success === false) {
         console.error('[versions] flush save failed:', result.error)
@@ -448,19 +450,54 @@ export function useVersions() {
 
   // Load from file on mount + listen for template imports from main process
   useEffect(() => {
+    let cancelled = false
     loadedRef.current = false
-    window.api.loadVersions().then(async (raw) => {
-      const migrated = (raw as Record<string, unknown>[]).map(migrateVersion)
+    const loadTimeout = window.setTimeout(() => {
+      if (cancelled || loadedRef.current) return
+      console.warn('[versions] load timed out — opening with current data')
+      loadedRef.current = true
+      setLoaded(true)
+    }, 90000)
+
+    const restoreHistoryLater = (historyRaw: unknown) => {
+      window.setTimeout(() => {
+        if (cancelled) return
+        try {
+          applyHistory(historyRaw)
+        } catch (err) {
+          console.error('[versions] history restore failed:', err)
+        }
+      }, 0)
+    }
+
+    const finishInitialLoad = (migrated: Version[], historyRaw: unknown) => {
+      if (cancelled) return
+      serverHydratedRef.current = true
       setVersionsState(migrated)
       versionsRef.current = migrated
-      const history = await window.api.loadUndoHistory()
-      applyHistory(history)
       loadedRef.current = true
       setLoaded(true)
+      window.clearTimeout(loadTimeout)
+      restoreHistoryLater(historyRaw)
+    }
+
+    window.api.loadVersions().then(async (raw) => {
+      const list = Array.isArray(raw) ? raw : []
+      const migrated = list.map(migrateVersion)
+      let historyRaw: unknown = null
+      try {
+        historyRaw = await window.api.loadUndoHistory()
+      } catch (err) {
+        console.error('[versions] undo history load failed:', err)
+      }
+      finishInitialLoad(migrated, historyRaw)
     }).catch((err) => {
       console.error('[versions] load failed:', err)
-      loadedRef.current = true
-      setLoaded(true)
+      if (!cancelled) {
+        loadedRef.current = true
+        setLoaded(true)
+        window.clearTimeout(loadTimeout)
+      }
     })
 
     window.api.onTemplateImported((raw) => {
@@ -475,12 +512,17 @@ export function useVersions() {
     })
 
     window.api.onVersionsReloaded((raw) => {
-      const migrated = (raw as Record<string, unknown>[]).map(migrateVersion)
+      const list = Array.isArray(raw) ? raw : []
+      const migrated = list.map(migrateVersion)
+      serverHydratedRef.current = true
       loadedRef.current = true
       setVersionsState(migrated)
       versionsRef.current = migrated
       setLoaded(true)
-      void window.api.loadUndoHistory().then(applyHistory)
+      window.clearTimeout(loadTimeout)
+      void window.api.loadUndoHistory().then(restoreHistoryLater).catch((err) => {
+        console.error('[versions] reload history failed:', err)
+      })
     })
 
     // Web: flush pending workspace+history before the tab is discarded so undo
@@ -493,13 +535,15 @@ export function useVersions() {
     document.addEventListener('visibilitychange', onVisibility)
 
     return () => {
+      cancelled = true
+      window.clearTimeout(loadTimeout)
       window.removeEventListener('pagehide', onPageHide)
       document.removeEventListener('visibilitychange', onVisibility)
       if (saveTimer.current) {
         clearTimeout(saveTimer.current)
         saveTimer.current = null
       }
-      if (loadedRef.current) {
+      if (loadedRef.current && serverHydratedRef.current) {
         void window.api.saveVersions(versionsRef.current, serializeHistory())
       }
     }
@@ -507,7 +551,7 @@ export function useVersions() {
   }, [])
 
   const persist = useCallback((next: Version[]) => {
-    if (!loadedRef.current) return
+    if (!loadedRef.current || !serverHydratedRef.current) return
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => {
       saveTimer.current = null

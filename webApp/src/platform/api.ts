@@ -26,7 +26,8 @@ type Listener<T> = (payload: T) => void
 
 const templateImportedListeners: Listener<unknown>[] = []
 const versionsReloadedListeners: Listener<unknown[]>[] = []
-let lastWorkspaceHistory: unknown = null
+/** Latest workspace payload from the server (history may legitimately be null). */
+let cachedWorkspace: { versions: unknown[]; history: unknown } | null = null
 
 function clearLegacyBrowserVersions(): void {
   try {
@@ -39,7 +40,7 @@ function clearLegacyBrowserVersions(): void {
 async function reloadWorkspaceForListeners(): Promise<void> {
   const result = await loadWorkspace()
   if (!result.ok) return
-  lastWorkspaceHistory = result.history
+  cachedWorkspace = { versions: result.versions, history: result.history }
   clearLegacyBrowserVersions()
   versionsReloadedListeners.forEach((cb) => cb(result.versions))
 }
@@ -189,7 +190,7 @@ export function installWebApi(): void {
     if (user) {
       void reloadWorkspaceForListeners()
     } else {
-      lastWorkspaceHistory = null
+      cachedWorkspace = null
       versionsReloadedListeners.forEach((cb) => cb([]))
     }
   })
@@ -245,35 +246,44 @@ export function installWebApi(): void {
     exportGroup,
 
     loadVersions: async (): Promise<unknown[]> => {
+      if (cachedWorkspace) {
+        clearLegacyBrowserVersions()
+        return cachedWorkspace.versions
+      }
       const result = await loadWorkspace()
       if (!result.ok) {
         console.error('[web] failed to load workspace from server:', result.error)
-        return []
+        throw new Error(result.error || 'Failed to load workspace')
       }
-      lastWorkspaceHistory = result.history
+      cachedWorkspace = { versions: result.versions, history: result.history }
       clearLegacyBrowserVersions()
       return result.versions
     },
 
     loadUndoHistory: async (): Promise<unknown> => {
-      // Prefer the history captured by the latest workspace load. If that race
-      // missed (or auth reload cleared memory), fetch once more from the server.
-      if (lastWorkspaceHistory != null) return lastWorkspaceHistory
+      // Prefer the history from the latest workspace fetch (null is valid).
+      if (cachedWorkspace) return cachedWorkspace.history
       const result = await loadWorkspace()
       if (!result.ok) {
         console.error('[web] failed to load undo history:', result.error)
         return null
       }
-      lastWorkspaceHistory = result.history
-      return lastWorkspaceHistory
+      cachedWorkspace = { versions: result.versions, history: result.history }
+      return cachedWorkspace.history
     },
 
     saveVersions: async (data: unknown[], history?: unknown): Promise<{ success: boolean; error?: string }> => {
       // Always persist the latest known undo stack — never wipe server history
       // by omitting it when a caller only saves versions.
-      const nextHistory = history !== undefined ? history : lastWorkspaceHistory
-      if (history !== undefined) lastWorkspaceHistory = history
-      const result = await saveWorkspace(data, nextHistory ?? null)
+      const nextHistory = history !== undefined ? history : cachedWorkspace?.history
+      if (history !== undefined && cachedWorkspace) {
+        cachedWorkspace = { ...cachedWorkspace, history }
+      } else if (history !== undefined) {
+        cachedWorkspace = { versions: data, history }
+      } else if (cachedWorkspace) {
+        cachedWorkspace = { ...cachedWorkspace, versions: data }
+      }
+      const result = await saveWorkspace(data, nextHistory)
       if (!result.ok) {
         console.error('[web] failed to save workspace to server:', result.error)
         return { success: false, error: result.error }
