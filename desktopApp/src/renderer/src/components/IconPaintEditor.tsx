@@ -5040,6 +5040,10 @@ export function IconPaintEditor({
     slotCacheReadyRef.current = { content: false, container: false }
     displayNeedsResetRef.current = true
   }
+  const isMarqueeFloatActive = () => {
+    const f = floatRef.current
+    return !!(f && !f.selectable && (f.layerCanvases?.length || f.sourceLayer))
+  }
   /** While a marquee float is active, punch its lift origin out of every layer slot. */
   const activeFloatCutHole = (): { x: number; y: number; w: number; h: number } | null => {
     const f = floatRef.current
@@ -5051,6 +5055,8 @@ export function IconPaintEditor({
       h: f.originH ?? f.canvas.height
     }
   }
+  const activePartialVectorMask = () =>
+    floatRef.current?.partialVectorMask ?? partialVectorMaskRef.current
   const paintStackSlot = (
     ctx: CanvasRenderingContext2D,
     id: PaintLayerId,
@@ -5068,7 +5074,9 @@ export function IconPaintEditor({
     const skip = (l: LineObj) => !!(skipId && l.id === skipId && l.type === 'text')
     const vis = (l: LineObj) => isVectorVisible(l)
     const liveDirty = liveDirtyLayers()
-    const useSlotCache = !!(liveDirty && !liveDirty.has(id)) && !cutHole
+    const partialMask = activePartialVectorMask()
+    const useSlotCache =
+      !!(liveDirty && !liveDirty.has(id)) && !cutHole && !partialMask
     const cacheSlot = id === 'content' ? slotCacheContentRef : slotCacheContainerRef
 
     // Paint order within a slot: below-base objects → base → overlay → above-base objects.
@@ -5080,8 +5088,9 @@ export function IconPaintEditor({
 
     const paintObjectStep = (t: CanvasRenderingContext2D, l: LineObj) => {
       if (skip(l)) return
-      const partialMask = floatRef.current?.partialVectorMask ?? partialVectorMaskRef.current
       const punchPartial = partialMask?.ids.includes(l.id)
+      // While lifted, partial objects live only on the preview overlay — hide on canvas.
+      if (punchPartial && isMarqueeFloatActive()) return
       if (punchPartial && partialMask) {
         const r = partialMask.rect
         t.save()
@@ -6908,6 +6917,7 @@ export function IconPaintEditor({
     selectedIdRef.current = editTarget.id
     setSelectedId(editTarget.id)
     if (!preservePanelSelection) setSelectedLayerIds(new Set([l.id]))
+    if (activePartialVectorMask()) invalidatePaintCaches()
     // Keep lineType a valid Line kind (poly/shape/stamp/text are chosen via their tools).
     if (l.type !== 'poly' && l.type !== 'shape' && l.type !== 'stamp' && l.type !== 'text' && l.type !== 'group') setLineType(l.type)
     if (l.type === 'polyline' || l.type === 'free') setLinePointCount(l.pts.length)
@@ -10393,11 +10403,6 @@ export function IconPaintEditor({
     f: NonNullable<typeof floatRef.current>,
     rotatedBounds: { x: number; y: number; w: number; h: number } | null
   ) => {
-    const ctxs = f.layerCanvases?.length
-      ? f.layerCanvases
-          .map((item) => layerCanvas(item.layer)?.getContext('2d') ?? null)
-          .filter((ctx): ctx is CanvasRenderingContext2D => !!ctx)
-      : targetCtxs()
     const rects: { x: number; y: number; w: number; h: number }[] = []
     if (f.originX != null && f.originY != null) {
       rects.push({
@@ -10409,7 +10414,17 @@ export function IconPaintEditor({
     }
     if (rotatedBounds) rects.push(rotatedBounds)
     rects.push({ x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height })
-    for (const ctx of ctxs) {
+    const layerIds = f.layerCanvases?.length
+      ? f.layerCanvases.map((item) => item.layer)
+      : [...layerOrderRef.current].reverse().filter(layerIsEditable)
+    const clearCtxs: CanvasRenderingContext2D[] = []
+    for (const id of layerIds) {
+      const overlay = layerCanvas(id)?.getContext('2d')
+      const base = baseCanvas(id).getContext('2d')
+      if (overlay) clearCtxs.push(overlay)
+      if (base) clearCtxs.push(base)
+    }
+    for (const ctx of clearCtxs) {
       for (const r of rects) {
         ctx.clearRect(
           Math.floor(r.x),
@@ -10620,7 +10635,6 @@ export function IconPaintEditor({
     if (selectedIds.size) {
       linesRef.current = linesRef.current.filter((line) => !selectedIds.has(line.id))
     }
-    redrawLines()
     const source = cloneCanvas(canvas)
     floatRef.current = {
       canvas,
@@ -10642,6 +10656,7 @@ export function IconPaintEditor({
     }
     marqueeRef.current = null
     setHasMarquee(true)
+    redrawLines()
     drawSelOverlay()
   }
 
@@ -11259,6 +11274,7 @@ export function IconPaintEditor({
     if (tool === 'select') {
       if (floatRotateRef.current) {
         floatRotateRef.current = null
+        redrawLines()
         drawSelOverlay()
         return
       }
@@ -11271,11 +11287,13 @@ export function IconPaintEditor({
       if (floatResizeRef.current) {
         floatResizeRef.current = null
         resizeSnapLockRef.current = { width: false, height: false }
+        redrawLines()
         drawSelOverlay()
         return
       }
       if (floatDragRef.current) {
         floatDragRef.current = null
+        redrawLines()
         drawSelOverlay()
         return
       }
