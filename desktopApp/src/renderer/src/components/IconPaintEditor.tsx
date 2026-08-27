@@ -5036,16 +5036,39 @@ export function IconPaintEditor({
     }
     return dirty.size ? dirty : null
   }
+  const invalidatePaintCaches = () => {
+    slotCacheReadyRef.current = { content: false, container: false }
+    displayNeedsResetRef.current = true
+  }
+  /** While a marquee float is active, punch its lift origin out of every layer slot. */
+  const activeFloatCutHole = (): { x: number; y: number; w: number; h: number } | null => {
+    const f = floatRef.current
+    if (!f || f.selectable || f.originX == null || f.originY == null) return null
+    return {
+      x: f.originX,
+      y: f.originY,
+      w: f.originW ?? f.canvas.width,
+      h: f.originH ?? f.canvas.height
+    }
+  }
   const paintStackSlot = (
     ctx: CanvasRenderingContext2D,
     id: PaintLayerId,
     opts?: { base?: boolean; overlay?: boolean; skipId?: string | null }
   ) => {
+    const cutHole = activeFloatCutHole()
+    if (cutHole) {
+      ctx.save()
+      ctx.beginPath()
+      ctx.rect(0, 0, W, H)
+      ctx.rect(cutHole.x, cutHole.y, cutHole.w, cutHole.h)
+      ctx.clip('evenodd')
+    }
     const skipId = opts?.skipId
     const skip = (l: LineObj) => !!(skipId && l.id === skipId && l.type === 'text')
     const vis = (l: LineObj) => isVectorVisible(l)
     const liveDirty = liveDirtyLayers()
-    const useSlotCache = !!(liveDirty && !liveDirty.has(id))
+    const useSlotCache = !!(liveDirty && !liveDirty.has(id)) && !cutHole
     const cacheSlot = id === 'content' ? slotCacheContentRef : slotCacheContainerRef
 
     // Paint order within a slot: below-base objects → base → overlay → above-base objects.
@@ -5152,6 +5175,7 @@ export function IconPaintEditor({
       paintStepsTo(ctx)
     }
     applyPunchThroughInOrder(ctx)
+    if (cutHole) ctx.restore()
   }
 
   const overlayHasOpaque = (id: PaintLayerId): boolean => {
@@ -10217,6 +10241,14 @@ export function IconPaintEditor({
     }
     const m = marqueeRef.current
     if (m && !selectedIdRef.current) {
+      if (!floatRef.current) liftMarquee()
+      const lifted = floatRef.current
+      if (lifted) {
+        const dp = marqueeFloatDestPivot(lifted)
+        setMarqueeFloatPosition(lifted, { x: dp.x + dx, y: dp.y + dy })
+        drawSelOverlay()
+        return
+      }
       m.x += dx
       m.y += dy
       drawSelOverlay()
@@ -10486,6 +10518,7 @@ export function IconPaintEditor({
     } else {
       partialVectorMaskRef.current = null
     }
+    invalidatePaintCaches()
     floatRef.current = null
     setHasMarquee(false)
     drawSelOverlay()
@@ -10582,6 +10615,7 @@ export function IconPaintEditor({
       drawSelOverlay()
       return
     }
+    invalidatePaintCaches()
     for (const ctx of targetCtxs()) ctx.clearRect(x, y, w, h)
     if (selectedIds.size) {
       linesRef.current = linesRef.current.filter((line) => !selectedIds.has(line.id))
@@ -10627,6 +10661,7 @@ export function IconPaintEditor({
     clearFloatCommitAreas(f, Math.abs(savedRot) > 0.001 || flipSx !== 1 || flipSy !== 1 ? coverageBounds : null)
     rasterizeFloatToOriginalLayers(f)
     partialVectorMaskRef.current = f.partialVectorMask ?? null
+    invalidatePaintCaches()
     marqueeRef.current = {
       x: coverageBounds.x,
       y: coverageBounds.y,
