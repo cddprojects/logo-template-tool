@@ -14,6 +14,16 @@
 #   ADMIN_EMAIL / ADMIN_PASSWORD — required in production for first admin seed
 #   ADMIN_PASSWORD_RESET=true — one-time only; remove after deploy or password keeps resetting
 #   COOKIE_SECURE=true when the site is served over HTTPS (Coolify + TLS)
+#
+# Weekly backup (stored on the same /data volume under /data/backups/YYYY-MM-DD/):
+#   BACKUP_ENABLED=true          default; set false to disable
+#   BACKUP_WEEKDAY=1             0=Sun … 1=Mon (default) … 6=Sat
+#   BACKUP_HOUR_UTC=3            hour to run (UTC), default 03:00 Monday
+#   BACKUP_RETAIN_WEEKS=12       keep 12 weekly snapshots, prune older
+# Manual backup inside container:
+#   node /app/server/scripts/backup-data.mjs
+# Restore one user workspace:
+#   node /app/server/scripts/restore-backup.mjs 2026-08-25 --workspace-only USER_ID
 services:
   web:
     build: .
@@ -26,6 +36,10 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-incorrect}
       ADMIN_PASSWORD_RESET: ${ADMIN_PASSWORD_RESET:-false}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      BACKUP_ENABLED: ${BACKUP_ENABLED:-true}
+      BACKUP_WEEKDAY: ${BACKUP_WEEKDAY:-1}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-3}
+      BACKUP_RETAIN_WEEKS: ${BACKUP_RETAIN_WEEKS:-12}
       NODE_ENV: production
     volumes:
       - kitteasy-data:/data

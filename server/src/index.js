@@ -4,6 +4,7 @@ import cors from 'cors'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { openDb, describeDataStore } from './db.js'
+import { listBackups, startWeeklyBackupScheduler } from './backup.js'
 import { authRoutes } from './routes/auth.js'
 import { usersRoutes } from './routes/users.js'
 import { templatesRoutes } from './routes/templates.js'
@@ -40,6 +41,10 @@ app.get('/api/health', (_req, res) => {
       bootMarker: store.bootMarker,
       adminPasswordResetApplied: store.adminPasswordResetApplied
     },
+    backup: {
+      latest: listBackups(dataDir)[0] ?? null,
+      count: listBackups(dataDir).length
+    },
     warnings: store.warnings
   })
 })
@@ -57,4 +62,5 @@ app.use((err, _req, res, _next) => {
 app.listen(port, '0.0.0.0', () => {
   console.log(`[server] listening on :${port}`)
   console.log(`[server] data dir: ${dataDir}`)
+  startWeeklyBackupScheduler(dataDir, db)
 })
