@@ -9,24 +9,27 @@ interface TemplateSortSelectProps {
   onChange: (value: TemplateSortKey) => void
   className?: string
   id?: string
+  showLabel?: boolean
 }
 
 export function TemplateSortSelect({
   value,
   onChange,
   className = '',
-  id
+  id,
+  showLabel = false
 }: TemplateSortSelectProps): JSX.Element {
-  return (
+  const selectClassName =
+    className ||
+    'min-w-[11rem] rounded-md border border-border bg-surface2 px-2 py-1.5 text-[10px] text-text outline-none focus:border-accent'
+
+  const select = (
     <select
       id={id}
       value={value}
       onChange={(e) => onChange(e.target.value as TemplateSortKey)}
       aria-label="Sort templates"
-      className={
-        className ||
-        'rounded-md border border-border bg-surface2 px-2 py-1 text-[10px] text-text outline-none focus:border-accent'
-      }
+      className={selectClassName}
     >
       {TEMPLATE_SORT_OPTIONS.map((opt) => (
         <option key={opt.value} value={opt.value}>
@@ -34,5 +37,16 @@ export function TemplateSortSelect({
         </option>
       ))}
     </select>
+  )
+
+  if (!showLabel) return select
+
+  return (
+    <div className="flex items-center justify-between gap-2">
+      <label htmlFor={id} className="shrink-0 text-[10px] font-medium text-muted">
+        Sort by
+      </label>
+      {select}
+    </div>
   )
 }

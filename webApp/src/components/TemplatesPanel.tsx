@@ -367,33 +367,37 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
             </label>
           </div>
 
-          <div className="border-b border-border px-4 py-2">
-            <div className="flex items-center gap-2">
-              <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-border bg-surface2 px-2.5 py-1.5 focus-within:border-accent/50">
-                <Search size={12} className="shrink-0 text-muted" />
-                <input
-                  ref={searchRef}
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder={tab === 'mine' ? 'Search my templates…' : 'Search by name or owner…'}
-                  className="min-w-0 flex-1 bg-transparent text-xs text-text placeholder:text-muted outline-none"
-                />
-                {query && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setQuery('')
-                      searchRef.current?.focus()
-                    }}
-                    className="text-muted hover:text-text"
-                    aria-label="Clear search"
-                  >
-                    <X size={11} />
-                  </button>
-                )}
-              </div>
-              <TemplateSortSelect value={sortKey} onChange={handleSortChange} className="shrink-0 rounded-md border border-border bg-surface2 px-2 py-1.5 text-[10px] text-text outline-none focus:border-accent" />
+          <div className="space-y-2 border-b border-border px-4 py-2">
+            <div className="flex items-center gap-1.5 rounded-md border border-border bg-surface2 px-2.5 py-1.5 focus-within:border-accent/50">
+              <Search size={12} className="shrink-0 text-muted" />
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={tab === 'mine' ? 'Search my templates…' : 'Search by name or owner…'}
+                className="min-w-0 flex-1 bg-transparent text-xs text-text placeholder:text-muted outline-none"
+              />
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQuery('')
+                    searchRef.current?.focus()
+                  }}
+                  className="text-muted hover:text-text"
+                  aria-label="Clear search"
+                >
+                  <X size={11} />
+                </button>
+              )}
             </div>
+            <TemplateSortSelect
+              id="templates-panel-sort"
+              showLabel
+              value={sortKey}
+              onChange={handleSortChange}
+              className="min-w-[11rem] max-w-full rounded-md border border-border bg-surface2 px-2 py-1.5 text-[10px] text-text outline-none focus:border-accent"
+            />
           </div>
 
           {list.length > 0 && (

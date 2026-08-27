@@ -119,7 +119,11 @@ export function TemplateSaveModal({ version, onClose }: TemplateSaveModalProps):
 
         <div className="flex items-center justify-between gap-2 border-b border-border px-4 py-2">
           <span className="text-[10px] font-medium text-muted">Your templates</span>
-          <TemplateSortSelect value={sortKey} onChange={handleSortChange} />
+          <TemplateSortSelect
+            id="template-save-sort"
+            value={sortKey}
+            onChange={handleSortChange}
+          />
         </div>
 
         <div className="flex-1 overflow-y-auto px-2 py-2">
