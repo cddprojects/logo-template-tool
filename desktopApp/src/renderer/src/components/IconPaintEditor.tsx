@@ -10595,9 +10595,10 @@ export function IconPaintEditor({
       drawCanvasAtMarqueeTransform(dest, src, sr, sc, dp, rot, sx, sy)
     }
     for (const item of f.layerCanvases) {
-      // item.source holds the full punched stack crop; base stays cleared at origin.
       const overlayCtx = layerCanvas(item.layer)?.getContext('2d')
       if (overlayCtx) drawAt(overlayCtx, item.source)
+      const baseCtx = baseCanvas(item.layer)?.getContext('2d')
+      if (baseCtx) drawAt(baseCtx, item.baseSource)
     }
   }
 
@@ -10785,18 +10786,33 @@ export function IconPaintEditor({
     partialVectorMaskRef.current = null
     const x = Math.round(m.x), y = Math.round(m.y), w = Math.round(m.w), h = Math.round(m.h)
     const activeLayers = [...layerOrderRef.current].reverse().filter(layerIsEditable)
-    const emptyCrop = document.createElement('canvas')
-    emptyCrop.width = w
-    emptyCrop.height = h
     const layerCanvases = activeLayers.map((layer) => {
-      const cropped = cropPaintStackLayer(layer, x, y, w, h)
+      const overlayOnly = document.createElement('canvas')
+      overlayOnly.width = w
+      overlayOnly.height = h
+      const overlayCanvas = layerCanvas(layer)
+      if (overlayCanvas) {
+        overlayOnly.getContext('2d')!.drawImage(overlayCanvas, x, y, w, h, 0, 0, w, h)
+      }
+      const baseOnly = document.createElement('canvas')
+      baseOnly.width = w
+      baseOnly.height = h
+      const base = baseCanvas(layer)
+      if (base) baseOnly.getContext('2d')!.drawImage(base, x, y, w, h, 0, 0, w, h)
+      const cropped = document.createElement('canvas')
+      cropped.width = w
+      cropped.height = h
+      const cropCtx = cropped.getContext('2d')!
+      cropCtx.drawImage(baseOnly, 0, 0)
+      cropCtx.drawImage(overlayOnly, 0, 0)
       return {
         layer,
         canvas: cropped,
-        source: cloneCanvas(cropped),
-        baseSource: cloneCanvas(emptyCrop)
+        source: cloneCanvas(overlayOnly),
+        baseSource: cloneCanvas(baseOnly)
       }
     })
+    // Visible stack (punch-through + vectors) for float preview and stamp baking.
     const canvas = cropVisibleMarqueeComposite(x, y, w, h, activeLayers)
 
     // Only remove vector objects fully contained in the marquee. Partial overlap
