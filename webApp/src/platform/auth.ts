@@ -50,7 +50,8 @@ const WORKSPACE_FETCH_TIMEOUT_MS = 60000
 async function api<T>(
   path: string,
   init?: RequestInit,
-  timeoutMs = API_FETCH_TIMEOUT_MS
+  timeoutMs = API_FETCH_TIMEOUT_MS,
+  opts?: { keepalive?: boolean }
 ): Promise<{ ok: true; data: T } | { ok: false; error: string; status: number }> {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
@@ -59,6 +60,7 @@ async function api<T>(
     const res = await fetch(path, {
       credentials: 'include',
       ...restInit,
+      keepalive: opts?.keepalive ?? false,
       headers: {
         'Content-Type': 'application/json',
         ...(initHeaders ?? {})
@@ -232,7 +234,8 @@ export async function loadWorkspace(): Promise<
 
 export async function saveWorkspace(
   versions: unknown[],
-  history?: unknown
+  history?: unknown,
+  opts?: { keepalive?: boolean }
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const body: { versions: unknown[]; history?: unknown } = { versions }
   // Omit history when undefined so the server keeps the previously stored undo stack.
@@ -243,7 +246,8 @@ export async function saveWorkspace(
       method: 'PUT',
       body: JSON.stringify(body)
     },
-    WORKSPACE_FETCH_TIMEOUT_MS
+    WORKSPACE_FETCH_TIMEOUT_MS,
+    opts
   )
   if (!result.ok) return { ok: false, error: result.error }
   return { ok: true }

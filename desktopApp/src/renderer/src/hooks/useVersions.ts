@@ -377,6 +377,8 @@ export function useVersions() {
   const loadedRef = useRef(false)
   /** Web: false until the server workspace load succeeds — blocks accidental empty saves. */
   const serverHydratedRef = useRef(!isWebRuntime())
+  /** Web: block a late workspace reload from overwriting unsaved local edits. */
+  const dirtySinceHydrateRef = useRef(false)
 
   // Always-current ref so callbacks never need to close over `versions` state.
   // This lets us declare all callbacks with stable identities (empty / [save] deps).
@@ -441,9 +443,12 @@ export function useVersions() {
       saveTimer.current = null
     }
     if (!loadedRef.current || !serverHydratedRef.current) return
-    void window.api.saveVersions(versionsRef.current, serializeHistory()).then((result) => {
+    const keepalive = isWebRuntime() ? { keepalive: true } : undefined
+    void window.api.saveVersions(versionsRef.current, serializeHistory(), keepalive).then((result) => {
       if (result && result.success === false) {
         console.error('[versions] flush save failed:', result.error)
+      } else if (result?.success !== false) {
+        dirtySinceHydrateRef.current = false
       }
     })
   }, [serializeHistory])
@@ -473,6 +478,7 @@ export function useVersions() {
     const finishInitialLoad = (migrated: Version[], historyRaw: unknown) => {
       if (cancelled) return
       serverHydratedRef.current = true
+      dirtySinceHydrateRef.current = false
       setVersionsState(migrated)
       versionsRef.current = migrated
       loadedRef.current = true
@@ -512,9 +518,14 @@ export function useVersions() {
     })
 
     window.api.onVersionsReloaded((raw) => {
+      if (dirtySinceHydrateRef.current) {
+        console.warn('[versions] skipped stale workspace reload — local edits in flight')
+        return
+      }
       const list = Array.isArray(raw) ? raw : []
       const migrated = list.map(migrateVersion)
       serverHydratedRef.current = true
+      dirtySinceHydrateRef.current = false
       loadedRef.current = true
       setVersionsState(migrated)
       versionsRef.current = migrated
@@ -544,7 +555,8 @@ export function useVersions() {
         saveTimer.current = null
       }
       if (loadedRef.current && serverHydratedRef.current) {
-        void window.api.saveVersions(versionsRef.current, serializeHistory())
+        const keepalive = isWebRuntime() ? { keepalive: true } : undefined
+        void window.api.saveVersions(versionsRef.current, serializeHistory(), keepalive)
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -552,12 +564,15 @@ export function useVersions() {
 
   const persist = useCallback((next: Version[]) => {
     if (!loadedRef.current || !serverHydratedRef.current) return
+    dirtySinceHydrateRef.current = true
     if (saveTimer.current) clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => {
       saveTimer.current = null
       void window.api.saveVersions(next, serializeHistory()).then((result) => {
         if (result && result.success === false) {
           console.error('[versions] save failed:', result.error)
+        } else if (result?.success !== false) {
+          dirtySinceHydrateRef.current = false
         }
       })
     }, 400)

@@ -11,6 +11,7 @@ import {
   WEB_SAVE_TEMPLATE,
   type AuthUser
 } from '../platform/auth'
+import { waitForWorkspace } from '../platform/api'
 import { LoginScreen } from './LoginScreen'
 import { AdminUsersModal } from './AdminUsersModal'
 import { TemplateSaveModal } from './TemplateSaveModal'
@@ -19,6 +20,7 @@ import { TemplatesPanel } from './TemplatesPanel'
 export function WebShell(): JSX.Element {
   const [ready, setReady] = useState(false)
   const [user, setUser] = useState<AuthUser | null>(null)
+  const [workspaceReady, setWorkspaceReady] = useState(false)
   const [showTemplates, setShowTemplates] = useState(false)
   const [showAdmin, setShowAdmin] = useState(false)
   const [saveVersion, setSaveVersion] = useState<Version | null>(null)
@@ -37,6 +39,23 @@ export function WebShell(): JSX.Element {
       unsub()
     }
   }, [])
+
+  // Do not mount the editor until the server workspace fetch finishes — otherwise
+  // a late onVersionsReloaded can overwrite in-memory edits before they save.
+  useEffect(() => {
+    if (!user) {
+      setWorkspaceReady(false)
+      return
+    }
+    let cancelled = false
+    setWorkspaceReady(false)
+    void waitForWorkspace().finally(() => {
+      if (!cancelled) setWorkspaceReady(true)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [user?.id])
 
   useEffect(() => {
     const onTemplates = () => setShowTemplates(true)
@@ -63,12 +82,12 @@ export function WebShell(): JSX.Element {
     }
   }, [user])
 
-  if (!ready) {
+  if (!ready || (user && !workspaceReady)) {
     return (
       <div className="flex h-screen w-screen items-center justify-center bg-bg text-text">
         <div className="flex flex-col items-center gap-3">
           <div className="h-8 w-8 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-          <p className="text-sm text-muted">Checking session…</p>
+          <p className="text-sm text-muted">{user ? 'Loading workspace…' : 'Checking session…'}</p>
         </div>
       </div>
     )

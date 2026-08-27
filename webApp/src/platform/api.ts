@@ -28,6 +28,12 @@ const templateImportedListeners: Listener<unknown>[] = []
 const versionsReloadedListeners: Listener<unknown[]>[] = []
 /** Latest workspace payload from the server (history may legitimately be null). */
 let cachedWorkspace: { versions: unknown[]; history: unknown } | null = null
+/** Resolves once the in-flight auth workspace fetch finishes (success or failure). */
+let workspaceReady: Promise<void> = Promise.resolve()
+
+export function waitForWorkspace(): Promise<void> {
+  return workspaceReady
+}
 
 function clearLegacyBrowserVersions(): void {
   try {
@@ -43,6 +49,12 @@ async function reloadWorkspaceForListeners(): Promise<void> {
   cachedWorkspace = { versions: result.versions, history: result.history }
   clearLegacyBrowserVersions()
   versionsReloadedListeners.forEach((cb) => cb(result.versions))
+}
+
+function scheduleWorkspaceReload(): void {
+  workspaceReady = reloadWorkspaceForListeners().catch((err) => {
+    console.error('[web] workspace reload failed:', err)
+  })
 }
 
 async function fetchGoogleFont(
@@ -188,9 +200,10 @@ export function installWebApi(): void {
 
   subscribeAuth((user) => {
     if (user) {
-      void reloadWorkspaceForListeners()
+      scheduleWorkspaceReload()
     } else {
       cachedWorkspace = null
+      workspaceReady = Promise.resolve()
       versionsReloadedListeners.forEach((cb) => cb([]))
     }
   })
@@ -246,6 +259,7 @@ export function installWebApi(): void {
     exportGroup,
 
     loadVersions: async (): Promise<unknown[]> => {
+      await waitForWorkspace()
       if (cachedWorkspace) {
         clearLegacyBrowserVersions()
         return cachedWorkspace.versions
@@ -261,6 +275,7 @@ export function installWebApi(): void {
     },
 
     loadUndoHistory: async (): Promise<unknown> => {
+      await waitForWorkspace()
       // Prefer the history from the latest workspace fetch (null is valid).
       if (cachedWorkspace) return cachedWorkspace.history
       const result = await loadWorkspace()
@@ -272,7 +287,11 @@ export function installWebApi(): void {
       return cachedWorkspace.history
     },
 
-    saveVersions: async (data: unknown[], history?: unknown): Promise<{ success: boolean; error?: string }> => {
+    saveVersions: async (
+      data: unknown[],
+      history?: unknown,
+      opts?: { keepalive?: boolean }
+    ): Promise<{ success: boolean; error?: string }> => {
       // Always persist the latest known undo stack — never wipe server history
       // by omitting it when a caller only saves versions.
       const nextHistory = history !== undefined ? history : cachedWorkspace?.history
@@ -283,7 +302,7 @@ export function installWebApi(): void {
       } else if (cachedWorkspace) {
         cachedWorkspace = { ...cachedWorkspace, versions: data }
       }
-      const result = await saveWorkspace(data, nextHistory)
+      const result = await saveWorkspace(data, nextHistory, opts)
       if (!result.ok) {
         console.error('[web] failed to save workspace to server:', result.error)
         return { success: false, error: result.error }
