@@ -10485,6 +10485,42 @@ export function IconPaintEditor({
     return c
   }
 
+  /** Visible layer stack crop — includes punch-through, vectors, and overlay order. */
+  const cropPaintStackLayer = (
+    layer: PaintLayerId,
+    x: number,
+    y: number,
+    w: number,
+    h: number
+  ): HTMLCanvasElement => {
+    const full = document.createElement('canvas')
+    full.width = W
+    full.height = H
+    paintStackSlot(full.getContext('2d')!, layer, { skipId: textEditIdRef.current })
+    const cropped = document.createElement('canvas')
+    cropped.width = w
+    cropped.height = h
+    cropped.getContext('2d')!.drawImage(full, x, y, w, h, 0, 0, w, h)
+    return cropped
+  }
+
+  const cropVisibleMarqueeComposite = (
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    layers: PaintLayerId[]
+  ): HTMLCanvasElement => {
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')!
+    for (const layer of layers) {
+      ctx.drawImage(cropPaintStackLayer(layer, x, y, w, h), 0, 0)
+    }
+    return canvas
+  }
+
   /** Fit a multi-object marquee to the exact visible bounds of touched selected layers. */
   const fitMarqueeToSelectedLayers = (
     marquee: { x: number; y: number; w: number; h: number }
@@ -10559,10 +10595,9 @@ export function IconPaintEditor({
       drawCanvasAtMarqueeTransform(dest, src, sr, sc, dp, rot, sx, sy)
     }
     for (const item of f.layerCanvases) {
+      // item.source holds the full punched stack crop; base stays cleared at origin.
       const overlayCtx = layerCanvas(item.layer)?.getContext('2d')
       if (overlayCtx) drawAt(overlayCtx, item.source)
-      const baseCtx = baseCanvas(item.layer).getContext('2d')
-      if (baseCtx) drawAt(baseCtx, item.baseSource)
     }
   }
 
@@ -10750,36 +10785,19 @@ export function IconPaintEditor({
     partialVectorMaskRef.current = null
     const x = Math.round(m.x), y = Math.round(m.y), w = Math.round(m.w), h = Math.round(m.h)
     const activeLayers = [...layerOrderRef.current].reverse().filter(layerIsEditable)
+    const emptyCrop = document.createElement('canvas')
+    emptyCrop.width = w
+    emptyCrop.height = h
     const layerCanvases = activeLayers.map((layer) => {
-      const overlayOnly = document.createElement('canvas')
-      overlayOnly.width = w
-      overlayOnly.height = h
-      const overlayCanvas = layerCanvas(layer)
-      if (overlayCanvas) {
-        overlayOnly.getContext('2d')!.drawImage(overlayCanvas, x, y, w, h, 0, 0, w, h)
-      }
-      const baseOnly = document.createElement('canvas')
-      baseOnly.width = w
-      baseOnly.height = h
-      const base = baseCanvas(layer)
-      if (base) baseOnly.getContext('2d')!.drawImage(base, x, y, w, h, 0, 0, w, h)
-      const cropped = document.createElement('canvas')
-      cropped.width = w
-      cropped.height = h
-      const cropCtx = cropped.getContext('2d')!
-      cropCtx.drawImage(baseOnly, 0, 0)
-      cropCtx.drawImage(overlayOnly, 0, 0)
+      const cropped = cropPaintStackLayer(layer, x, y, w, h)
       return {
         layer,
         canvas: cropped,
-        source: cloneCanvas(overlayOnly),
-        baseSource: cloneCanvas(baseOnly)
+        source: cloneCanvas(cropped),
+        baseSource: cloneCanvas(emptyCrop)
       }
     })
-    const canvas = document.createElement('canvas')
-    canvas.width = w; canvas.height = h
-    const compositeCtx = canvas.getContext('2d')!
-    for (const item of layerCanvases) compositeCtx.drawImage(item.canvas, 0, 0)
+    const canvas = cropVisibleMarqueeComposite(x, y, w, h, activeLayers)
 
     // Only remove vector objects fully contained in the marquee. Partial overlap
     // stays on the canvas (raster pixels in the box are still lifted).
@@ -10830,16 +10848,7 @@ export function IconPaintEditor({
           sourcePivot
         }
       : undefined
-    if (previewRoots.length) {
-      const vectors = document.createElement('canvas')
-      vectors.width = W
-      vectors.height = H
-      const vectorsCtx = vectors.getContext('2d')!
-      for (const root of previewRoots) {
-        renderObjectTree(vectorsCtx, root, linesRef.current, isVectorVisible)
-      }
-      compositeCtx.drawImage(vectors, x, y, w, h, 0, 0, w, h)
-    }
+    // canvas already includes vectors + punch-through from paintStackSlot.
     // Empty marquee: do not create an invisible selectable item.
     const pixels = canvas.getContext('2d')!.getImageData(0, 0, w, h).data
     let hasPixels = false
@@ -11227,9 +11236,8 @@ export function IconPaintEditor({
     const m = marqueeRef.current
     if (m && m.w >= 3 && m.h >= 3) {
       const x = Math.round(m.x), y = Math.round(m.y), w = Math.round(m.w), h = Math.round(m.h)
-      const canvas = document.createElement('canvas')
-      canvas.width = w; canvas.height = h
-      canvas.getContext('2d')!.drawImage(compositeTargets(), x, y, w, h, 0, 0, w, h)
+      const layers = [...layerOrderRef.current].reverse().filter(layerIsEditable)
+      const canvas = cropVisibleMarqueeComposite(x, y, w, h, layers)
       rasterClipRef.current = canvas
       clipKindRef.current = 'raster'
       setHasClip(true)
