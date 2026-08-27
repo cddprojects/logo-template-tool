@@ -4,12 +4,19 @@ import {
   type TemplateSortKey
 } from '../utils/templateSort'
 
+interface SortOption {
+  value: string
+  label: string
+}
+
 interface TemplateSortSelectProps {
-  value: TemplateSortKey
-  onChange: (value: TemplateSortKey) => void
+  value: string
+  onChange: (value: string) => void
   className?: string
   id?: string
   showLabel?: boolean
+  options?: SortOption[]
+  ariaLabel?: string
 }
 
 export function TemplateSortSelect({
@@ -17,7 +24,9 @@ export function TemplateSortSelect({
   onChange,
   className = '',
   id,
-  showLabel = false
+  showLabel = false,
+  options = TEMPLATE_SORT_OPTIONS,
+  ariaLabel = 'Sort'
 }: TemplateSortSelectProps): JSX.Element {
   const selectClassName =
     className ||
@@ -27,11 +36,12 @@ export function TemplateSortSelect({
     <select
       id={id}
       value={value}
-      onChange={(e) => onChange(e.target.value as TemplateSortKey)}
-      aria-label="Sort templates"
+      onChange={(e) => onChange(e.target.value)}
+      aria-label={ariaLabel}
       className={selectClassName}
+      title={options.find((opt) => opt.value === value)?.label ?? ariaLabel}
     >
-      {TEMPLATE_SORT_OPTIONS.map((opt) => (
+      {options.map((opt) => (
         <option key={opt.value} value={opt.value}>
           {opt.label}
         </option>

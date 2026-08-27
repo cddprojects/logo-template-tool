@@ -6,6 +6,8 @@ export type TemplateSortKey =
   | 'createdAt-desc'
   | 'createdAt-asc'
 
+export type VersionSortKey = TemplateSortKey | 'manual'
+
 export interface TemplateSortable {
   name: string
   createdAt: string
@@ -30,7 +32,13 @@ export const TEMPLATE_SORT_OPTIONS: { value: TemplateSortKey; label: string }[] 
   { value: 'createdAt-asc', label: 'Created (oldest)' }
 ]
 
-const STORAGE_KEY = 'imggen:template-sort'
+export const VERSION_SORT_OPTIONS: { value: VersionSortKey; label: string }[] = [
+  { value: 'manual', label: 'Manual order' },
+  ...TEMPLATE_SORT_OPTIONS
+]
+
+const TEMPLATE_STORAGE_KEY = 'imggen:template-sort'
+const VERSION_STORAGE_KEY = 'imggen:version-sort'
 
 export function isTemplateSortKey(value: string): value is TemplateSortKey {
   return (SORT_KEYS as string[]).includes(value)
@@ -38,7 +46,7 @@ export function isTemplateSortKey(value: string): value is TemplateSortKey {
 
 export function loadTemplateSortPreference(): TemplateSortKey {
   try {
-    const stored = localStorage.getItem(STORAGE_KEY)
+    const stored = localStorage.getItem(TEMPLATE_STORAGE_KEY)
     if (stored && isTemplateSortKey(stored)) return stored
   } catch {
     /* ignore */
@@ -48,7 +56,29 @@ export function loadTemplateSortPreference(): TemplateSortKey {
 
 export function saveTemplateSortPreference(key: TemplateSortKey): void {
   try {
-    localStorage.setItem(STORAGE_KEY, key)
+    localStorage.setItem(TEMPLATE_STORAGE_KEY, key)
+  } catch {
+    /* ignore */
+  }
+}
+
+export function isVersionSortKey(value: string): value is VersionSortKey {
+  return value === 'manual' || isTemplateSortKey(value)
+}
+
+export function loadVersionSortPreference(): VersionSortKey {
+  try {
+    const stored = localStorage.getItem(VERSION_STORAGE_KEY)
+    if (stored && isVersionSortKey(stored)) return stored
+  } catch {
+    /* ignore */
+  }
+  return 'manual'
+}
+
+export function saveVersionSortPreference(key: VersionSortKey): void {
+  try {
+    localStorage.setItem(VERSION_STORAGE_KEY, key)
   } catch {
     /* ignore */
   }
@@ -68,4 +98,12 @@ export function sortTemplates<T extends TemplateSortable>(items: T[], sortKey: T
     return sortKey.endsWith('-asc') ? cmp : -cmp
   })
   return sorted
+}
+
+export function applyVersionSort<T extends TemplateSortable>(
+  items: T[],
+  sortKey: VersionSortKey
+): T[] {
+  if (sortKey === 'manual') return items
+  return sortTemplates(items, sortKey)
 }

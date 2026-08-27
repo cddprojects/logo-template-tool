@@ -13,7 +13,15 @@ import {
   Upload
 } from './Icons'
 import { ConfirmDialog } from './ConfirmDialog'
+import { TemplateSortSelect } from './TemplateSortSelect'
 import type { Version } from '../types'
+import {
+  applyVersionSort,
+  loadVersionSortPreference,
+  saveVersionSortPreference,
+  VERSION_SORT_OPTIONS,
+  type VersionSortKey
+} from '../utils/templateSort'
 
 type BulkAction = '' | 'export' | 'duplicate' | 'delete'
 
@@ -46,6 +54,7 @@ export function Sidebar({
   const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [exportingId, setExportingId] = useState<string | null>(null)
   const [query, setQuery] = useState('')
+  const [sortKey, setSortKey] = useState<VersionSortKey>(() => loadVersionSortPreference())
   const [checkedIds, setCheckedIds] = useState<Set<string>>(() => new Set())
   const [bulkAction, setBulkAction] = useState<BulkAction>('')
   const [bulkBusy, setBulkBusy] = useState(false)
@@ -54,19 +63,24 @@ export function Sidebar({
 
   const dragIdRef = useRef<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
-  const canReorder = !query.trim()
+  const canReorder = !query.trim() && sortKey === 'manual'
 
-  const filteredVersions = useMemo(
-    () =>
-      query.trim()
-        ? versions.filter((v) => v.name.toLowerCase().includes(query.toLowerCase()))
-        : versions,
-    [query, versions]
-  )
+  const displayVersions = useMemo(() => {
+    const filtered = query.trim()
+      ? versions.filter((v) => v.name.toLowerCase().includes(query.toLowerCase()))
+      : versions
+    return applyVersionSort(filtered, sortKey)
+  }, [query, versions, sortKey])
+
+  const handleSortChange = (next: string) => {
+    const key = next as VersionSortKey
+    setSortKey(key)
+    saveVersionSortPreference(key)
+  }
 
   const allFilteredChecked =
-    filteredVersions.length > 0 && filteredVersions.every((v) => checkedIds.has(v.id))
-  const someFilteredChecked = filteredVersions.some((v) => checkedIds.has(v.id))
+    displayVersions.length > 0 && displayVersions.every((v) => checkedIds.has(v.id))
+  const someFilteredChecked = displayVersions.some((v) => checkedIds.has(v.id))
 
   const toggleChecked = (id: string) => {
     setCheckedIds((prev) => {
@@ -81,9 +95,9 @@ export function Sidebar({
     setCheckedIds((prev) => {
       const next = new Set(prev)
       if (allFilteredChecked) {
-        filteredVersions.forEach((v) => next.delete(v.id))
+        displayVersions.forEach((v) => next.delete(v.id))
       } else {
-        filteredVersions.forEach((v) => next.add(v.id))
+        displayVersions.forEach((v) => next.add(v.id))
       }
       return next
     })
@@ -208,31 +222,41 @@ export function Sidebar({
           </div>
         )}
 
-        <div className="px-2 py-1.5 border-b border-border">
-          <div className="flex items-center gap-1.5 px-2 h-7 rounded-md bg-surface2 border border-transparent focus-within:border-accent/50 transition-colors">
-            <Search size={11} className="text-muted shrink-0" />
-            <input
-              ref={searchRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search versions…"
-              className="flex-1 min-w-0 bg-transparent text-xs text-text placeholder-muted outline-none"
+        <div className="border-b border-border px-2 py-1.5">
+          <div className="flex items-center gap-1">
+            <div className="flex min-w-0 flex-1 items-center gap-1.5 px-2 h-7 rounded-md bg-surface2 border border-transparent focus-within:border-accent/50 transition-colors">
+              <Search size={11} className="text-muted shrink-0" />
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search versions…"
+                className="flex-1 min-w-0 bg-transparent text-xs text-text placeholder-muted outline-none"
+              />
+              {query && (
+                <button
+                  onClick={() => {
+                    setQuery('')
+                    searchRef.current?.focus()
+                  }}
+                  className="text-muted hover:text-text transition-colors"
+                >
+                  <X size={10} />
+                </button>
+              )}
+            </div>
+            <TemplateSortSelect
+              id="versions-sort"
+              value={sortKey}
+              onChange={handleSortChange}
+              options={VERSION_SORT_OPTIONS}
+              ariaLabel="Sort versions"
+              className="h-7 shrink-0 max-w-[5.25rem] rounded-md border border-border bg-surface2 px-1 py-0.5 text-[9px] text-text outline-none focus:border-accent"
             />
-            {query && (
-              <button
-                onClick={() => {
-                  setQuery('')
-                  searchRef.current?.focus()
-                }}
-                className="text-muted hover:text-text transition-colors"
-              >
-                <X size={10} />
-              </button>
-            )}
           </div>
         </div>
 
-        {isWebApp && filteredVersions.length > 0 && (
+        {isWebApp && displayVersions.length > 0 && (
           <div className="flex items-center gap-1.5 border-b border-border px-2 py-1.5">
             <label className="flex items-center gap-1.5 shrink-0 cursor-pointer">
               <input
@@ -282,7 +306,7 @@ export function Sidebar({
             </div>
           )}
 
-          {filteredVersions.length === 0 && versions.length > 0 && (
+          {displayVersions.length === 0 && versions.length > 0 && (
             <div className="flex flex-col items-center justify-center h-full gap-2 p-4 text-center">
               <Search size={18} className="text-muted" />
               <p className="text-xs text-muted">
@@ -293,7 +317,7 @@ export function Sidebar({
             </div>
           )}
 
-          {filteredVersions.map((v) => {
+          {displayVersions.map((v) => {
             const isSelected = v.id === selectedId
             const isHovered = v.id === hoveredId
             const isChecked = checkedIds.has(v.id)
@@ -411,7 +435,7 @@ export function Sidebar({
             {isWebApp && checkedIds.size > 0
               ? `${checkedIds.size} selected`
               : query
-                ? `${filteredVersions.length} / ${versions.length}`
+                ? `${displayVersions.length} / ${versions.length}`
                 : `${versions.length} version${versions.length !== 1 ? 's' : ''}`}
           </p>
           <button
