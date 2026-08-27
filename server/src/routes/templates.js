@@ -96,6 +96,59 @@ export function templatesRoutes(db, dataDir) {
     })
   })
 
+  router.put('/:id', (req, res) => {
+    const row = db
+      .prepare(
+        `SELECT t.id, t.user_id, t.name, t.created_at, t.updated_at, u.email AS owner_email
+         FROM templates t
+         JOIN users u ON u.id = t.user_id
+         WHERE t.id = ?`
+      )
+      .get(req.params.id)
+    if (!row) {
+      res.status(404).json({ error: 'Template not found' })
+      return
+    }
+    if (row.user_id !== req.user.id) {
+      res.status(403).json({ error: 'Not allowed to update this template' })
+      return
+    }
+    const body = req.body || {}
+    const name = String(body.name || body.data?.name || row.name).trim() || row.name
+    const data = body.data ?? body
+    if (!data || typeof data !== 'object') {
+      res.status(400).json({ error: 'Template data required' })
+      return
+    }
+    const payload = {
+      name: data.name || name,
+      description: data.description || '',
+      logos: data.logos ?? [],
+      favicons: data.favicons ?? []
+    }
+    const file = templateFilePath(dataDir, row.user_id, row.id)
+    fs.writeFileSync(file, JSON.stringify(payload, null, 2), 'utf-8')
+    const now = new Date().toISOString()
+    db.prepare('UPDATE templates SET name = ?, updated_at = ? WHERE id = ?').run(
+      payload.name || name,
+      now,
+      row.id
+    )
+    res.json({
+      template: toDto(
+        {
+          id: row.id,
+          user_id: row.user_id,
+          name: payload.name || name,
+          created_at: row.created_at,
+          updated_at: now
+        },
+        row.owner_email,
+        req.user.id
+      )
+    })
+  })
+
   router.delete('/:id', (req, res) => {
     const row = db
       .prepare('SELECT id, user_id, name FROM templates WHERE id = ?')

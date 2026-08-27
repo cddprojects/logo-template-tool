@@ -107,6 +107,10 @@ export function Sidebar({
 
   const handleExportTemplate = async (e: React.MouseEvent, v: Version) => {
     e.stopPropagation()
+    if (isWebApp) {
+      window.dispatchEvent(new CustomEvent('web:save-template', { detail: v }))
+      return
+    }
     await exportVersion(v)
   }
 

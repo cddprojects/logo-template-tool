@@ -161,6 +161,34 @@ export async function createTemplate(payload: {
   return { ok: true, template: result.data.template }
 }
 
+export async function updateTemplate(
+  id: string,
+  payload: {
+    name: string
+    description?: string
+    logos?: unknown
+    favicons?: unknown
+  }
+): Promise<{ ok: true; template: ServerTemplate } | { ok: false; error: string }> {
+  const result = await api<{ template: ServerTemplate }>(
+    `/api/templates/${encodeURIComponent(id)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify({
+        name: payload.name,
+        data: {
+          name: payload.name,
+          description: payload.description ?? '',
+          logos: payload.logos ?? [],
+          favicons: payload.favicons ?? []
+        }
+      })
+    }
+  )
+  if (!result.ok) return { ok: false, error: result.error }
+  return { ok: true, template: result.data.template }
+}
+
 export async function deleteTemplate(
   id: string
 ): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -282,3 +310,4 @@ export function importTemplateIntoEditor(data: Record<string, unknown>, fallback
 
 export const WEB_OPEN_TEMPLATES = 'web:open-templates'
 export const WEB_OPEN_ADMIN = 'web:open-admin'
+export const WEB_SAVE_TEMPLATE = 'web:save-template'

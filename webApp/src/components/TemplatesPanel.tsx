@@ -1,6 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ConfirmDialog } from '@renderer/components/ConfirmDialog'
+import { TemplateSortSelect } from '@renderer/components/TemplateSortSelect'
 import { Search, X } from '@renderer/components/Icons'
+import {
+  loadTemplateSortPreference,
+  saveTemplateSortPreference,
+  sortTemplates,
+  type TemplateSortKey
+} from '@renderer/utils/templateSort'
 import { downloadIgTemplate, pause } from '@renderer/utils/templateFile'
 import {
   copyTemplate,
@@ -31,6 +38,7 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
   const [bulkBusy, setBulkBusy] = useState(false)
   const [pendingDeleteIds, setPendingDeleteIds] = useState<string[] | null>(null)
   const [query, setQuery] = useState('')
+  const [sortKey, setSortKey] = useState<TemplateSortKey>(() => loadTemplateSortPreference())
   const searchRef = useRef<HTMLInputElement>(null)
 
   const refresh = useCallback(async () => {
@@ -64,9 +72,19 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
     })
   }, [list, query])
 
+  const sortedList = useMemo(
+    () => sortTemplates(filteredList, sortKey),
+    [filteredList, sortKey]
+  )
+
+  const handleSortChange = (next: TemplateSortKey) => {
+    setSortKey(next)
+    saveTemplateSortPreference(next)
+  }
+
   const allListChecked =
-    filteredList.length > 0 && filteredList.every((t) => checkedIds.has(t.id))
-  const someListChecked = filteredList.some((t) => checkedIds.has(t.id))
+    sortedList.length > 0 && sortedList.every((t) => checkedIds.has(t.id))
+  const someListChecked = sortedList.some((t) => checkedIds.has(t.id))
 
   const toggleChecked = (id: string) => {
     setCheckedIds((prev) => {
@@ -81,9 +99,9 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
     setCheckedIds((prev) => {
       const next = new Set(prev)
       if (allListChecked) {
-        filteredList.forEach((t) => next.delete(t.id))
+        sortedList.forEach((t) => next.delete(t.id))
       } else {
-        filteredList.forEach((t) => next.add(t.id))
+        sortedList.forEach((t) => next.add(t.id))
       }
       return next
     })
@@ -350,28 +368,31 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
           </div>
 
           <div className="border-b border-border px-4 py-2">
-            <div className="flex items-center gap-1.5 rounded-md border border-border bg-surface2 px-2.5 py-1.5 focus-within:border-accent/50">
-              <Search size={12} className="shrink-0 text-muted" />
-              <input
-                ref={searchRef}
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder={tab === 'mine' ? 'Search my templates…' : 'Search by name or owner…'}
-                className="min-w-0 flex-1 bg-transparent text-xs text-text placeholder:text-muted outline-none"
-              />
-              {query && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setQuery('')
-                    searchRef.current?.focus()
-                  }}
-                  className="text-muted hover:text-text"
-                  aria-label="Clear search"
-                >
-                  <X size={11} />
-                </button>
-              )}
+            <div className="flex items-center gap-2">
+              <div className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md border border-border bg-surface2 px-2.5 py-1.5 focus-within:border-accent/50">
+                <Search size={12} className="shrink-0 text-muted" />
+                <input
+                  ref={searchRef}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder={tab === 'mine' ? 'Search my templates…' : 'Search by name or owner…'}
+                  className="min-w-0 flex-1 bg-transparent text-xs text-text placeholder:text-muted outline-none"
+                />
+                {query && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setQuery('')
+                      searchRef.current?.focus()
+                    }}
+                    className="text-muted hover:text-text"
+                    aria-label="Clear search"
+                  >
+                    <X size={11} />
+                  </button>
+                )}
+              </div>
+              <TemplateSortSelect value={sortKey} onChange={handleSortChange} className="shrink-0 rounded-md border border-border bg-surface2 px-2 py-1.5 text-[10px] text-text outline-none focus:border-accent" />
             </div>
           </div>
 
@@ -426,13 +447,13 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
                   ? 'No templates yet. Export a version or upload a .igtemplate file.'
                   : 'No templates from other users.'}
               </p>
-            ) : filteredList.length === 0 ? (
+            ) : sortedList.length === 0 ? (
               <p className="px-2 py-6 text-center text-xs text-muted">
                 No templates match &ldquo;{query}&rdquo;
               </p>
             ) : (
               <ul className="space-y-0.5">
-                {filteredList.map((t) => (
+                {sortedList.map((t) => (
                   <li
                     key={t.id}
                     className="flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-surface2"
@@ -503,7 +524,7 @@ export function TemplatesPanel({ onClose }: TemplatesPanelProps): JSX.Element {
               {checkedIds.size > 0 && `${checkedIds.size} selected`}
               {checkedIds.size > 0 && query.trim() && ' · '}
               {query.trim() &&
-                `${filteredList.length} / ${list.length} shown`}
+                `${sortedList.length} / ${list.length} shown`}
             </div>
           )}
         </div>
