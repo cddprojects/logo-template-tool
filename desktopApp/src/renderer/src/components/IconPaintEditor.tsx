@@ -1368,6 +1368,26 @@ function floatTransformBounds(f: MarqueeFloatLike): { x: number; y: number; w: n
   return { x: left, y: top, w: Math.max(1, right - left), h: Math.max(1, bottom - top) }
 }
 
+function pointInMarqueeFloat(f: MarqueeFloatLike, pt: Pt): boolean {
+  const w = f.canvas.width
+  const h = f.canvas.height
+  const rot = f.rot ?? 0
+  const flipSx = f.scaleX ?? 1
+  const flipSy = f.scaleY ?? 1
+  if (!rot && flipSx === 1 && flipSy === 1) {
+    return pt.x >= f.x && pt.x <= f.x + w && pt.y >= f.y && pt.y <= f.y + h
+  }
+  const corners = marqueeFloatCorners(f)
+  return pointInPoly(corners, pt)
+}
+
+function marqueeFloatRotatePinHit(f: MarqueeFloatLike, pt: Pt): boolean {
+  const w = f.canvas.width
+  const h = f.canvas.height
+  const { dp, rot } = marqueeFloatTransform(f)
+  return rectRotatePinHit(f.x, f.y, w, h, pt, rot, dp)
+}
+
 function lineReshapeable(l: LineObj): boolean {
   if (l.type === 'text') return !!(l.text?.trim())
   if (l.type === 'stamp') return l.pts.length >= 2 && !!l.imageDataUrl
@@ -10436,8 +10456,12 @@ export function IconPaintEditor({
     const compositeCtx = canvas.getContext('2d')!
     for (const item of layerCanvases) compositeCtx.drawImage(item.canvas, 0, 0)
 
-    // Only lift vector objects fully contained in the marquee. Partial overlap
+    // Only remove vector objects fully contained in the marquee. Partial overlap
     // stays on the canvas (raster pixels in the box are still lifted).
+    const intersectsMarquee = (line: LineObj) => {
+      const b = boundsForLine(line)
+      return b.x + b.w >= x && b.x <= x + w && b.y + b.h >= y && b.y <= y + h
+    }
     const fullyInsideMarquee = (line: LineObj) => {
       const b = boundsForLine(line)
       return (
@@ -10447,8 +10471,11 @@ export function IconPaintEditor({
         b.y + b.h <= y + h
       )
     }
-    const roots = linesRef.current.filter(
+    const liftRoots = linesRef.current.filter(
       (line) => !line.parentId && isVectorVisible(line) && fullyInsideMarquee(line)
+    )
+    const previewRoots = linesRef.current.filter(
+      (line) => !line.parentId && isVectorVisible(line) && intersectsMarquee(line)
     )
     const selectedIds = new Set<string>()
     const includeSubtree = (id: string) => {
@@ -10458,7 +10485,7 @@ export function IconPaintEditor({
         if (child.parentId === id) includeSubtree(child.id)
       }
     }
-    for (const root of roots) includeSubtree(root.id)
+    for (const root of liftRoots) includeSubtree(root.id)
     const sourcePivot = rectCenter(x, y, w, h)
     const vectorState = selectedIds.size
       ? {
@@ -10468,12 +10495,12 @@ export function IconPaintEditor({
           sourcePivot
         }
       : undefined
-    if (roots.length) {
+    if (previewRoots.length) {
       const vectors = document.createElement('canvas')
       vectors.width = W
       vectors.height = H
       const vectorsCtx = vectors.getContext('2d')!
-      for (const root of roots) {
+      for (const root of previewRoots) {
         renderObjectTree(vectorsCtx, root, linesRef.current, isVectorVisible)
       }
       compositeCtx.drawImage(vectors, x, y, w, h, 0, 0, w, h)
@@ -10485,8 +10512,6 @@ export function IconPaintEditor({
       if (pixels[i] > 0) { hasPixels = true; break }
     }
     if (!hasPixels) {
-      marqueeRef.current = null
-      setHasMarquee(false)
       drawSelOverlay()
       return
     }
@@ -11189,11 +11214,15 @@ export function IconPaintEditor({
 
       // Floating selection (scale mode)
       if (f) {
+        const isMarquee = !!(f.layerCanvases?.length || f.sourceLayer)
         const rot = f.rot ?? 0
         const pivot = f.vectorState
           ? floatDestPivot(f, f.vectorState.sourceRect)
           : floatRotationPivot(f)
-        if (rectRotatePinHit(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)) {
+        const pinHit = isMarquee
+          ? marqueeFloatRotatePinHit(f, pt)
+          : rectRotatePinHit(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)
+        if (pinHit) {
           floatRotateRef.current = {
             center: pivot,
             startAng: Math.atan2(pt.y - pivot.y, pt.x - pivot.x),
@@ -11225,12 +11254,22 @@ export function IconPaintEditor({
           startPointerDragCapture()
           return
         }
-        if (pointInRotatedRect(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)) {
+        const inside = isMarquee
+          ? pointInMarqueeFloat(f, pt)
+          : pointInRotatedRect(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)
+        if (inside) {
           floatDragRef.current = { startPt: pt, originFx: f.x, originFy: f.y }
           startPointerDragCapture()
           return
         }
-        commitFloat()
+        if (f.selectable) {
+          commitFloat()
+        } else if (isMarquee) {
+          floatToCoverageMarquee()
+        } else {
+          commitFloat()
+        }
+        return
       }
 
       // Unlifted marquee (coverage mode)
@@ -11240,11 +11279,13 @@ export function IconPaintEditor({
           const fl = floatRef.current
           if (fl) {
             setMarqueeMode('scale')
-            const pivot = floatRotationPivot(fl)
+            const pivot = fl.vectorState
+              ? floatDestPivot(fl, fl.vectorState.sourceRect)
+              : floatRotationPivot(fl)
             floatRotateRef.current = {
               center: pivot,
               startAng: Math.atan2(pt.y - pivot.y, pt.x - pivot.x),
-              startRot: 0
+              startRot: fl.rot ?? 0
             }
             startPointerDragCapture()
           }
@@ -11282,12 +11323,12 @@ export function IconPaintEditor({
           startPointerDragCapture()
           return
         }
-        // Clicking outside ends the temporary edit and merges it back into the
-        // original checked raster layers; no persistent object layer is added.
-        liftMarquee()
-        if (floatRef.current) commitFloat()
+        // Click outside the box keeps the coverage marquee active (Enter to finalize).
         return
       }
+
+      // Start a new marquee only when nothing is already selected.
+      if (floatRef.current || marqueeRef.current) return
 
       // A drag may begin in the surrounding stage; use its nearest canvas point.
       const start = clampToCanvas(pt)
@@ -13281,7 +13322,11 @@ export function IconPaintEditor({
       <PreviewStage
         className="flex-1 min-h-0"
         onStageMouseDown={(e) => {
-          if (tool === 'select' && e.button === 0) onDown(e)
+          if (tool !== 'select' || e.button !== 0) return
+          // Clicks on the stage gutter must not start a new marquee or finalize
+          // an active one — only the preview canvas handles those.
+          if (floatRef.current || marqueeRef.current) return
+          onDown(e)
         }}
       >
         <div
