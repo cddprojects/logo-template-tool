@@ -1214,6 +1214,73 @@ function alphaBoundsFromCanvas(canvas: HTMLCanvasElement | null): { x: number; y
     : { x: left, y: top, w: right - left + 1, h: bottom - top + 1 }
 }
 
+function removeLineSubtree(allLines: LineObj[], rootId: string): LineObj[] {
+  const drop = new Set<string>()
+  const walk = (id: string) => {
+    drop.add(id)
+    for (const l of allLines) {
+      if (l.parentId === id) walk(l.id)
+    }
+  }
+  walk(rootId)
+  return allLines.filter((l) => !drop.has(l.id))
+}
+
+/** Replace a partially-cut vector with a raster stamp of the uncut remainder. */
+function rasterizeRemainderAfterMarqueeCut(
+  W: number,
+  H: number,
+  line: LineObj,
+  cutRect: { x: number; y: number; w: number; h: number },
+  allLines: LineObj[],
+  vis: (l: LineObj) => boolean
+): { lines: LineObj[]; added: LineObj[] } {
+  const tmp = takeCanvas(W, H)
+  try {
+    const t = tmp.getContext('2d')!
+    t.clearRect(0, 0, W, H)
+    t.save()
+    t.beginPath()
+    t.rect(0, 0, W, H)
+    t.rect(cutRect.x, cutRect.y, cutRect.w, cutRect.h)
+    t.clip('evenodd')
+    renderObjectTree(t, line, allLines, vis)
+    t.restore()
+    const bounds = alphaBoundsFromCanvas(tmp)
+    const without = removeLineSubtree(allLines, line.id)
+    if (!bounds) return { lines: without, added: [] }
+    const crop = document.createElement('canvas')
+    crop.width = bounds.w
+    crop.height = bounds.h
+    crop.getContext('2d')!.drawImage(tmp, bounds.x, bounds.y, bounds.w, bounds.h, 0, 0, bounds.w, bounds.h)
+    const dataUrl = crop.toDataURL('image/png')
+    ensureStampImage(dataUrl)
+    const stamp: LineObj = {
+      id: genId(),
+      type: 'stamp',
+      pts: [
+        { x: bounds.x, y: bounds.y },
+        { x: bounds.x + bounds.w, y: bounds.y + bounds.h }
+      ],
+      startCap: 'none',
+      endCap: 'none',
+      dash: 'solid',
+      thickness: 0,
+      color: '#000000ff',
+      imageDataUrl: dataUrl,
+      stampSource: 'image',
+      rot: 0,
+      name: line.name ?? (line.type === 'text' ? 'Text' : 'Object'),
+      layer: line.layer,
+      visible: line.visible,
+      editable: line.editable
+    }
+    return { lines: without, added: [stamp] }
+  } finally {
+    releaseCanvas(tmp)
+  }
+}
+
 /** Canvas-space pivot for lifted marquee pixels (box center, adjusted when moved). */
 function floatRotationPivot(f: { x: number; y: number; canvas: HTMLCanvasElement }): Pt {
   return rectCenter(f.x, f.y, f.canvas.width, f.canvas.height)
@@ -1405,10 +1472,47 @@ function pointInMarqueeFloat(f: MarqueeFloatLike, pt: Pt): boolean {
   return pointInPoly(corners, pt)
 }
 
-function marqueeFloatRotatePinHit(f: MarqueeFloatLike, pt: Pt): boolean {
+function marqueeFloatRotatePinPoints(f: MarqueeFloatLike): { anchor: Pt; tip: Pt } {
   const sr = marqueeFloatSourceRect(f)
-  const { dp, rot } = marqueeFloatTransform(f)
-  return rectRotatePinHit(sr.x, sr.y, sr.w, sr.h, pt, rot, dp)
+  const { sc, dp, rot, sx, sy } = marqueeFloatTransform(f)
+  const anchor = mapMarqueePoint({ x: sr.x + sr.w / 2, y: sr.y }, sc, dp, sx, sy, rot)
+  const dx = anchor.x - dp.x
+  const dy = anchor.y - dp.y
+  const len = Math.hypot(dx, dy)
+  const tip =
+    len > 0.5
+      ? { x: anchor.x + (dx / len) * ROTATE_PIN_LEN, y: anchor.y + (dy / len) * ROTATE_PIN_LEN }
+      : { x: anchor.x, y: anchor.y - ROTATE_PIN_LEN }
+  return { anchor, tip }
+}
+
+function drawRotatePinAt(p: CanvasRenderingContext2D, anchor: Pt, tip: Pt) {
+  p.save()
+  p.strokeStyle = '#10b981'
+  p.lineWidth = 2
+  p.setLineDash([])
+  p.beginPath()
+  p.moveTo(anchor.x, anchor.y)
+  p.lineTo(tip.x, tip.y)
+  p.stroke()
+  p.fillStyle = '#ffffff'
+  p.strokeStyle = '#10b981'
+  p.beginPath()
+  p.arc(tip.x, tip.y, 7, 0, Math.PI * 2)
+  p.fill()
+  p.stroke()
+  p.restore()
+}
+
+function marqueeFloatRotatePinHit(f: MarqueeFloatLike, pt: Pt): boolean {
+  const { anchor, tip } = marqueeFloatRotatePinPoints(f)
+  if (dist(pt, tip) <= ROTATE_PIN_HIT_HEAD) return true
+  if (distPtToSegment(pt, anchor, tip) <= ROTATE_PIN_HIT_STEM) return true
+  const left = Math.min(anchor.x, tip.x) - ROTATE_PIN_HIT_PAD
+  const right = Math.max(anchor.x, tip.x) + ROTATE_PIN_HIT_PAD
+  const top = Math.min(anchor.y, tip.y) - ROTATE_PIN_HIT_PAD
+  const bottom = Math.max(anchor.y, tip.y) + ROTATE_PIN_HIT_PAD
+  return pt.x >= left && pt.x <= right && pt.y >= top && pt.y <= bottom
 }
 
 function marqueeFloatDrawParams(
@@ -10287,7 +10391,8 @@ export function IconPaintEditor({
           p.stroke()
         }
         p.restore()
-        drawRectRotatePin(p, sr.x, sr.y, sr.w, sr.h, rot, dp)
+        const { anchor: pinAnchor, tip: pinTip } = marqueeFloatRotatePinPoints(f)
+        drawRotatePinAt(p, pinAnchor, pinTip)
         return
       }
       const pivot = floatRotationPivot(f)
@@ -10487,22 +10592,27 @@ export function IconPaintEditor({
   const applyPermanentMarqueeCuts = (
     mask: { rect: { x: number; y: number; w: number; h: number }; ids: string[] }
   ) => {
-    const next = linesRef.current.map((line) => {
-      if (!mask.ids.includes(line.id)) return line
-      const existing = line.marqueeCutRects ?? []
-      const alreadyCut = existing.some(
-        (r) =>
-          r.x === mask.rect.x &&
-          r.y === mask.rect.y &&
-          r.w === mask.rect.w &&
-          r.h === mask.rect.h
-      )
-      if (alreadyCut) return line
-      return {
-        ...line,
-        marqueeCutRects: [...existing, mask.rect]
+    const idSet = new Set(mask.ids)
+    const rootIds: string[] = []
+    for (const id of mask.ids) {
+      let line = linesRef.current.find((l) => l.id === id)
+      if (!line) continue
+      while (line.parentId && idSet.has(line.parentId)) {
+        line = linesRef.current.find((l) => l.id === line!.parentId)!
       }
-    })
+      if (!rootIds.includes(line.id)) rootIds.push(line.id)
+    }
+
+    let next = [...linesRef.current]
+    const added: LineObj[] = []
+    for (const rootId of rootIds) {
+      const line = next.find((l) => l.id === rootId)
+      if (!line) continue
+      const result = rasterizeRemainderAfterMarqueeCut(W, H, line, mask.rect, next, isVectorVisible)
+      next = result.lines
+      added.push(...result.added)
+    }
+    next = [...next, ...added]
     linesRef.current = next
     commitLines(next)
   }
