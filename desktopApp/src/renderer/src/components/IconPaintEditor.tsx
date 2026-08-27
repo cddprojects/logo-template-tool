@@ -4019,6 +4019,57 @@ function contentRotatePinHit(
   return distPtToSegment(pt, anchor, tip) <= ROTATE_PIN_HIT_STEM
 }
 
+function rectCenter(x: number, y: number, w: number, h: number): Pt {
+  return { x: x + w / 2, y: y + h / 2 }
+}
+
+function rectRotatePinAnchor(x: number, y: number, w: number, h: number, rot = 0): Pt {
+  const top = { x: x + w / 2, y: y }
+  return rot ? rotatePt(top, rectCenter(x, y, w, h), rot) : top
+}
+
+function rectRotatePinTip(x: number, y: number, w: number, h: number, rot = 0): Pt {
+  const anchor = rectRotatePinAnchor(x, y, w, h, rot)
+  const center = rectCenter(x, y, w, h)
+  const dx = anchor.x - center.x
+  const dy = anchor.y - center.y
+  const len = Math.hypot(dx, dy)
+  if (len > 0.5) {
+    return { x: anchor.x + (dx / len) * ROTATE_PIN_LEN, y: anchor.y + (dy / len) * ROTATE_PIN_LEN }
+  }
+  return { x: anchor.x, y: anchor.y - ROTATE_PIN_LEN }
+}
+
+function rectRotatePinHit(x: number, y: number, w: number, h: number, pt: Pt, rot = 0): boolean {
+  const anchor = rectRotatePinAnchor(x, y, w, h, rot)
+  const tip = rectRotatePinTip(x, y, w, h, rot)
+  if (dist(pt, tip) <= ROTATE_PIN_HIT_HEAD) return true
+  if (distPtToSegment(pt, anchor, tip) <= ROTATE_PIN_HIT_STEM) return true
+  const left = Math.min(anchor.x, tip.x) - ROTATE_PIN_HIT_PAD
+  const right = Math.max(anchor.x, tip.x) + ROTATE_PIN_HIT_PAD
+  const top = Math.min(anchor.y, tip.y) - ROTATE_PIN_HIT_PAD
+  const bottom = Math.max(anchor.y, tip.y) + ROTATE_PIN_HIT_PAD
+  return pt.x >= left && pt.x <= right && pt.y >= top && pt.y <= bottom
+}
+
+function rectCorners(x: number, y: number, w: number, h: number, rot = 0): Pt[] {
+  const c = rectCenter(x, y, w, h)
+  const raw = [
+    { x, y },
+    { x: x + w, y },
+    { x: x + w, y: y + h },
+    { x, y: y + h }
+  ]
+  return rot ? raw.map((p) => rotatePt(p, c, rot)) : raw
+}
+
+function pointInRotatedRect(x: number, y: number, w: number, h: number, pt: Pt, rot = 0): boolean {
+  if (!rot) return pt.x >= x && pt.x <= x + w && pt.y >= y && pt.y <= y + h
+  const c = rectCenter(x, y, w, h)
+  const local = rotatePt(pt, c, -rot)
+  return local.x >= x && local.x <= x + w && local.y >= y && local.y <= y + h
+}
+
 // ── Colour helpers (#RRGGBBAA + CSS gradients) ───────────────────────────────
 function normalizeHex(input: string): string | null {
   let h = input.trim()
@@ -4493,6 +4544,8 @@ export function IconPaintEditor({
       selectedIds: string[]
       sourceRect: { x: number; y: number; w: number; h: number }
     }
+    /** Rotation applied while the selection is lifted (scale mode). */
+    rot?: number
   } | null>(null)
   const floatDragRef = useRef<Pt | null>(null)
   /** Corner drag: coverage resizes the marquee rect; scale resizes the float bitmap. */
@@ -4504,6 +4557,11 @@ export function IconPaintEditor({
   const marqueeResizeRef = useRef<{
     corner: 'nw' | 'ne' | 'sw' | 'se'
     start: { x: number; y: number; w: number; h: number }
+  } | null>(null)
+  const floatRotateRef = useRef<{
+    center: Pt
+    startAng: number
+    startRot: number
   } | null>(null)
   /** Hysteresis keeps a 50% resize snap engaged until the pointer moves clearly away. */
   const resizeSnapLockRef = useRef({ width: false, height: false })
@@ -5250,6 +5308,7 @@ export function IconPaintEditor({
     floatRef.current = null
     floatResizeRef.current = null
     floatDragRef.current = null
+    floatRotateRef.current = null
     marqueeResizeRef.current = null
     marqueeRef.current = null
     marqueeStartRef.current = null
@@ -9304,6 +9363,22 @@ export function IconPaintEditor({
     }
     return null
   }
+  const hitRectCorner = (
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    pt: Pt,
+    rot = 0
+  ): Corner | null => {
+    const center = rectCenter(x, y, w, h)
+    const c = cornersOf(x, y, w, h)
+    for (const k of ['nw', 'ne', 'sw', 'se'] as const) {
+      const cornerPt = rot ? rotatePt(c[k], center, rot) : c[k]
+      if (dist(pt, cornerPt) <= CORNER_HIT) return k
+    }
+    return null
+  }
   const resizeRect = (
     corner: Corner,
     start: { x: number; y: number; w: number; h: number },
@@ -9531,35 +9606,179 @@ export function IconPaintEditor({
     f.y = Math.max(0, Math.min(H - nh, Math.round(y)))
   }
 
+  const bakeFloatRotation = (f: NonNullable<typeof floatRef.current>) => {
+    const rot = f.rot ?? 0
+    if (Math.abs(rot) < 0.001) return
+    const w = f.canvas.width
+    const h = f.canvas.height
+    const corners = rectCorners(f.x, f.y, w, h, rot)
+    let left = W, top = H, right = -1, bottom = -1
+    for (const p of corners) {
+      left = Math.min(left, p.x)
+      top = Math.min(top, p.y)
+      right = Math.max(right, p.x)
+      bottom = Math.max(bottom, p.y)
+    }
+    const newW = Math.max(1, Math.round(right - left))
+    const newH = Math.max(1, Math.round(bottom - top))
+    const bakeCanvas = (src: HTMLCanvasElement, sw = w, sh = h): HTMLCanvasElement => {
+      const out = document.createElement('canvas')
+      out.width = newW
+      out.height = newH
+      const ctx = out.getContext('2d')!
+      ctx.imageSmoothingEnabled = true
+      ctx.imageSmoothingQuality = 'high'
+      ctx.translate(newW / 2, newH / 2)
+      ctx.rotate(rot)
+      ctx.drawImage(src, -sw / 2, -sh / 2, sw, sh)
+      return out
+    }
+    f.canvas = bakeCanvas(f.canvas)
+    f.source = cloneCanvas(f.canvas)
+    if (f.layerCanvases) {
+      for (const item of f.layerCanvases) {
+        item.canvas = bakeCanvas(item.canvas, item.canvas.width, item.canvas.height)
+        item.source = cloneCanvas(item.canvas)
+      }
+    }
+    f.x = Math.round(left)
+    f.y = Math.round(top)
+    f.rot = 0
+  }
+
+  const drawRectRotatePin = (
+    p: CanvasRenderingContext2D,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    rot = 0
+  ) => {
+    const anchor = rectRotatePinAnchor(x, y, w, h, rot)
+    const pin = rectRotatePinTip(x, y, w, h, rot)
+    p.save()
+    p.strokeStyle = '#10b981'
+    p.lineWidth = 2
+    p.setLineDash([])
+    p.beginPath()
+    p.moveTo(anchor.x, anchor.y)
+    p.lineTo(pin.x, pin.y)
+    p.stroke()
+    p.fillStyle = '#ffffff'
+    p.strokeStyle = '#10b981'
+    p.beginPath()
+    p.arc(pin.x, pin.y, 7, 0, Math.PI * 2)
+    p.fill()
+    p.stroke()
+    p.restore()
+  }
+
+  const drawFloatRotationGuide = (center: Pt, rot: number, snapped: boolean) => {
+    const p = previewRef.current?.getContext('2d')
+    if (!p) return
+    const rect = previewRef.current?.getBoundingClientRect()
+    const scale = rect?.width ? W / rect.width : 1
+    const radius = 34 * scale
+    const start = -Math.PI / 2
+    const end = start + rot
+    const reference = { x: center.x, y: center.y - radius }
+    const direction = rotatePt(reference, center, rot)
+    const color = snapped ? '#ec4899' : '#22d3ee'
+    const degrees = ((rot * 180 / Math.PI) % 360 + 360) % 360
+    const rounded = Math.round(degrees * 10) / 10
+    const label = `${rounded}°`
+    p.save()
+    p.strokeStyle = color
+    p.fillStyle = color
+    p.lineWidth = Math.max(1, 1.5 * scale)
+    p.setLineDash([5 * scale, 4 * scale])
+    p.beginPath()
+    p.moveTo(center.x, center.y)
+    p.lineTo(reference.x, reference.y)
+    p.moveTo(center.x, center.y)
+    p.lineTo(direction.x, direction.y)
+    p.stroke()
+    p.setLineDash([])
+    if (Math.abs(rot) > 0.002) {
+      p.beginPath()
+      p.arc(center.x, center.y, radius * 0.62, start, end, rot < 0)
+      p.stroke()
+    }
+    p.beginPath()
+    p.arc(center.x, center.y, 3.5 * scale, 0, Math.PI * 2)
+    p.fill()
+    p.font = `600 ${12 * scale}px Inter, sans-serif`
+    const tw = p.measureText(label).width
+    const padX = 6 * scale
+    const padY = 4 * scale
+    const lx = direction.x + 10 * scale
+    const ly = direction.y - 10 * scale
+    p.fillStyle = 'rgba(15, 23, 42, 0.92)'
+    roundedRect(p, lx - padX, ly - 12 * scale - padY, tw + padX * 2, 16 * scale + padY * 2, 5 * scale)
+    p.fill()
+    p.fillStyle = '#ffffff'
+    p.textAlign = 'left'
+    p.textBaseline = 'alphabetic'
+    p.fillText(label, lx, ly)
+    p.restore()
+  }
+
   const drawSelOverlay = () => {
     const p = previewRef.current?.getContext('2d')
     if (!p) return
     p.clearRect(0, 0, W, H)
-    const box = (x: number, y: number, w: number, h: number, scaled: boolean) => {
+    const box = (
+      x: number,
+      y: number,
+      w: number,
+      h: number,
+      scaled: boolean,
+      rot = 0,
+      image?: HTMLCanvasElement
+    ) => {
+      const color = scaled ? '#f59e0b' : '#3b82f6'
+      const corners = rectCorners(x, y, w, h, rot)
+      if (image) {
+        const cx = x + w / 2
+        const cy = y + h / 2
+        p.save()
+        p.translate(cx, cy)
+        if (rot) p.rotate(rot)
+        p.drawImage(image, -w / 2, -h / 2)
+        p.restore()
+      }
       p.save()
       p.lineWidth = 1.5
       p.setLineDash([6, 4])
       p.strokeStyle = 'rgba(0,0,0,0.55)'
-      p.strokeRect(x + 0.5, y + 0.5, w, h)
-      p.strokeStyle = scaled ? '#f59e0b' : '#3b82f6'
+      p.beginPath()
+      p.moveTo(corners[0].x, corners[0].y)
+      for (let i = 1; i < corners.length; i++) p.lineTo(corners[i].x, corners[i].y)
+      p.closePath()
+      p.stroke()
+      p.strokeStyle = color
       p.lineDashOffset = 3
-      p.strokeRect(x + 0.5, y + 0.5, w, h)
+      p.stroke()
       p.restore()
       p.save()
-      for (const [cx, cy] of [[x, y], [x + w, y], [x, y + h], [x + w, y + h]]) {
-        p.fillStyle = '#ffffff'
-        p.strokeStyle = scaled ? '#f59e0b' : '#3b82f6'
-        p.lineWidth = 2
-        p.setLineDash([])
+      p.fillStyle = '#ffffff'
+      p.strokeStyle = color
+      p.lineWidth = 2
+      p.setLineDash([])
+      for (const corner of corners) {
         p.beginPath()
-        p.arc(cx, cy, 5, 0, Math.PI * 2)
+        p.arc(corner.x, corner.y, 5, 0, Math.PI * 2)
         p.fill()
         p.stroke()
       }
       p.restore()
+      drawRectRotatePin(p, x, y, w, h, rot)
     }
     const f = floatRef.current
-    if (f) { p.drawImage(f.canvas, f.x, f.y); box(f.x, f.y, f.canvas.width, f.canvas.height, true); return }
+    if (f) {
+      box(f.x, f.y, f.canvas.width, f.canvas.height, true, f.rot ?? 0, f.canvas)
+      return
+    }
     const m = marqueeRef.current
     if (m) box(m.x, m.y, m.w, m.h, false)
   }
@@ -9706,13 +9925,31 @@ export function IconPaintEditor({
   const rasterizeFloatToOriginalLayers = (
     f: NonNullable<typeof floatRef.current>
   ) => {
+    const rot = f.rot ?? 0
+    const w = f.canvas.width
+    const h = f.canvas.height
+    const drawAt = (dest: CanvasRenderingContext2D, src: HTMLCanvasElement, sw = w, sh = h) => {
+      if (!rot) {
+        dest.drawImage(src, f.x, f.y)
+        return
+      }
+      const cx = f.x + w / 2
+      const cy = f.y + h / 2
+      dest.save()
+      dest.translate(cx, cy)
+      dest.rotate(rot)
+      dest.drawImage(src, -sw / 2, -sh / 2, sw, sh)
+      dest.restore()
+    }
     if (f.layerCanvases?.length) {
       for (const item of f.layerCanvases) {
-        layerCanvas(item.layer)?.getContext('2d')?.drawImage(item.canvas, f.x, f.y)
+        const ctx = layerCanvas(item.layer)?.getContext('2d')
+        if (ctx) drawAt(ctx, item.canvas, item.canvas.width, item.canvas.height)
       }
       return
     }
-    topEditableCtx()?.drawImage(f.canvas, f.x, f.y)
+    const ctx = topEditableCtx()
+    if (ctx) drawAt(ctx, f.canvas)
   }
 
   const restoreTransformedMarqueeVectors = (
@@ -9723,13 +9960,23 @@ export function IconPaintEditor({
     const sx = f.canvas.width / Math.max(1, state.sourceRect.w)
     const sy = f.canvas.height / Math.max(1, state.sourceRect.h)
     const strokeScale = Math.min(Math.abs(sx), Math.abs(sy))
+    const rot = f.rot ?? 0
+    const scx = state.sourceRect.x + state.sourceRect.w / 2
+    const scy = state.sourceRect.y + state.sourceRect.h / 2
+    const fcx = f.x + f.canvas.width / 2
+    const fcy = f.y + f.canvas.height / 2
     const selected = new Set(state.selectedIds)
     const next = cloneLines(state.originalLines).map((line) => {
       if (!selected.has(line.id)) return line
-      line.pts = line.pts.map((point) => ({
-        x: f.x + (point.x - state.sourceRect.x) * sx,
-        y: f.y + (point.y - state.sourceRect.y) * sy
-      }))
+      line.pts = line.pts.map((point) => {
+        const local = {
+          x: (point.x - scx) * sx,
+          y: (point.y - scy) * sy
+        }
+        const rotated = rot ? rotatePt(local, { x: 0, y: 0 }, rot) : local
+        return { x: fcx + rotated.x, y: fcy + rotated.y }
+      })
+      if (rot) line.rot = (line.rot ?? 0) + rot
       if (line.type === 'text') {
         line.fontSize = Math.max(1, (line.fontSize ?? 48) * strokeScale)
       }
@@ -9766,6 +10013,7 @@ export function IconPaintEditor({
         color: '#000000ff',
         imageDataUrl: dataUrl,
         stampSource: 'image',
+        rot: f.rot ?? 0,
         marqueeItem: !!f.sourceLayer,
         layer: f.sourceLayer ?? activeAddLayer()
       }
@@ -9875,7 +10123,8 @@ export function IconPaintEditor({
       selectable: false,
       sourceLayer: layerOrderRef.current.find(layerIsEditable),
       layerCanvases,
-      vectorState
+      vectorState,
+      rot: 0
     }
     marqueeRef.current = null
     setHasMarquee(true)
@@ -10332,6 +10581,19 @@ export function IconPaintEditor({
         return
       }
       // Scale: resize the floating bitmap
+      const fr = floatRotateRef.current
+      if (fr && f) {
+        const ang = Math.atan2(pt.y - fr.center.y, pt.x - fr.center.x)
+        const rawRot = fr.startRot + (ang - fr.startAng)
+        const snapStep = Math.PI / 12
+        const nearest = Math.round(rawRot / snapStep) * snapStep
+        const difference = Math.atan2(Math.sin(rawRot - nearest), Math.cos(rawRot - nearest))
+        const snapped = Math.abs(difference) <= (3 * Math.PI / 180)
+        f.rot = snapped ? nearest : rawRot
+        drawSelOverlay()
+        drawFloatRotationGuide(fr.center, f.rot ?? 0, snapped)
+        return
+      }
       const rz = floatResizeRef.current
       const f = floatRef.current
       if (rz && f) {
@@ -10457,6 +10719,11 @@ export function IconPaintEditor({
     cancelPaintView()
     if (tool === 'line' || tool === 'freepoly' || tool === 'pointer' || tool === 'shape' || tool === 'text' || tool === 'reshape') { lineUp(pt); return }
     if (tool === 'select') {
+      if (floatRotateRef.current) {
+        floatRotateRef.current = null
+        drawSelOverlay()
+        return
+      }
       if (marqueeResizeRef.current) {
         marqueeResizeRef.current = null
         resizeSnapLockRef.current = { width: false, height: false }
@@ -10527,8 +10794,22 @@ export function IconPaintEditor({
 
       // Floating selection (scale mode)
       if (f) {
-        const corner = hitCorner(f.x, f.y, f.canvas.width, f.canvas.height, pt)
+        const rot = f.rot ?? 0
+        if (rectRotatePinHit(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot)) {
+          floatRotateRef.current = {
+            center: rectCenter(f.x, f.y, f.canvas.width, f.canvas.height),
+            startAng: Math.atan2(
+              pt.y - rectCenter(f.x, f.y, f.canvas.width, f.canvas.height).y,
+              pt.x - rectCenter(f.x, f.y, f.canvas.width, f.canvas.height).x
+            ),
+            startRot: rot
+          }
+          startPointerDragCapture()
+          return
+        }
+        const corner = hitRectCorner(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot)
         if (corner) {
+          if (Math.abs(rot) > 0.001) bakeFloatRotation(f)
           if (marqueeMode === 'coverage') {
             // Switch conceptually shouldn't have float in coverage, but be safe:
             floatToCoverageMarquee()
@@ -10549,7 +10830,7 @@ export function IconPaintEditor({
           startPointerDragCapture()
           return
         }
-        if (pt.x >= f.x && pt.x <= f.x + f.canvas.width && pt.y >= f.y && pt.y <= f.y + f.canvas.height) {
+        if (pointInRotatedRect(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot)) {
           floatDragRef.current = pt
           startPointerDragCapture()
           return
@@ -10559,6 +10840,21 @@ export function IconPaintEditor({
 
       // Unlifted marquee (coverage mode)
       if (m && m.w >= 3 && m.h >= 3) {
+        if (rectRotatePinHit(m.x, m.y, m.w, m.h, pt, 0)) {
+          liftMarquee()
+          const fl = floatRef.current
+          if (fl) {
+            setMarqueeMode('scale')
+            const center = rectCenter(fl.x, fl.y, fl.canvas.width, fl.canvas.height)
+            floatRotateRef.current = {
+              center,
+              startAng: Math.atan2(pt.y - center.y, pt.x - center.x),
+              startRot: 0
+            }
+            startPointerDragCapture()
+          }
+          return
+        }
         const corner = hitCorner(m.x, m.y, m.w, m.h, pt)
         if (corner) {
           if (marqueeMode === 'scale') {
