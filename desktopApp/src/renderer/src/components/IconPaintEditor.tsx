@@ -1263,6 +1263,111 @@ function drawCanvasRotatedAt(
   ctx.restore()
 }
 
+/** Draw a lifted marquee float with live flip / resize / rotation (matches vector commit math). */
+function drawCanvasAtMarqueeTransform(
+  ctx: CanvasRenderingContext2D,
+  src: HTMLCanvasElement,
+  x: number,
+  y: number,
+  sw: number,
+  sh: number,
+  sc: Pt,
+  dp: Pt,
+  rot: number,
+  flipSx: number,
+  flipSy: number
+): void {
+  if (!rot && flipSx === 1 && flipSy === 1) {
+    ctx.drawImage(src, x, y, sw, sh)
+    return
+  }
+  ctx.save()
+  ctx.translate(dp.x, dp.y)
+  ctx.rotate(rot)
+  ctx.scale(flipSx, flipSy)
+  ctx.translate(-sc.x, -sc.y)
+  ctx.drawImage(src, x, y, sw, sh)
+  ctx.restore()
+}
+
+type MarqueeFloatLike = {
+  x: number
+  y: number
+  canvas: HTMLCanvasElement
+  rot?: number
+  scaleX?: number
+  scaleY?: number
+  originX?: number
+  originY?: number
+  originW?: number
+  originH?: number
+  vectorState?: {
+    sourcePivot: Pt
+    sourceRect: { x: number; y: number; w: number; h: number }
+  }
+}
+
+function marqueeFloatSourceRect(f: MarqueeFloatLike): { x: number; y: number; w: number; h: number } {
+  const w = f.canvas.width
+  const h = f.canvas.height
+  return f.vectorState?.sourceRect ?? {
+    x: f.originX ?? f.x,
+    y: f.originY ?? f.y,
+    w: f.originW ?? w,
+    h: f.originH ?? h
+  }
+}
+
+function marqueeFloatTransform(
+  f: MarqueeFloatLike
+): { sc: Pt; dp: Pt; rot: number; sx: number; sy: number; flipSx: number; flipSy: number } {
+  const w = f.canvas.width
+  const h = f.canvas.height
+  const sourceRect = marqueeFloatSourceRect(f)
+  const sc = f.vectorState?.sourcePivot ?? rectCenter(sourceRect.x, sourceRect.y, sourceRect.w, sourceRect.h)
+  const dp = f.vectorState ? floatDestPivot(f, sourceRect) : floatRotationPivot(f)
+  const flipSx = f.scaleX ?? 1
+  const flipSy = f.scaleY ?? 1
+  const resizeSx = f.vectorState ? w / Math.max(1, sourceRect.w) : 1
+  const resizeSy = f.vectorState ? h / Math.max(1, sourceRect.h) : 1
+  return {
+    sc,
+    dp,
+    rot: f.rot ?? 0,
+    sx: resizeSx * flipSx,
+    sy: resizeSy * flipSy,
+    flipSx,
+    flipSy
+  }
+}
+
+function marqueeFloatCorners(f: MarqueeFloatLike): Pt[] {
+  const sr = marqueeFloatSourceRect(f)
+  const { sc, dp, rot, sx, sy } = marqueeFloatTransform(f)
+  const raw = [
+    { x: sr.x, y: sr.y },
+    { x: sr.x + sr.w, y: sr.y },
+    { x: sr.x + sr.w, y: sr.y + sr.h },
+    { x: sr.x, y: sr.y + sr.h }
+  ]
+  return raw.map((p) => mapMarqueePoint(p, sc, dp, sx, sy, rot))
+}
+
+function floatTransformBounds(f: MarqueeFloatLike): { x: number; y: number; w: number; h: number } {
+  const corners = marqueeFloatCorners(f)
+  let left = Infinity
+  let top = Infinity
+  let right = -Infinity
+  let bottom = -Infinity
+  for (const p of corners) {
+    left = Math.min(left, p.x)
+    top = Math.min(top, p.y)
+    right = Math.max(right, p.x)
+    bottom = Math.max(bottom, p.y)
+  }
+  return { x: left, y: top, w: Math.max(1, right - left), h: Math.max(1, bottom - top) }
+}
+
 function lineReshapeable(l: LineObj): boolean {
   if (l.type === 'text') return !!(l.text?.trim())
   if (l.type === 'stamp') return l.pts.length >= 2 && !!l.imageDataUrl
@@ -4718,6 +4823,9 @@ export function IconPaintEditor({
     }
     /** Rotation applied while the selection is lifted (scale mode). */
     rot?: number
+    /** Mirror scale accumulated while lifted (±1 toggles on flip). */
+    scaleX?: number
+    scaleY?: number
   } | null>(null)
   const floatDragRef = useRef<Pt | null>(null)
   /** Corner drag: coverage resizes the marquee rect; scale resizes the float bitmap. */
@@ -5615,6 +5723,24 @@ export function IconPaintEditor({
   /** Rotate / flip the selected object(s), or the full canvas when nothing is selected. */
   const applyCanvasXform = (mode: CanvasXform) => {
     if (textEditIdRef.current) endTextEditRef.current()
+
+    const isMarqueeFloat = (candidate: typeof floatRef.current) =>
+      !!(candidate && (candidate.layerCanvases?.length || candidate.sourceLayer))
+
+    if (marqueeRef.current && !floatRef.current) {
+      clipActionsRef.current.liftMarquee()
+    }
+
+    const marqueeFloat = floatRef.current
+    if (isMarqueeFloat(marqueeFloat)) {
+      if (mode === 'flipH') marqueeFloat.scaleX = -(marqueeFloat.scaleX ?? 1)
+      else if (mode === 'flipV') marqueeFloat.scaleY = -(marqueeFloat.scaleY ?? 1)
+      else marqueeFloat.rot = normalizeRot(composeCanvasRot(marqueeFloat.rot ?? 0, mode))
+      drawSelOverlay()
+      pushHistory()
+      return
+    }
+
     if (floatRef.current) { floatRef.current = null; setHasMarquee(false) }
     if (marqueeRef.current) { marqueeRef.current = null; setHasMarquee(false) }
 
@@ -9952,10 +10078,44 @@ export function IconPaintEditor({
     }
     const f = floatRef.current
     if (f) {
-      const pivot = f.vectorState
-        ? floatDestPivot(f, f.vectorState.sourceRect)
-        : floatRotationPivot(f)
-      box(f.x, f.y, f.canvas.width, f.canvas.height, true, f.rot ?? 0, f.canvas, pivot)
+      const w = f.canvas.width
+      const h = f.canvas.height
+      const isMarquee = !!(f.layerCanvases?.length || f.sourceLayer)
+      if (isMarquee) {
+        const { sc, dp, rot, flipSx, flipSy } = marqueeFloatTransform(f)
+        const corners = marqueeFloatCorners(f)
+        const color = '#f59e0b'
+        drawCanvasAtMarqueeTransform(p, f.canvas, f.x, f.y, w, h, sc, dp, rot, flipSx, flipSy)
+        p.save()
+        p.lineWidth = 1.5
+        p.setLineDash([6, 4])
+        p.strokeStyle = 'rgba(0,0,0,0.55)'
+        p.beginPath()
+        p.moveTo(corners[0].x, corners[0].y)
+        for (let i = 1; i < corners.length; i++) p.lineTo(corners[i].x, corners[i].y)
+        p.closePath()
+        p.stroke()
+        p.strokeStyle = color
+        p.lineDashOffset = 3
+        p.stroke()
+        p.restore()
+        p.save()
+        p.fillStyle = '#ffffff'
+        p.strokeStyle = color
+        p.lineWidth = 2
+        p.setLineDash([])
+        for (const corner of corners) {
+          p.beginPath()
+          p.arc(corner.x, corner.y, 5, 0, Math.PI * 2)
+          p.fill()
+          p.stroke()
+        }
+        p.restore()
+        drawRectRotatePin(p, f.x, f.y, w, h, rot, dp)
+        return
+      }
+      const pivot = floatRotationPivot(f)
+      box(f.x, f.y, w, h, true, f.rot ?? 0, f.canvas, pivot)
       return
     }
     const m = marqueeRef.current
@@ -10104,14 +10264,11 @@ export function IconPaintEditor({
   const rasterizeFloatToOriginalLayers = (
     f: NonNullable<typeof floatRef.current>
   ) => {
-    const rot = f.rot ?? 0
     const w = f.canvas.width
     const h = f.canvas.height
-    const pivot = f.vectorState
-      ? floatDestPivot(f, f.vectorState.sourceRect)
-      : floatRotationPivot(f)
+    const { sc, dp, rot, flipSx, flipSy } = marqueeFloatTransform(f)
     const drawAt = (dest: CanvasRenderingContext2D, src: HTMLCanvasElement, sw = w, sh = h) => {
-      drawCanvasRotatedAt(dest, src, f.x, f.y, sw, sh, pivot, rot)
+      drawCanvasAtMarqueeTransform(dest, src, f.x, f.y, sw, sh, sc, dp, rot, flipSx, flipSy)
     }
     if (f.layerCanvases?.length) {
       for (const item of f.layerCanvases) {
@@ -10164,8 +10321,7 @@ export function IconPaintEditor({
     const state = f.vectorState
     if (!state) return
     const snapshot = state.originalLines
-    const sx = f.canvas.width / Math.max(1, state.sourceRect.w)
-    const sy = f.canvas.height / Math.max(1, state.sourceRect.h)
+    const { sx, sy } = marqueeFloatTransform(f)
     const rot = rotOverride ?? f.rot ?? 0
     const sc = state.sourcePivot
     const dp = floatDestPivot(f, state.sourceRect)
@@ -10242,9 +10398,12 @@ export function IconPaintEditor({
       return
     }
     const savedRot = f.rot ?? 0
-    const rotatedBounds = Math.abs(savedRot) > 0.001 ? floatAxisBounds(f) : null
+    const flipSx = f.scaleX ?? 1
+    const flipSy = f.scaleY ?? 1
+    const needsBounds = Math.abs(savedRot) > 0.001 || flipSx !== 1 || flipSy !== 1
+    const transformedBounds = needsBounds ? floatTransformBounds(f) : null
     restoreTransformedMarqueeVectors(f, savedRot)
-    clearFloatCommitAreas(f, rotatedBounds)
+    clearFloatCommitAreas(f, transformedBounds)
     rasterizeFloatToOriginalLayers(f)
     floatRef.current = null
     setHasMarquee(false)
@@ -10353,11 +10512,14 @@ export function IconPaintEditor({
     const f = floatRef.current
     if (!f) return
     const savedRot = f.rot ?? 0
-    const coverageBounds = Math.abs(savedRot) > 0.001
-      ? floatAxisBounds(f)
+    const flipSx = f.scaleX ?? 1
+    const flipSy = f.scaleY ?? 1
+    const needsBounds = Math.abs(savedRot) > 0.001 || flipSx !== 1 || flipSy !== 1
+    const coverageBounds = needsBounds
+      ? floatTransformBounds(f)
       : { x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height }
     restoreTransformedMarqueeVectors(f, savedRot)
-    clearFloatCommitAreas(f, Math.abs(savedRot) > 0.001 ? coverageBounds : null)
+    clearFloatCommitAreas(f, Math.abs(savedRot) > 0.001 || flipSx !== 1 || flipSy !== 1 ? coverageBounds : null)
     rasterizeFloatToOriginalLayers(f)
     marqueeRef.current = {
       x: coverageBounds.x,
