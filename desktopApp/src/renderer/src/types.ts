@@ -445,6 +445,8 @@ export interface PaintVector {
   keepStrokeOnResize?: boolean
   /** Persistent selection lifted from one base raster layer; hidden from Layers panel. */
   marqueeItem?: boolean
+  /** Regions permanently cut out of this object by marquee (canvas space). */
+  marqueeCutRects?: { x: number; y: number; w: number; h: number }[]
   /** Nondestructive brush/eraser strokes stored in shape/group-local coordinates. */
   paintStrokes?: {
     tool: 'brush' | 'eraser'

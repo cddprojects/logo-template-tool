@@ -373,6 +373,8 @@ interface LineObj {
   keepStrokeOnResize?: boolean
   /** Persistent marquee selection from one base raster layer; not a panel layer. */
   marqueeItem?: boolean
+  /** Regions permanently cut out of this object by marquee (canvas space). */
+  marqueeCutRects?: { x: number; y: number; w: number; h: number }[]
   /** Nondestructive pixel edits replayed over a vector shape. */
   paintStrokes?: ObjectPaintStroke[]
   // text only (pts = [topLeft anchor])
@@ -1320,15 +1322,16 @@ function marqueeFloatSourceRect(f: MarqueeFloatLike): { x: number; y: number; w:
 
 function marqueeFloatDestPivot(f: MarqueeFloatLike): Pt {
   const sourceRect = marqueeFloatSourceRect(f)
-  return f.vectorState
-    ? floatDestPivot(f, sourceRect)
-    : floatRotationPivot(f)
+  if (f.originX != null && f.originY != null) {
+    return floatDestPivot(f, sourceRect)
+  }
+  return floatRotationPivot(f)
 }
 
 function setMarqueeFloatPosition(f: MarqueeFloatLike, dp: Pt): void {
   const sourceRect = marqueeFloatSourceRect(f)
-  const sc = f.vectorState?.sourcePivot ?? rectCenter(sourceRect.x, sourceRect.y, sourceRect.w, sourceRect.h)
-  if (f.vectorState && f.originX != null && f.originY != null) {
+  const sc = rectCenter(sourceRect.x, sourceRect.y, sourceRect.w, sourceRect.h)
+  if (f.originX != null && f.originY != null) {
     f.x = f.originX + (dp.x - sc.x)
     f.y = f.originY + (dp.y - sc.y)
   } else {
@@ -1344,7 +1347,9 @@ function marqueeFloatTransform(
   const h = f.canvas.height
   const sourceRect = marqueeFloatSourceRect(f)
   const sc = f.vectorState?.sourcePivot ?? rectCenter(sourceRect.x, sourceRect.y, sourceRect.w, sourceRect.h)
-  const dp = f.vectorState ? floatDestPivot(f, sourceRect) : floatRotationPivot(f)
+  const dp = f.originX != null && f.originY != null
+    ? floatDestPivot(f, sourceRect)
+    : floatRotationPivot(f)
   const flipSx = f.scaleX ?? 1
   const flipSy = f.scaleY ?? 1
   const resizeSx = f.vectorState ? w / Math.max(1, sourceRect.w) : 1
@@ -1405,6 +1410,36 @@ function marqueeFloatRotatePinHit(f: MarqueeFloatLike, pt: Pt): boolean {
   const h = f.canvas.height
   const { dp, rot } = marqueeFloatTransform(f)
   return rectRotatePinHit(f.x, f.y, w, h, pt, rot, dp)
+}
+
+function bakeMarqueeFloatCanvas(
+  f: MarqueeFloatLike & { canvas: HTMLCanvasElement }
+): { canvas: HTMLCanvasElement; bounds: { x: number; y: number; w: number; h: number } } {
+  const { sc, dp, rot, flipSx, flipSy } = marqueeFloatTransform(f)
+  const bounds = floatTransformBounds(f)
+  const out = document.createElement('canvas')
+  out.width = Math.ceil(bounds.w)
+  out.height = Math.ceil(bounds.h)
+  const ctx = out.getContext('2d')!
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
+  ctx.save()
+  ctx.translate(-bounds.x, -bounds.y)
+  drawCanvasAtMarqueeTransform(
+    ctx,
+    f.canvas,
+    f.x,
+    f.y,
+    f.canvas.width,
+    f.canvas.height,
+    sc,
+    dp,
+    rot,
+    flipSx,
+    flipSy
+  )
+  ctx.restore()
+  return { canvas: out, bounds }
 }
 
 function lineReshapeable(l: LineObj): boolean {
@@ -4852,6 +4887,7 @@ export function IconPaintEditor({
       layer: PaintLayerId
       canvas: HTMLCanvasElement
       source: HTMLCanvasElement
+      baseSource: HTMLCanvasElement
     }[]
     /** Existing vector objects temporarily removed while the marquee transforms them. */
     vectorState?: {
@@ -4893,7 +4929,7 @@ export function IconPaintEditor({
     startAng: number
     startRot: number
   } | null>(null)
-  /** Partial vector punch-out that persists in coverage mode after the float is released. */
+  /** Partial vector punch-out while a float is active (before commit). */
   const partialVectorMaskRef = useRef<{
     rect: { x: number; y: number; w: number; h: number }
     ids: string[]
@@ -5040,10 +5076,6 @@ export function IconPaintEditor({
     slotCacheReadyRef.current = { content: false, container: false }
     displayNeedsResetRef.current = true
   }
-  const isMarqueeFloatActive = () => {
-    const f = floatRef.current
-    return !!(f && !f.selectable && (f.layerCanvases?.length || f.sourceLayer))
-  }
   /** While a marquee float is active, punch its lift origin out of every layer slot. */
   const activeFloatCutHole = (): { x: number; y: number; w: number; h: number } | null => {
     const f = floatRef.current
@@ -5055,8 +5087,9 @@ export function IconPaintEditor({
       h: f.originH ?? f.canvas.height
     }
   }
-  const activePartialVectorMask = () =>
-    floatRef.current?.partialVectorMask ?? partialVectorMaskRef.current
+  const activePartialVectorMask = () => floatRef.current?.partialVectorMask ?? null
+  const linesHaveMarqueeCutRects = () =>
+    linesRef.current.some((l) => (l.marqueeCutRects?.length ?? 0) > 0)
   const paintStackSlot = (
     ctx: CanvasRenderingContext2D,
     id: PaintLayerId,
@@ -5076,7 +5109,10 @@ export function IconPaintEditor({
     const liveDirty = liveDirtyLayers()
     const partialMask = activePartialVectorMask()
     const useSlotCache =
-      !!(liveDirty && !liveDirty.has(id)) && !cutHole && !partialMask
+      !!(liveDirty && !liveDirty.has(id)) &&
+      !cutHole &&
+      !partialMask &&
+      !linesHaveMarqueeCutRects()
     const cacheSlot = id === 'content' ? slotCacheContentRef : slotCacheContainerRef
 
     // Paint order within a slot: below-base objects → base → overlay → above-base objects.
@@ -5088,15 +5124,15 @@ export function IconPaintEditor({
 
     const paintObjectStep = (t: CanvasRenderingContext2D, l: LineObj) => {
       if (skip(l)) return
-      const punchPartial = partialMask?.ids.includes(l.id)
-      // While lifted, partial objects live only on the preview overlay — hide on canvas.
-      if (punchPartial && isMarqueeFloatActive()) return
-      if (punchPartial && partialMask) {
-        const r = partialMask.rect
+      const clipRects: { x: number; y: number; w: number; h: number }[] = [
+        ...(l.marqueeCutRects ?? [])
+      ]
+      if (partialMask?.ids.includes(l.id)) clipRects.push(partialMask.rect)
+      if (clipRects.length) {
         t.save()
         t.beginPath()
         t.rect(0, 0, W, H)
-        t.rect(r.x, r.y, r.w, r.h)
+        for (const r of clipRects) t.rect(r.x, r.y, r.w, r.h)
         t.clip('evenodd')
         renderObjectTree(t, l, linesRef.current, vis)
         t.restore()
@@ -5702,7 +5738,10 @@ export function IconPaintEditor({
     const f = floatRef.current
     if (f?.layerCanvases?.length && f.originX != null && f.originY != null) {
       for (const item of f.layerCanvases) {
-        layerCanvas(item.layer).getContext('2d')?.drawImage(item.source, f.originX, f.originY)
+        const overlay = layerCanvas(item.layer).getContext('2d')
+        if (overlay) overlay.drawImage(item.source, f.originX, f.originY)
+        const base = baseCanvas(item.layer).getContext('2d')
+        if (base) base.drawImage(item.baseSource, f.originX, f.originY)
       }
     }
     if (f?.vectorState) {
@@ -6917,7 +6956,7 @@ export function IconPaintEditor({
     selectedIdRef.current = editTarget.id
     setSelectedId(editTarget.id)
     if (!preservePanelSelection) setSelectedLayerIds(new Set([l.id]))
-    if (activePartialVectorMask()) invalidatePaintCaches()
+    if (activePartialVectorMask() || linesHaveMarqueeCutRects()) invalidatePaintCaches()
     // Keep lineType a valid Line kind (poly/shape/stamp/text are chosen via their tools).
     if (l.type !== 'poly' && l.type !== 'shape' && l.type !== 'stamp' && l.type !== 'text' && l.type !== 'group') setLineType(l.type)
     if (l.type === 'polyline' || l.type === 'free') setLinePointCount(l.pts.length)
@@ -9971,6 +10010,7 @@ export function IconPaintEditor({
         layer: PaintLayerId
         canvas: HTMLCanvasElement
         source: HTMLCanvasElement
+        baseSource: HTMLCanvasElement
       }[]
       vectorState?: {
         originalLines: LineObj[]
@@ -9998,14 +10038,27 @@ export function IconPaintEditor({
     f.canvas = canvas
     if (f.layerCanvases) {
       for (const item of f.layerCanvases) {
-        const scaled = document.createElement('canvas')
-        scaled.width = nw
-        scaled.height = nh
-        const scaledCtx = scaled.getContext('2d')!
-        scaledCtx.imageSmoothingEnabled = true
-        scaledCtx.imageSmoothingQuality = 'high'
-        scaledCtx.drawImage(item.source, 0, 0, nw, nh)
-        item.canvas = scaled
+        const scaleCrop = (src: HTMLCanvasElement) => {
+          const scaled = document.createElement('canvas')
+          scaled.width = nw
+          scaled.height = nh
+          const scaledCtx = scaled.getContext('2d')!
+          scaledCtx.imageSmoothingEnabled = true
+          scaledCtx.imageSmoothingQuality = 'high'
+          scaledCtx.drawImage(src, 0, 0, nw, nh)
+          return scaled
+        }
+        const scaledOverlay = scaleCrop(item.source)
+        const scaledBase = scaleCrop(item.baseSource)
+        item.source = cloneCanvas(scaledOverlay)
+        item.baseSource = cloneCanvas(scaledBase)
+        const combined = document.createElement('canvas')
+        combined.width = nw
+        combined.height = nh
+        const combinedCtx = combined.getContext('2d')!
+        combinedCtx.drawImage(scaledBase, 0, 0)
+        combinedCtx.drawImage(scaledOverlay, 0, 0)
+        item.canvas = combined
       }
     }
     f.x = Math.max(0, Math.min(W - nw, Math.round(x)))
@@ -10045,8 +10098,15 @@ export function IconPaintEditor({
     f.source = cloneCanvas(f.canvas)
     if (f.layerCanvases) {
       for (const item of f.layerCanvases) {
-        item.canvas = bakeCanvas(item.canvas, item.canvas.width, item.canvas.height)
-        item.source = cloneCanvas(item.canvas)
+        item.source = bakeCanvas(item.source, item.source.width, item.source.height)
+        item.baseSource = bakeCanvas(item.baseSource, item.baseSource.width, item.baseSource.height)
+        const combined = document.createElement('canvas')
+        combined.width = item.source.width
+        combined.height = item.source.height
+        const combinedCtx = combined.getContext('2d')!
+        combinedCtx.drawImage(item.baseSource, 0, 0)
+        combinedCtx.drawImage(item.source, 0, 0)
+        item.canvas = combined
       }
     }
     f.x = Math.round(left)
@@ -10372,68 +10432,93 @@ export function IconPaintEditor({
     return c
   }
 
-  const rasterizeFloatToOriginalLayers = (
+  const rasterizeLayerCanvasesFloat = (
     f: NonNullable<typeof floatRef.current>
   ) => {
-    const w = f.canvas.width
-    const h = f.canvas.height
+    if (!f.layerCanvases?.length) return
     const { sc, dp, rot, flipSx, flipSy } = marqueeFloatTransform(f)
-    const drawAt = (dest: CanvasRenderingContext2D, src: HTMLCanvasElement, sw = w, sh = h) => {
+    const drawAt = (
+      dest: CanvasRenderingContext2D,
+      src: HTMLCanvasElement,
+      sw: number,
+      sh: number
+    ) => {
       drawCanvasAtMarqueeTransform(dest, src, f.x, f.y, sw, sh, sc, dp, rot, flipSx, flipSy)
     }
-    // Partial vector cuts only exist in the composite canvas, not per-layer crops.
-    if (f.partialVectorMask?.ids.length) {
-      const ctx = topEditableCtx()
-      if (ctx) drawAt(ctx, f.canvas)
-      return
+    for (const item of f.layerCanvases) {
+      const overlayCtx = layerCanvas(item.layer)?.getContext('2d')
+      if (overlayCtx) drawAt(overlayCtx, item.source, item.source.width, item.source.height)
+      const baseCtx = baseCanvas(item.layer).getContext('2d')
+      if (baseCtx) drawAt(baseCtx, item.baseSource, item.baseSource.width, item.baseSource.height)
     }
-    if (f.layerCanvases?.length) {
-      for (const item of f.layerCanvases) {
-        const ctx = layerCanvas(item.layer)?.getContext('2d')
-        if (ctx) drawAt(ctx, item.canvas, item.canvas.width, item.canvas.height)
-      }
-      return
-    }
-    const ctx = topEditableCtx()
-    if (ctx) drawAt(ctx, f.canvas)
   }
 
-  /** Erase lift hole and rotated footprint before stamping committed pixels. */
-  const clearFloatCommitAreas = (
-    f: NonNullable<typeof floatRef.current>,
-    rotatedBounds: { x: number; y: number; w: number; h: number } | null
-  ) => {
-    const rects: { x: number; y: number; w: number; h: number }[] = []
-    if (f.originX != null && f.originY != null) {
-      rects.push({
-        x: f.originX,
-        y: f.originY,
-        w: f.originW ?? f.canvas.width,
-        h: f.originH ?? f.canvas.height
-      })
+  /** Clear only the lift origin — never wipe the destination before stamping. */
+  const clearFloatOriginAreas = (f: NonNullable<typeof floatRef.current>) => {
+    if (f.originX == null || f.originY == null) return
+    const r = {
+      x: f.originX,
+      y: f.originY,
+      w: f.originW ?? f.canvas.width,
+      h: f.originH ?? f.canvas.height
     }
-    if (rotatedBounds) rects.push(rotatedBounds)
-    rects.push({ x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height })
     const layerIds = f.layerCanvases?.length
       ? f.layerCanvases.map((item) => item.layer)
       : [...layerOrderRef.current].reverse().filter(layerIsEditable)
-    const clearCtxs: CanvasRenderingContext2D[] = []
     for (const id of layerIds) {
-      const overlay = layerCanvas(id)?.getContext('2d')
-      const base = baseCanvas(id).getContext('2d')
-      if (overlay) clearCtxs.push(overlay)
-      if (base) clearCtxs.push(base)
+      layerCanvas(id)?.getContext('2d')?.clearRect(r.x, r.y, r.w, r.h)
+      baseCanvas(id)?.getContext('2d')?.clearRect(r.x, r.y, r.w, r.h)
     }
-    for (const ctx of clearCtxs) {
-      for (const r of rects) {
-        ctx.clearRect(
-          Math.floor(r.x),
-          Math.floor(r.y),
-          Math.ceil(r.w),
-          Math.ceil(r.h)
-        )
+  }
+
+  const applyPermanentMarqueeCuts = (
+    mask: { rect: { x: number; y: number; w: number; h: number }; ids: string[] }
+  ) => {
+    const next = linesRef.current.map((line) => {
+      if (!mask.ids.includes(line.id)) return line
+      const existing = line.marqueeCutRects ?? []
+      const alreadyCut = existing.some(
+        (r) =>
+          r.x === mask.rect.x &&
+          r.y === mask.rect.y &&
+          r.w === mask.rect.w &&
+          r.h === mask.rect.h
+      )
+      if (alreadyCut) return line
+      return {
+        ...line,
+        marqueeCutRects: [...existing, mask.rect]
       }
+    })
+    linesRef.current = next
+    commitLines(next)
+  }
+
+  const addMarqueeItemFromFloat = (f: NonNullable<typeof floatRef.current>) => {
+    const { canvas: baked, bounds } = bakeMarqueeFloatCanvas(f)
+    const dataUrl = baked.toDataURL('image/png')
+    ensureStampImage(dataUrl)
+    const nl: LineObj = {
+      id: genId(),
+      type: 'stamp',
+      pts: [
+        { x: bounds.x, y: bounds.y },
+        { x: bounds.x + bounds.w, y: bounds.y + bounds.h }
+      ],
+      startCap: 'none',
+      endCap: 'none',
+      dash: 'solid',
+      thickness: 0,
+      color: '#000000ff',
+      imageDataUrl: dataUrl,
+      stampSource: 'image',
+      rot: 0,
+      name: 'Marquee cut',
+      layer: f.sourceLayer ?? activeAddLayer()
     }
+    linesRef.current = [...linesRef.current, nl]
+    commitLines(linesRef.current)
+    return nl
   }
 
   const restoreTransformedMarqueeVectors = (
@@ -10521,18 +10606,17 @@ export function IconPaintEditor({
       return
     }
     const savedRot = f.rot ?? 0
-    const flipSx = f.scaleX ?? 1
-    const flipSy = f.scaleY ?? 1
-    const needsBounds = Math.abs(savedRot) > 0.001 || flipSx !== 1 || flipSy !== 1
-    const transformedBounds = needsBounds ? floatTransformBounds(f) : null
     restoreTransformedMarqueeVectors(f, savedRot)
-    clearFloatCommitAreas(f, transformedBounds)
-    rasterizeFloatToOriginalLayers(f)
-    if (f.partialVectorMask) {
-      partialVectorMaskRef.current = f.partialVectorMask
-    } else {
-      partialVectorMaskRef.current = null
+    clearFloatOriginAreas(f)
+    const liftedVectors = f.vectorState?.selectedIds.length ?? 0
+    const hasPartial = !!(f.partialVectorMask?.ids.length)
+    if (liftedVectors) rasterizeLayerCanvasesFloat(f)
+    if (hasPartial || !liftedVectors) {
+      if (hasPartial) applyPermanentMarqueeCuts(f.partialVectorMask!)
+      const nl = addMarqueeItemFromFloat(f)
+      selectLine(nl)
     }
+    partialVectorMaskRef.current = null
     invalidatePaintCaches()
     floatRef.current = null
     setHasMarquee(false)
@@ -10549,12 +10633,30 @@ export function IconPaintEditor({
     const x = Math.round(m.x), y = Math.round(m.y), w = Math.round(m.w), h = Math.round(m.h)
     const activeLayers = [...layerOrderRef.current].reverse().filter(layerIsEditable)
     const layerCanvases = activeLayers.map((layer) => {
+      const overlayOnly = document.createElement('canvas')
+      overlayOnly.width = w
+      overlayOnly.height = h
+      const overlayCanvas = layerCanvas(layer)
+      if (overlayCanvas) {
+        overlayOnly.getContext('2d')!.drawImage(overlayCanvas, x, y, w, h, 0, 0, w, h)
+      }
+      const baseOnly = document.createElement('canvas')
+      baseOnly.width = w
+      baseOnly.height = h
+      const base = baseCanvas(layer)
+      if (base) baseOnly.getContext('2d')!.drawImage(base, x, y, w, h, 0, 0, w, h)
       const cropped = document.createElement('canvas')
       cropped.width = w
       cropped.height = h
-      const sourceCanvas = layerCanvas(layer)
-      if (sourceCanvas) cropped.getContext('2d')!.drawImage(sourceCanvas, x, y, w, h, 0, 0, w, h)
-      return { layer, canvas: cropped, source: cloneCanvas(cropped) }
+      const cropCtx = cropped.getContext('2d')!
+      cropCtx.drawImage(baseOnly, 0, 0)
+      cropCtx.drawImage(overlayOnly, 0, 0)
+      return {
+        layer,
+        canvas: cropped,
+        source: cloneCanvas(overlayOnly),
+        baseSource: cloneCanvas(baseOnly)
+      }
     })
     const canvas = document.createElement('canvas')
     canvas.width = w; canvas.height = h
@@ -10631,7 +10733,10 @@ export function IconPaintEditor({
       return
     }
     invalidatePaintCaches()
-    for (const ctx of targetCtxs()) ctx.clearRect(x, y, w, h)
+    for (const layer of activeLayers) {
+      layerCanvas(layer).getContext('2d')?.clearRect(x, y, w, h)
+      baseCanvas(layer).getContext('2d')?.clearRect(x, y, w, h)
+    }
     if (selectedIds.size) {
       linesRef.current = linesRef.current.filter((line) => !selectedIds.has(line.id))
     }
@@ -10673,9 +10778,31 @@ export function IconPaintEditor({
       ? floatTransformBounds(f)
       : { x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height }
     restoreTransformedMarqueeVectors(f, savedRot)
-    clearFloatCommitAreas(f, Math.abs(savedRot) > 0.001 || flipSx !== 1 || flipSy !== 1 ? coverageBounds : null)
-    rasterizeFloatToOriginalLayers(f)
-    partialVectorMaskRef.current = f.partialVectorMask ?? null
+    clearFloatOriginAreas(f)
+    const liftedVectors = f.vectorState?.selectedIds.length ?? 0
+    if (liftedVectors) rasterizeLayerCanvasesFloat(f)
+    const hasPartial = !!(f.partialVectorMask?.ids.length)
+    if (hasPartial) applyPermanentMarqueeCuts(f.partialVectorMask!)
+    if (hasPartial || !liftedVectors) {
+      const ctx = topEditableCtx()
+      if (ctx) {
+        const { sc, dp, rot, flipSx: fx, flipSy: fy } = marqueeFloatTransform(f)
+        drawCanvasAtMarqueeTransform(
+          ctx,
+          f.canvas,
+          f.x,
+          f.y,
+          f.canvas.width,
+          f.canvas.height,
+          sc,
+          dp,
+          rot,
+          fx,
+          fy
+        )
+      }
+    }
+    partialVectorMaskRef.current = null
     invalidatePaintCaches()
     marqueeRef.current = {
       x: coverageBounds.x,
