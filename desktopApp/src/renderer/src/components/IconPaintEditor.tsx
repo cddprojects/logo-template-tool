@@ -1212,6 +1212,61 @@ function alphaBoundsFromCanvas(canvas: HTMLCanvasElement | null): { x: number; y
     : { x: left, y: top, w: right - left + 1, h: bottom - top + 1 }
 }
 
+/** Canvas-space pivot for lifted marquee pixels — matches content-layer rotate (alpha center). */
+function floatRotationPivot(f: { x: number; y: number; canvas: HTMLCanvasElement }): Pt {
+  const ab = alphaBoundsFromCanvas(f.canvas)
+  if (ab) {
+    return { x: f.x + ab.x + ab.w / 2, y: f.y + ab.y + ab.h / 2 }
+  }
+  return rectCenter(f.x, f.y, f.canvas.width, f.canvas.height)
+}
+
+function floatAxisBounds(f: {
+  x: number
+  y: number
+  canvas: HTMLCanvasElement
+  rot?: number
+}): { x: number; y: number; w: number; h: number } {
+  const w = f.canvas.width
+  const h = f.canvas.height
+  const rot = f.rot ?? 0
+  if (!rot) return { x: f.x, y: f.y, w, h }
+  const pivot = floatRotationPivot(f)
+  const corners = rectCorners(f.x, f.y, w, h, rot, pivot)
+  let left = Infinity
+  let top = Infinity
+  let right = -Infinity
+  let bottom = -Infinity
+  for (const p of corners) {
+    left = Math.min(left, p.x)
+    top = Math.min(top, p.y)
+    right = Math.max(right, p.x)
+    bottom = Math.max(bottom, p.y)
+  }
+  return { x: left, y: top, w: Math.max(1, right - left), h: Math.max(1, bottom - top) }
+}
+
+function drawCanvasRotatedAt(
+  ctx: CanvasRenderingContext2D,
+  src: HTMLCanvasElement,
+  x: number,
+  y: number,
+  sw: number,
+  sh: number,
+  pivot: Pt,
+  rot: number
+): void {
+  if (!rot) {
+    ctx.drawImage(src, x, y, sw, sh)
+    return
+  }
+  ctx.save()
+  ctx.translate(pivot.x, pivot.y)
+  ctx.rotate(rot)
+  ctx.drawImage(src, x - pivot.x, y - pivot.y, sw, sh)
+  ctx.restore()
+}
+
 function lineReshapeable(l: LineObj): boolean {
   if (l.type === 'text') return !!(l.text?.trim())
   if (l.type === 'stamp') return l.pts.length >= 2 && !!l.imageDataUrl
@@ -4023,16 +4078,31 @@ function rectCenter(x: number, y: number, w: number, h: number): Pt {
   return { x: x + w / 2, y: y + h / 2 }
 }
 
-function rectRotatePinAnchor(x: number, y: number, w: number, h: number, rot = 0): Pt {
+function rectRotatePinAnchor(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  rot = 0,
+  pivot?: Pt
+): Pt {
+  const c = pivot ?? rectCenter(x, y, w, h)
   const top = { x: x + w / 2, y: y }
-  return rot ? rotatePt(top, rectCenter(x, y, w, h), rot) : top
+  return rot ? rotatePt(top, c, rot) : top
 }
 
-function rectRotatePinTip(x: number, y: number, w: number, h: number, rot = 0): Pt {
-  const anchor = rectRotatePinAnchor(x, y, w, h, rot)
-  const center = rectCenter(x, y, w, h)
-  const dx = anchor.x - center.x
-  const dy = anchor.y - center.y
+function rectRotatePinTip(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  rot = 0,
+  pivot?: Pt
+): Pt {
+  const c = pivot ?? rectCenter(x, y, w, h)
+  const anchor = rectRotatePinAnchor(x, y, w, h, rot, c)
+  const dx = anchor.x - c.x
+  const dy = anchor.y - c.y
   const len = Math.hypot(dx, dy)
   if (len > 0.5) {
     return { x: anchor.x + (dx / len) * ROTATE_PIN_LEN, y: anchor.y + (dy / len) * ROTATE_PIN_LEN }
@@ -4040,9 +4110,17 @@ function rectRotatePinTip(x: number, y: number, w: number, h: number, rot = 0): 
   return { x: anchor.x, y: anchor.y - ROTATE_PIN_LEN }
 }
 
-function rectRotatePinHit(x: number, y: number, w: number, h: number, pt: Pt, rot = 0): boolean {
-  const anchor = rectRotatePinAnchor(x, y, w, h, rot)
-  const tip = rectRotatePinTip(x, y, w, h, rot)
+function rectRotatePinHit(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  pt: Pt,
+  rot = 0,
+  pivot?: Pt
+): boolean {
+  const anchor = rectRotatePinAnchor(x, y, w, h, rot, pivot)
+  const tip = rectRotatePinTip(x, y, w, h, rot, pivot)
   if (dist(pt, tip) <= ROTATE_PIN_HIT_HEAD) return true
   if (distPtToSegment(pt, anchor, tip) <= ROTATE_PIN_HIT_STEM) return true
   const left = Math.min(anchor.x, tip.x) - ROTATE_PIN_HIT_PAD
@@ -4052,8 +4130,8 @@ function rectRotatePinHit(x: number, y: number, w: number, h: number, pt: Pt, ro
   return pt.x >= left && pt.x <= right && pt.y >= top && pt.y <= bottom
 }
 
-function rectCorners(x: number, y: number, w: number, h: number, rot = 0): Pt[] {
-  const c = rectCenter(x, y, w, h)
+function rectCorners(x: number, y: number, w: number, h: number, rot = 0, pivot?: Pt): Pt[] {
+  const c = pivot ?? rectCenter(x, y, w, h)
   const raw = [
     { x, y },
     { x: x + w, y },
@@ -4063,9 +4141,17 @@ function rectCorners(x: number, y: number, w: number, h: number, rot = 0): Pt[] 
   return rot ? raw.map((p) => rotatePt(p, c, rot)) : raw
 }
 
-function pointInRotatedRect(x: number, y: number, w: number, h: number, pt: Pt, rot = 0): boolean {
+function pointInRotatedRect(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  pt: Pt,
+  rot = 0,
+  pivot?: Pt
+): boolean {
   if (!rot) return pt.x >= x && pt.x <= x + w && pt.y >= y && pt.y <= y + h
-  const c = rectCenter(x, y, w, h)
+  const c = pivot ?? rectCenter(x, y, w, h)
   const local = rotatePt(pt, c, -rot)
   return local.x >= x && local.x <= x + w && local.y >= y && local.y <= y + h
 }
@@ -9372,9 +9458,10 @@ export function IconPaintEditor({
     w: number,
     h: number,
     pt: Pt,
-    rot = 0
+    rot = 0,
+    pivot?: Pt
   ): Corner | null => {
-    const center = rectCenter(x, y, w, h)
+    const center = pivot ?? rectCenter(x, y, w, h)
     const c = cornersOf(x, y, w, h)
     for (const k of ['nw', 'ne', 'sw', 'se'] as const) {
       const cornerPt = rot ? rotatePt(c[k], center, rot) : c[k]
@@ -9614,7 +9701,8 @@ export function IconPaintEditor({
     if (Math.abs(rot) < 0.001) return
     const w = f.canvas.width
     const h = f.canvas.height
-    const corners = rectCorners(f.x, f.y, w, h, rot)
+    const pivot = floatRotationPivot(f)
+    const corners = rectCorners(f.x, f.y, w, h, rot, pivot)
     let left = W, top = H, right = -1, bottom = -1
     for (const p of corners) {
       left = Math.min(left, p.x)
@@ -9622,8 +9710,8 @@ export function IconPaintEditor({
       right = Math.max(right, p.x)
       bottom = Math.max(bottom, p.y)
     }
-    const newW = Math.max(1, Math.round(right - left))
-    const newH = Math.max(1, Math.round(bottom - top))
+    const newW = Math.max(1, Math.ceil(right - left))
+    const newH = Math.max(1, Math.ceil(bottom - top))
     const bakeCanvas = (src: HTMLCanvasElement, sw = w, sh = h): HTMLCanvasElement => {
       const out = document.createElement('canvas')
       out.width = newW
@@ -9631,9 +9719,10 @@ export function IconPaintEditor({
       const ctx = out.getContext('2d')!
       ctx.imageSmoothingEnabled = true
       ctx.imageSmoothingQuality = 'high'
-      ctx.translate(newW / 2, newH / 2)
-      ctx.rotate(rot)
-      ctx.drawImage(src, -sw / 2, -sh / 2, sw, sh)
+      ctx.save()
+      ctx.translate(-left, -top)
+      drawCanvasRotatedAt(ctx, src, f.x, f.y, sw, sh, pivot, rot)
+      ctx.restore()
       return out
     }
     f.canvas = bakeCanvas(f.canvas)
@@ -9655,10 +9744,11 @@ export function IconPaintEditor({
     y: number,
     w: number,
     h: number,
-    rot = 0
+    rot = 0,
+    pivot?: Pt
   ) => {
-    const anchor = rectRotatePinAnchor(x, y, w, h, rot)
-    const pin = rectRotatePinTip(x, y, w, h, rot)
+    const anchor = rectRotatePinAnchor(x, y, w, h, rot, pivot)
+    const pin = rectRotatePinTip(x, y, w, h, rot, pivot)
     p.save()
     p.strokeStyle = '#10b981'
     p.lineWidth = 2
@@ -9737,18 +9827,14 @@ export function IconPaintEditor({
       h: number,
       scaled: boolean,
       rot = 0,
-      image?: HTMLCanvasElement
+      image?: HTMLCanvasElement,
+      pivot?: Pt
     ) => {
       const color = scaled ? '#f59e0b' : '#3b82f6'
-      const corners = rectCorners(x, y, w, h, rot)
+      const corners = rectCorners(x, y, w, h, rot, pivot)
       if (image) {
-        const cx = x + w / 2
-        const cy = y + h / 2
-        p.save()
-        p.translate(cx, cy)
-        if (rot) p.rotate(rot)
-        p.drawImage(image, -w / 2, -h / 2)
-        p.restore()
+        const px = pivot ?? rectCenter(x, y, w, h)
+        drawCanvasRotatedAt(p, image, x, y, w, h, px, rot)
       }
       p.save()
       p.lineWidth = 1.5
@@ -9775,11 +9861,12 @@ export function IconPaintEditor({
         p.stroke()
       }
       p.restore()
-      drawRectRotatePin(p, x, y, w, h, rot)
+      drawRectRotatePin(p, x, y, w, h, rot, pivot)
     }
     const f = floatRef.current
     if (f) {
-      box(f.x, f.y, f.canvas.width, f.canvas.height, true, f.rot ?? 0, f.canvas)
+      const pivot = floatRotationPivot(f)
+      box(f.x, f.y, f.canvas.width, f.canvas.height, true, f.rot ?? 0, f.canvas, pivot)
       return
     }
     const m = marqueeRef.current
@@ -9931,18 +10018,9 @@ export function IconPaintEditor({
     const rot = f.rot ?? 0
     const w = f.canvas.width
     const h = f.canvas.height
+    const pivot = floatRotationPivot(f)
     const drawAt = (dest: CanvasRenderingContext2D, src: HTMLCanvasElement, sw = w, sh = h) => {
-      if (!rot) {
-        dest.drawImage(src, f.x, f.y)
-        return
-      }
-      const cx = f.x + w / 2
-      const cy = f.y + h / 2
-      dest.save()
-      dest.translate(cx, cy)
-      dest.rotate(rot)
-      dest.drawImage(src, -sw / 2, -sh / 2, sw, sh)
-      dest.restore()
+      drawCanvasRotatedAt(dest, src, f.x, f.y, sw, sh, pivot, rot)
     }
     if (f.layerCanvases?.length) {
       for (const item of f.layerCanvases) {
@@ -9964,10 +10042,9 @@ export function IconPaintEditor({
     const sy = f.canvas.height / Math.max(1, state.sourceRect.h)
     const strokeScale = Math.min(Math.abs(sx), Math.abs(sy))
     const rot = f.rot ?? 0
+    const pivot = floatRotationPivot(f)
     const scx = state.sourceRect.x + state.sourceRect.w / 2
     const scy = state.sourceRect.y + state.sourceRect.h / 2
-    const fcx = f.x + f.canvas.width / 2
-    const fcy = f.y + f.canvas.height / 2
     const selected = new Set(state.selectedIds)
     const next = cloneLines(state.originalLines).map((line) => {
       if (!selected.has(line.id)) return line
@@ -9977,7 +10054,7 @@ export function IconPaintEditor({
           y: (point.y - scy) * sy
         }
         const rotated = rot ? rotatePt(local, { x: 0, y: 0 }, rot) : local
-        return { x: fcx + rotated.x, y: fcy + rotated.y }
+        return { x: pivot.x + rotated.x, y: pivot.y + rotated.y }
       })
       if (rot) line.rot = (line.rot ?? 0) + rot
       if (line.type === 'text') {
@@ -10141,6 +10218,7 @@ export function IconPaintEditor({
     if (!f) return
     rasterizeFloatToOriginalLayers(f)
     restoreTransformedMarqueeVectors(f)
+    if (Math.abs(f.rot ?? 0) > 0.001) bakeFloatRotation(f)
     marqueeRef.current = { x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height }
     floatRef.current = null
     setHasMarquee(true)
@@ -10619,12 +10697,7 @@ export function IconPaintEditor({
       if (g && f) {
         f.x += pt.x - g.x
         f.y += pt.y - g.y
-        const snap = snapRectToCanvas({
-          x: f.x,
-          y: f.y,
-          w: f.canvas.width,
-          h: f.canvas.height
-        })
+        const snap = snapRectToCanvas(floatAxisBounds(f))
         f.x += snap.dx
         f.y += snap.dy
         floatDragRef.current = {
@@ -10798,19 +10871,17 @@ export function IconPaintEditor({
       // Floating selection (scale mode)
       if (f) {
         const rot = f.rot ?? 0
-        if (rectRotatePinHit(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot)) {
+        const pivot = floatRotationPivot(f)
+        if (rectRotatePinHit(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)) {
           floatRotateRef.current = {
-            center: rectCenter(f.x, f.y, f.canvas.width, f.canvas.height),
-            startAng: Math.atan2(
-              pt.y - rectCenter(f.x, f.y, f.canvas.width, f.canvas.height).y,
-              pt.x - rectCenter(f.x, f.y, f.canvas.width, f.canvas.height).x
-            ),
+            center: pivot,
+            startAng: Math.atan2(pt.y - pivot.y, pt.x - pivot.x),
             startRot: rot
           }
           startPointerDragCapture()
           return
         }
-        const corner = hitRectCorner(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot)
+        const corner = hitRectCorner(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)
         if (corner) {
           if (Math.abs(rot) > 0.001) bakeFloatRotation(f)
           if (marqueeMode === 'coverage') {
@@ -10833,7 +10904,7 @@ export function IconPaintEditor({
           startPointerDragCapture()
           return
         }
-        if (pointInRotatedRect(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot)) {
+        if (pointInRotatedRect(f.x, f.y, f.canvas.width, f.canvas.height, pt, rot, pivot)) {
           floatDragRef.current = pt
           startPointerDragCapture()
           return
@@ -10848,10 +10919,10 @@ export function IconPaintEditor({
           const fl = floatRef.current
           if (fl) {
             setMarqueeMode('scale')
-            const center = rectCenter(fl.x, fl.y, fl.canvas.width, fl.canvas.height)
+            const pivot = floatRotationPivot(fl)
             floatRotateRef.current = {
-              center,
-              startAng: Math.atan2(pt.y - center.y, pt.x - center.x),
+              center: pivot,
+              startAng: Math.atan2(pt.y - pivot.y, pt.x - pivot.x),
               startRot: 0
             }
             startPointerDragCapture()
