@@ -1336,26 +1336,19 @@ function drawCanvasRotatedAt(
 function drawCanvasAtMarqueeTransform(
   ctx: CanvasRenderingContext2D,
   src: HTMLCanvasElement,
-  x: number,
-  y: number,
-  sw: number,
-  sh: number,
+  sr: { x: number; y: number; w: number; h: number },
   sc: Pt,
   dp: Pt,
   rot: number,
-  flipSx: number,
-  flipSy: number
+  sx: number,
+  sy: number
 ): void {
-  if (!rot && flipSx === 1 && flipSy === 1) {
-    ctx.drawImage(src, x, y, sw, sh)
-    return
-  }
   ctx.save()
   ctx.translate(dp.x, dp.y)
   ctx.rotate(rot)
-  ctx.scale(flipSx, flipSy)
+  ctx.scale(sx, sy)
   ctx.translate(-sc.x, -sc.y)
-  ctx.drawImage(src, x, y, sw, sh)
+  ctx.drawImage(src, sr.x, sr.y, sr.w, sr.h)
   ctx.restore()
 }
 
@@ -1522,18 +1515,22 @@ function marqueeFloatDrawParams(
   sc: Pt
   dp: Pt
   rot: number
+  sx: number
+  sy: number
   flipSx: number
   flipSy: number
   sw: number
   sh: number
 } {
   const sr = marqueeFloatSourceRect(f)
-  const { sc, dp, rot, flipSx, flipSy } = marqueeFloatTransform(f)
+  const { sc, dp, rot, sx, sy, flipSx, flipSy } = marqueeFloatTransform(f)
   return {
     sr,
     sc,
     dp,
     rot,
+    sx,
+    sy,
     flipSx,
     flipSy,
     sw: f.canvas.width,
@@ -1544,7 +1541,7 @@ function marqueeFloatDrawParams(
 function bakeMarqueeFloatCanvas(
   f: MarqueeFloatLike & { canvas: HTMLCanvasElement }
 ): { canvas: HTMLCanvasElement; bounds: { x: number; y: number; w: number; h: number } } {
-  const { sr, sc, dp, rot, flipSx, flipSy, sw, sh } = marqueeFloatDrawParams(f)
+  const { sr, sc, dp, rot, sx, sy } = marqueeFloatDrawParams(f)
   const bounds = floatTransformBounds(f)
   const out = document.createElement('canvas')
   out.width = Math.ceil(bounds.w)
@@ -1554,7 +1551,7 @@ function bakeMarqueeFloatCanvas(
   ctx.imageSmoothingQuality = 'high'
   ctx.save()
   ctx.translate(-bounds.x, -bounds.y)
-  drawCanvasAtMarqueeTransform(ctx, f.canvas, sr.x, sr.y, sw, sh, sc, dp, rot, flipSx, flipSy)
+  drawCanvasAtMarqueeTransform(ctx, f.canvas, sr, sc, dp, rot, sx, sy)
   ctx.restore()
   return { canvas: out, bounds }
 }
@@ -10362,10 +10359,10 @@ export function IconPaintEditor({
       const h = f.canvas.height
       const isMarquee = !!(f.layerCanvases?.length || f.sourceLayer)
       if (isMarquee) {
-        const { sr, sc, dp, rot, flipSx, flipSy, sw, sh } = marqueeFloatDrawParams(f)
+        const { sr, sc, dp, rot, sx, sy } = marqueeFloatDrawParams(f)
         const corners = marqueeFloatCorners(f)
         const color = '#f59e0b'
-        drawCanvasAtMarqueeTransform(p, f.canvas, sr.x, sr.y, sw, sh, sc, dp, rot, flipSx, flipSy)
+        drawCanvasAtMarqueeTransform(p, f.canvas, sr, sc, dp, rot, sx, sy)
         p.save()
         p.lineWidth = 1.5
         p.setLineDash([6, 4])
@@ -10554,20 +10551,18 @@ export function IconPaintEditor({
     f: NonNullable<typeof floatRef.current>
   ) => {
     if (!f.layerCanvases?.length) return
-    const { sr, sc, dp, rot, flipSx, flipSy } = marqueeFloatDrawParams(f)
+    const { sr, sc, dp, rot, sx, sy } = marqueeFloatDrawParams(f)
     const drawAt = (
       dest: CanvasRenderingContext2D,
-      src: HTMLCanvasElement,
-      sw: number,
-      sh: number
+      src: HTMLCanvasElement
     ) => {
-      drawCanvasAtMarqueeTransform(dest, src, sr.x, sr.y, sw, sh, sc, dp, rot, flipSx, flipSy)
+      drawCanvasAtMarqueeTransform(dest, src, sr, sc, dp, rot, sx, sy)
     }
     for (const item of f.layerCanvases) {
       const overlayCtx = layerCanvas(item.layer)?.getContext('2d')
-      if (overlayCtx) drawAt(overlayCtx, item.source, item.source.width, item.source.height)
+      if (overlayCtx) drawAt(overlayCtx, item.source)
       const baseCtx = baseCanvas(item.layer).getContext('2d')
-      if (baseCtx) drawAt(baseCtx, item.baseSource, item.baseSource.width, item.baseSource.height)
+      if (baseCtx) drawAt(baseCtx, item.baseSource)
     }
   }
 
@@ -10909,8 +10904,8 @@ export function IconPaintEditor({
     if (hasPartial || !liftedVectors) {
       const ctx = topEditableCtx()
       if (ctx) {
-        const { sr, sc, dp, rot, flipSx: fx, flipSy: fy, sw, sh } = marqueeFloatDrawParams(f)
-        drawCanvasAtMarqueeTransform(ctx, f.canvas, sr.x, sr.y, sw, sh, sc, dp, rot, fx, fy)
+        const { sr, sc, dp, rot, sx, sy } = marqueeFloatDrawParams(f)
+        drawCanvasAtMarqueeTransform(ctx, f.canvas, sr, sc, dp, rot, sx, sy)
       }
     }
     partialVectorMaskRef.current = null
