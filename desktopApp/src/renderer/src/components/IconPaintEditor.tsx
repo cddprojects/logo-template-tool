@@ -10571,6 +10571,7 @@ export function IconPaintEditor({
 
     if (tool === 'select') {
       const lockAspect = shiftHeldRef.current
+      const f = floatRef.current
       // Coverage: resize the marquee rectangle (what it covers)
       const mr = marqueeResizeRef.current
       if (mr && marqueeRef.current) {
@@ -10598,7 +10599,6 @@ export function IconPaintEditor({
         return
       }
       const rz = floatResizeRef.current
-      const f = floatRef.current
       if (rz && f) {
         const magneticPt = snapResizePointToCanvasEdges(pt, rz.corner)
         const next = resizeRect(rz.corner, rz.start, magneticPt, lockAspect)

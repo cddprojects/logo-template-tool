@@ -45,7 +45,6 @@
     </div>
 
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
     <script>
       window.__hideSplash = function() {
         var el = document.getElementById('splash');
@@ -53,6 +52,11 @@
         el.classList.add('fade-out');
         setTimeout(function(){ el.remove(); }, 350);
       };
+      // Fallback if the module bundle fails before it can dismiss the splash.
+      setTimeout(function() {
+        if (document.getElementById('splash')) window.__hideSplash();
+      }, 8000);
     </script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

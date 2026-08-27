@@ -47,9 +47,6 @@
     </div>
 
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-
-    <!-- Dismiss splash once React has mounted -->
     <script>
       window.__hideSplash = function() {
         var el = document.getElementById('splash');
@@ -57,6 +54,10 @@
         el.classList.add('fade-out');
         setTimeout(function(){ el.remove(); }, 350);
       };
+      setTimeout(function() {
+        if (document.getElementById('splash')) window.__hideSplash();
+      }, 8000);
     </script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

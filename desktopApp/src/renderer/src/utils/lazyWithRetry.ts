@@ -48,7 +48,13 @@ export function retryAfterStaleChunk(): boolean {
   } catch {
     // sessionStorage blocked — still try one reload
   }
-  window.location.reload()
+  try {
+    const url = new URL(window.location.href)
+    url.searchParams.set('_cb', String(Date.now()))
+    window.location.replace(url.toString())
+  } catch {
+    window.location.reload()
+  }
   return true
 }
 
@@ -57,10 +63,34 @@ export function reloadOnceOnChunkLoadFailure(error: unknown): boolean {
   return retryAfterStaleChunk()
 }
 
-/** Clear reload counter after a lazy chunk loads successfully. */
+/** Clear reload counter after the app boots or a lazy chunk loads successfully. */
 export function clearChunkReloadFlag(): void {
   try {
     sessionStorage.removeItem(CHUNK_RELOAD_KEY)
+  } catch {
+    // ignore
+  }
+}
+
+/** Dismiss the HTML splash screen (web index.html). Safe to call multiple times. */
+export function hideStartupSplash(): void {
+  try {
+    window.__hideSplash?.()
+  } catch {
+    // ignore
+  }
+}
+
+/** Call once React has mounted so future deploys can auto-reload stale chunks again. */
+export function markWebAppBooted(): void {
+  if (!isBrowserWebBuild()) return
+  clearChunkReloadFlag()
+  try {
+    const url = new URL(window.location.href)
+    if (!url.searchParams.has('_cb')) return
+    url.searchParams.delete('_cb')
+    const qs = url.searchParams.toString()
+    window.history.replaceState(null, '', url.pathname + (qs ? `?${qs}` : '') + url.hash)
   } catch {
     // ignore
   }

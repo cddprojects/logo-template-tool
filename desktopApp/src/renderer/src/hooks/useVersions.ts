@@ -457,6 +457,10 @@ export function useVersions() {
       applyHistory(history)
       loadedRef.current = true
       setLoaded(true)
+    }).catch((err) => {
+      console.error('[versions] load failed:', err)
+      loadedRef.current = true
+      setLoaded(true)
     })
 
     window.api.onTemplateImported((raw) => {
