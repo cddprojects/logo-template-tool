@@ -4614,6 +4614,8 @@ export function IconPaintEditor({
     /** Original marquee position, used to restore pixels when cancelling. */
     originX?: number
     originY?: number
+    originW?: number
+    originH?: number
     /** Finalize as a persistent pointer-selectable stamp instead of rasterizing it. */
     selectable?: boolean
     /** Top checked source layer, used to invalidate a temporary marquee if hidden. */
@@ -4629,9 +4631,12 @@ export function IconPaintEditor({
       originalLines: LineObj[]
       selectedIds: string[]
       sourceRect: { x: number; y: number; w: number; h: number }
+      sourcePivot: Pt
     }
     /** Rotation applied while the selection is lifted (scale mode). */
     rot?: number
+    /** Rotation baked into the float canvas (for vector restore after live bake). */
+    vectorRot?: number
   } | null>(null)
   const floatDragRef = useRef<Pt | null>(null)
   /** Corner drag: coverage resizes the marquee rect; scale resizes the float bitmap. */
@@ -9661,6 +9666,7 @@ export function IconPaintEditor({
         originalLines: LineObj[]
         selectedIds: string[]
         sourceRect: { x: number; y: number; w: number; h: number }
+        sourcePivot?: Pt
       }
     },
     x: number,
@@ -10033,25 +10039,63 @@ export function IconPaintEditor({
     if (ctx) drawAt(ctx, f.canvas)
   }
 
+  /** Erase lift hole and rotated footprint before stamping committed pixels. */
+  const clearFloatCommitAreas = (
+    f: NonNullable<typeof floatRef.current>,
+    rotatedBounds: { x: number; y: number; w: number; h: number } | null
+  ) => {
+    const ctxs = f.layerCanvases?.length
+      ? f.layerCanvases
+          .map((item) => layerCanvas(item.layer)?.getContext('2d') ?? null)
+          .filter((ctx): ctx is CanvasRenderingContext2D => !!ctx)
+      : targetCtxs()
+    const rects: { x: number; y: number; w: number; h: number }[] = []
+    if (f.originX != null && f.originY != null) {
+      rects.push({
+        x: f.originX,
+        y: f.originY,
+        w: f.originW ?? f.canvas.width,
+        h: f.originH ?? f.canvas.height
+      })
+    }
+    if (rotatedBounds) rects.push(rotatedBounds)
+    rects.push({ x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height })
+    for (const ctx of ctxs) {
+      for (const r of rects) {
+        ctx.clearRect(
+          Math.floor(r.x),
+          Math.floor(r.y),
+          Math.ceil(r.w),
+          Math.ceil(r.h)
+        )
+      }
+    }
+  }
+
   const restoreTransformedMarqueeVectors = (
-    f: NonNullable<typeof floatRef.current>
+    f: NonNullable<typeof floatRef.current>,
+    rotOverride?: number
   ) => {
     const state = f.vectorState
     if (!state) return
     const sx = f.canvas.width / Math.max(1, state.sourceRect.w)
     const sy = f.canvas.height / Math.max(1, state.sourceRect.h)
     const strokeScale = Math.min(Math.abs(sx), Math.abs(sy))
-    const rot = f.rot ?? 0
+    const rot = rotOverride ?? f.rot ?? 0
     const pivot = floatRotationPivot(f)
-    const scx = state.sourceRect.x + state.sourceRect.w / 2
-    const scy = state.sourceRect.y + state.sourceRect.h / 2
+    const sc = state.sourcePivot ?? rectCenter(
+      state.sourceRect.x,
+      state.sourceRect.y,
+      state.sourceRect.w,
+      state.sourceRect.h
+    )
     const selected = new Set(state.selectedIds)
     const next = cloneLines(state.originalLines).map((line) => {
       if (!selected.has(line.id)) return line
       line.pts = line.pts.map((point) => {
         const local = {
-          x: (point.x - scx) * sx,
-          y: (point.y - scy) * sy
+          x: (point.x - sc.x) * sx,
+          y: (point.y - sc.y) * sy
         }
         const rotated = rot ? rotatePt(local, { x: 0, y: 0 }, rot) : local
         return { x: pivot.x + rotated.x, y: pivot.y + rotated.y }
@@ -10077,6 +10121,7 @@ export function IconPaintEditor({
     const f = floatRef.current
     if (!f) return
     if (f.selectable) {
+      if (Math.abs(f.rot ?? 0) > 0.001) bakeFloatRotation(f)
       const dataUrl = f.canvas.toDataURL('image/png')
       ensureStampImage(dataUrl)
       const nl: LineObj = {
@@ -10093,7 +10138,7 @@ export function IconPaintEditor({
         color: '#000000ff',
         imageDataUrl: dataUrl,
         stampSource: 'image',
-        rot: f.rot ?? 0,
+        rot: 0,
         marqueeItem: !!f.sourceLayer,
         layer: f.sourceLayer ?? activeAddLayer()
       }
@@ -10111,9 +10156,12 @@ export function IconPaintEditor({
       pushHistory()
       return
     }
-    // Temporary marquee edits return to their original raster canvases.
+    const savedRot = (f.vectorRot ?? 0) + (f.rot ?? 0)
+    const rotatedBounds = Math.abs(savedRot) > 0.001 ? floatAxisBounds(f) : null
+    clearFloatCommitAreas(f, rotatedBounds)
+    if (Math.abs(f.rot ?? 0) > 0.001) bakeFloatRotation(f)
     rasterizeFloatToOriginalLayers(f)
-    restoreTransformedMarqueeVectors(f)
+    restoreTransformedMarqueeVectors(f, savedRot)
     floatRef.current = null
     setHasMarquee(false)
     drawSelOverlay()
@@ -10158,11 +10206,13 @@ export function IconPaintEditor({
       }
     }
     for (const root of roots) includeSubtree(root.id)
+    const sourcePivot = floatRotationPivot({ x, y, canvas })
     const vectorState = selectedIds.size
       ? {
           originalLines: cloneLines(linesRef.current),
           selectedIds: [...selectedIds],
-          sourceRect: { x, y, w, h }
+          sourceRect: { x, y, w, h },
+          sourcePivot
         }
       : undefined
     if (roots.length) {
@@ -10200,6 +10250,8 @@ export function IconPaintEditor({
       source,
       originX: x,
       originY: y,
+      originW: w,
+      originH: h,
       selectable: false,
       sourceLayer: layerOrderRef.current.find(layerIsEditable),
       layerCanvases,
@@ -10216,9 +10268,12 @@ export function IconPaintEditor({
   const floatToCoverageMarquee = () => {
     const f = floatRef.current
     if (!f) return
-    rasterizeFloatToOriginalLayers(f)
-    restoreTransformedMarqueeVectors(f)
+    const savedRot = (f.vectorRot ?? 0) + (f.rot ?? 0)
+    const rotatedBounds = Math.abs(savedRot) > 0.001 ? floatAxisBounds(f) : null
+    clearFloatCommitAreas(f, rotatedBounds)
     if (Math.abs(f.rot ?? 0) > 0.001) bakeFloatRotation(f)
+    rasterizeFloatToOriginalLayers(f)
+    restoreTransformedMarqueeVectors(f, savedRot)
     marqueeRef.current = { x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height }
     floatRef.current = null
     setHasMarquee(true)
@@ -10796,6 +10851,11 @@ export function IconPaintEditor({
     if (tool === 'line' || tool === 'freepoly' || tool === 'pointer' || tool === 'shape' || tool === 'text' || tool === 'reshape') { lineUp(pt); return }
     if (tool === 'select') {
       if (floatRotateRef.current) {
+        const f = floatRef.current
+        if (f && Math.abs(f.rot ?? 0) > 0.001) {
+          f.vectorRot = (f.vectorRot ?? 0) + (f.rot ?? 0)
+          bakeFloatRotation(f)
+        }
         floatRotateRef.current = null
         drawSelOverlay()
         return
