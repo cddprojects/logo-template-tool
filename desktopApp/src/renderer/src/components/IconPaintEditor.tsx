@@ -6471,7 +6471,8 @@ export function IconPaintEditor({
       paintViewHandlesRef.current = false
       paintViewAfterRef.current = null
       redrawLines()
-      if (showHandles) drawHandles()
+      if (floatRef.current || marqueeRef.current) drawSelOverlay()
+      else if (showHandles) drawHandles()
       afterFn?.()
     })
   }
@@ -7751,7 +7752,7 @@ export function IconPaintEditor({
       clearPreview()
     }
     redrawLines()
-    if (floatRef.current) drawSelOverlay()
+    if (floatRef.current || marqueeRef.current) drawSelOverlay()
     else if (tool === 'pointer' || tool === 'reshape') drawHandles()
     else clearPreview()
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -7796,6 +7797,7 @@ export function IconPaintEditor({
       setSelectedId(null)
     }
     clearPreview()
+    if (floatRef.current || marqueeRef.current) drawSelOverlay()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editContainer, editContent, containerUsable])
 
@@ -7803,6 +7805,7 @@ export function IconPaintEditor({
   useLayoutEffect(() => {
     clearPreview()
     redrawLinesRef.current()
+    if (floatRef.current || marqueeRef.current) drawSelOverlay()
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layerVisibilitySig])
 
