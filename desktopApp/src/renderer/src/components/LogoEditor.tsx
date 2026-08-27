@@ -52,6 +52,8 @@ import {
 } from './Controls'
 import { IconPicker } from './IconPicker'
 import { PreviewStage } from './PreviewStage'
+import { StylePanelResizeHandle } from './StylePanelResizeHandle'
+import { useStylePanelResize } from '../hooks/useStylePanelResize'
 import { lazyWithRetry } from '../utils/lazyWithRetry'
 
 /** Paint editor is large — load only when Edit opens. */
@@ -60,9 +62,6 @@ const IconPaintEditor = lazyWithRetry(() =>
 )
 
 const VARIANT_LABEL_SUGGESTIONS = ['Dark', 'Light', 'Primary', 'Inverted', 'Monochrome']
-/** Default style-panel width; also the minimum when dragging to resize. */
-const PANEL_MIN_WIDTH = 288
-const PANEL_MAX_WIDTH = 560
 
 /** True when the persisted synced icon should be rewritten from the favicon twin. */
 function syncedIconNeedsUpdate(
@@ -120,36 +119,12 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   const [exportNameStyle, setExportNameStyle] = useState<ExportNameStyle>(() => getStoredExportNameStyle())
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null)
   const [previewDims, setPreviewDims] = useState<{ w: number; h: number } | null>(null)
-  const [panelWidth, setPanelWidth] = useState(PANEL_MIN_WIDTH)
-  const panelRef = useRef<HTMLDivElement>(null)
-  const panelWidthRef = useRef(PANEL_MIN_WIDTH)
+  const { panelWidth, panelRef, onResizeStart } = useStylePanelResize()
 
   // Keep name-style in sync with favicon editor (shared localStorage preference).
   useEffect(() => {
     if (isActive) setExportNameStyle(getStoredExportNameStyle())
   }, [isActive])
-
-  // Keep ref in sync with state (initial value, programmatic resize)
-  useEffect(() => { panelWidthRef.current = panelWidth }, [panelWidth])
-
-  const onPanelDragStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    const startX = e.clientX
-    const startWidth = panelWidthRef.current
-    const onMove = (ev: MouseEvent) => {
-      const newWidth = Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, startWidth + (startX - ev.clientX)))
-      panelWidthRef.current = newWidth
-      if (panelRef.current) panelRef.current.style.width = `${newWidth}px`
-    }
-    const onUp = () => {
-      // One React state update on mouseup instead of 60/sec during drag
-      setPanelWidth(panelWidthRef.current)
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-    }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-  }, [])
 
   // Keep activeId in sync when variants change
   useEffect(() => {
@@ -1279,16 +1254,14 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
           )}
         </div>
 
+        <StylePanelResizeHandle panelWidth={panelWidth} onMouseDown={onResizeStart} />
+
         {/* Style panel */}
-        <div ref={panelRef} className="shrink-0 bg-surface border-l border-border overflow-y-auto relative" style={{ width: panelWidth }}>
-          {/* Drag handle */}
-          <div
-            onMouseDown={onPanelDragStart}
-            className="absolute left-0 top-0 -ml-1 w-3 h-full cursor-col-resize z-10 hover:bg-accent/40 active:bg-accent/50 transition-colors group"
-            title="Drag to resize panel"
-          >
-            <span className="absolute left-1 top-1/2 -translate-y-1/2 w-0.5 h-8 rounded-full bg-border group-hover:bg-accent/70" />
-          </div>
+        <div
+          ref={panelRef}
+          className="shrink-0 min-h-0 bg-surface border-l border-border overflow-y-auto overflow-x-hidden"
+          style={{ width: panelWidth }}
+        >
           <Section title="Text">
             <TextRow label="Logo title" value={safeConfig.text} placeholder="MyApp" onChange={(v) => setTitleText(v)} />
             <ToggleRow label="Same text on all variants" value={safeConfig.textShared ?? false} onChange={toggleTitleShared} />
