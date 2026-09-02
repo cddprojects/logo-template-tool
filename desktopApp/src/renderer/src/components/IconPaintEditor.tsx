@@ -9413,7 +9413,7 @@ export function IconPaintEditor({
         const fillRgb = unpremul(idx) ?? interiorRgb ?? clickRgb
         const isFillPixel = (p: number) => {
           const a = data[p * 4 + 3]
-          if (a < 160) return false
+          if (a < (borderPx > 0 ? 160 : 100)) return false
           if (borderPx > 0 && edt[p] <= Math.min(rimW, Math.max(borderPx, 1)) + 0.5) return false
           const rgb = unpremul(p * 4)
           if (!rgb || !fillRgb || !rgbClose3(rgb, fillRgb, 40)) return false
@@ -9436,27 +9436,53 @@ export function IconPaintEditor({
           filled[p] = 1
           flood.push(x + 1, y, x - 1, y, x, y + 1, x, y - 1)
         }
-        // Inner-curve AA only — same fill colour, never stroke or drop-shadow.
+
+        const matchesLegacyFill = (p: number, tol?: number) => {
+          const a = data[p * 4 + 3]
+          if (a <= 8) return false
+          const rgb = unpremul(p * 4)
+          if (!rgb || !fillRgb) return false
+          const adaptiveTol = tol ?? (a >= 200 ? 48 : a >= 120 ? 72 : 96)
+          if (!rgbClose3(rgb, fillRgb, adaptiveTol)) return false
+          if (fillDiffersFromRim && liveBorder && rgbClose3(rgb, liveBorder, 40)) return false
+          if (fillDiffersFromRim && liveShadow && rgbClose3(rgb, liveShadow, 40) && a < 180) {
+            return false
+          }
+          if (
+            fillDiffersFromRim &&
+            bakedBorder &&
+            rgbClose3(rgb, bakedBorder, 48) &&
+            edt[p] <= rimW + 1.5
+          ) {
+            return false
+          }
+          if (fillDiffersFromRim && bakedShadow && rgbClose3(rgb, bakedShadow, 64) && a < 160) {
+            return false
+          }
+          return true
+        }
+
+        const isOuterFillEdgePixel = (p: number) => {
+          const a = data[p * 4 + 3]
+          if (a <= 8 || a >= 245) return false
+          if (borderPx > 0 && edt[p] <= rimW + 0.5) return false
+          // Rounded outer corners are low-EDT fringe pixels; shadow sits further out.
+          if (edt[p] > 3.5 && a < 160) return false
+          return matchesLegacyFill(p)
+        }
+
+        // Inner-curve + outer rounded-corner AA — same pre-fill colour, not stroke/shadow.
         const dirs8: [number, number][] = [
           [-1, 0], [1, 0], [0, -1], [0, 1],
           [-1, -1], [1, -1], [-1, 1], [1, 1]
         ]
-        for (let pass = 0; pass < 2; pass++) {
+        for (let pass = 0; pass < 4; pass++) {
           const extra: number[] = []
           for (let y = 0; y < H; y++) {
             for (let x = 0; x < W; x++) {
               const p = y * W + x
               if (filled[p]) continue
-              const a = data[p * 4 + 3]
-              if (a <= 8 || a >= 245) continue
-              if (a < 150) continue
-              if (borderPx > 0 && edt[p] <= rimW + 0.5) continue
-              if (fillRgb) {
-                const rgb = unpremul(p * 4)
-                if (!rgb || !rgbClose3(rgb, fillRgb, 48)) continue
-                if (fillDiffersFromRim && liveBorder && rgbClose3(rgb, liveBorder, 36)) continue
-                if (fillDiffersFromRim && liveShadow && rgbClose3(rgb, liveShadow, 36)) continue
-              }
+              if (!isOuterFillEdgePixel(p)) continue
               let adj = false
               for (const [dx, dy] of dirs8) {
                 const nx = x + dx, ny = y + dy
