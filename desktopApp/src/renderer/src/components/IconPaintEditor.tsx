@@ -9010,6 +9010,35 @@ export function IconPaintEditor({
     bctx.putImageData(punch, 0, 0)
   }
 
+  /** Outer fill: rewrite the baked base to the new colour (do not punch through). */
+  const recolorFilledBase = (
+    underlay: HTMLCanvasElement | null | undefined,
+    filled: Uint8Array,
+    fr: number,
+    fg: number,
+    fb: number,
+    fa: number,
+    composite: Uint8ClampedArray
+  ) => {
+    if (!underlay) return
+    const bctx = underlay.getContext('2d')
+    if (!bctx) return
+    const base = bctx.getImageData(0, 0, W, H)
+    const bd = base.data
+    for (let p = 0; p < filled.length; p++) {
+      if (!filled[p]) continue
+      const i = p * 4
+      const srcA = composite[i + 3]
+      if (srcA <= 8) continue
+      const outA = srcA >= 170 ? fa : Math.max(12, Math.round((srcA * fa) / 255))
+      bd[i] = fr
+      bd[i + 1] = fg
+      bd[i + 2] = fb
+      bd[i + 3] = outA
+    }
+    bctx.putImageData(base, 0, 0)
+  }
+
   const recolorAllOpaque = (
     ctx: CanvasRenderingContext2D,
     underlay?: HTMLCanvasElement | null,
@@ -9410,123 +9439,63 @@ export function IconPaintEditor({
       }
 
       if (outerKind === 'fill') {
-        const fillRgb = unpremul(idx) ?? interiorRgb ?? clickRgb
-        const isFillPixel = (p: number) => {
-          const a = data[p * 4 + 3]
-          if (a < (borderPx > 0 ? 160 : 100)) return false
-          if (borderPx > 0 && edt[p] <= Math.min(rimW, Math.max(borderPx, 1)) + 0.5) return false
-          const rgb = unpremul(p * 4)
-          if (!rgb || !fillRgb || !rgbClose3(rgb, fillRgb, 40)) return false
-          if (fillDiffersFromRim) {
-            if (liveBorder && rgbClose3(rgb, liveBorder, 40)) return false
-            if (bakedBorder && rgbClose3(rgb, bakedBorder, 48) && edt[p] <= rimW + 1.5) return false
-            if (liveShadow && rgbClose3(rgb, liveShadow, 40) && a < 230) return false
-            if (bakedShadow && rgbClose3(rgb, bakedShadow, 64) && a < 160) return false
-          }
-          return true
-        }
-        // Connected section only — leftover same-colour islands stay until clicked.
-        const flood: number[] = [px, py]
-        while (flood.length >= 2) {
-          const y = flood.pop()!
-          const x = flood.pop()!
-          if (x < 0 || y < 0 || x >= W || y >= H) continue
-          const p = y * W + x
-          if (filled[p] || !isFillPixel(p)) continue
-          filled[p] = 1
-          flood.push(x + 1, y, x - 1, y, x, y + 1, x, y - 1)
-        }
-
-        const matchesLegacyFill = (p: number, tol?: number) => {
+        const rimCutoff = borderPx > 0 ? rimW + 0.75 : 0
+        const isOuterFillRegion = (p: number) => {
           const a = data[p * 4 + 3]
           if (a <= 8) return false
-          const rgb = unpremul(p * 4)
-          if (!rgb || !fillRgb) return false
-          const adaptiveTol = tol ?? (a >= 200 ? 48 : a >= 120 ? 72 : 110)
-          if (!rgbClose3(rgb, fillRgb, adaptiveTol)) return false
-          if (fillDiffersFromRim && liveBorder && rgbClose3(rgb, liveBorder, 40)) return false
-          if (fillDiffersFromRim && liveShadow && rgbClose3(rgb, liveShadow, 40) && a < 180) {
-            return false
-          }
-          if (
-            fillDiffersFromRim &&
-            bakedBorder &&
-            rgbClose3(rgb, bakedBorder, 48) &&
-            edt[p] <= rimW + 1.5
-          ) {
-            return false
-          }
-          if (fillDiffersFromRim && bakedShadow && rgbClose3(rgb, bakedShadow, 64) && a < 160) {
-            return false
-          }
-          return true
-        }
-
-        const isOuterFillInteriorFringe = (p: number) => {
-          const a = data[p * 4 + 3]
-          if (a <= 8) return false
-          if (borderPx > 0 && edt[p] <= rimW + 0.5) return false
-          const edgeBand = borderPx > 0 ? 2.75 : 5.5
-          if (a < 110 && edt[p] > edgeBand) return false
-          if (fillDiffersFromRim && a < 170) {
+          if (borderPx > 0 && edt[p] <= rimCutoff) return false
+          if (a < 100 && edt[p] > 8) return false
+          if (fillDiffersFromRim && a < 150) {
             const rgb = unpremul(p * 4)
-            if (rgb && liveShadow && rgbClose3(rgb, liveShadow, 80)) return false
-            if (rgb && bakedShadow && rgbClose3(rgb, bakedShadow, 96)) return false
+            if (rgb && liveShadow && rgbClose3(rgb, liveShadow, 72)) return false
+            if (rgb && bakedShadow && rgbClose3(rgb, bakedShadow, 88)) return false
           }
-          if (edt[p] > rimW + 0.5) return true
-          if (edt[p] <= edgeBand && a >= 20) return true
-          return matchesLegacyFill(p, 140)
+          return true
         }
 
-        // Inner-curve + outer rounded-corner AA — same pre-fill colour, not stroke/shadow.
         const dirs8: [number, number][] = [
           [-1, 0], [1, 0], [0, -1], [0, 1],
           [-1, -1], [1, -1], [-1, 1], [1, 1]
         ]
-        for (let pass = 0; pass < 4; pass++) {
-          const extra: number[] = []
-          for (let y = 0; y < H; y++) {
-            for (let x = 0; x < W; x++) {
-              const p = y * W + x
-              if (filled[p]) continue
-              const a = data[p * 4 + 3]
-              if (a <= 8 || a >= 245) continue
-              if (borderPx > 0 && edt[p] <= rimW + 0.5) continue
-              if (edt[p] > 3.5 && a < 160) continue
-              if (!matchesLegacyFill(p)) continue
-              let adj = false
-              for (const [dx, dy] of dirs8) {
-                const nx = x + dx, ny = y + dy
-                if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
-                if (filled[ny * W + nx]) { adj = true; break }
-              }
-              if (adj) extra.push(p)
-            }
-          }
-          if (!extra.length) break
-          for (const p of extra) filled[p] = 1
+
+        // Geometry flood — entire connected interior silhouette including rounded
+        // corner AA, not just pixels that still match the pre-fill colour.
+        const stack: number[] = [px, py]
+        while (stack.length >= 2) {
+          const y = stack.pop()!
+          const x = stack.pop()!
+          if (x < 0 || y < 0 || x >= W || y >= H) continue
+          const p = y * W + x
+          if (filled[p] || !isOuterFillRegion(p)) continue
+          filled[p] = 1
+          for (const [dx, dy] of dirs8) stack.push(x + dx, y + dy)
         }
 
-        // Snap to the full interior silhouette so rounded-corner fringe cannot
-        // keep the baked base colour under a semi-transparent overlay stroke.
-        for (let pass = 0; pass < 10; pass++) {
-          const extra: number[] = []
-          for (let y = 0; y < H; y++) {
-            for (let x = 0; x < W; x++) {
-              const p = y * W + x
-              if (filled[p] || !isOuterFillInteriorFringe(p)) continue
-              let adj = false
-              for (const [dx, dy] of dirs8) {
-                const nx = x + dx, ny = y + dy
-                if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
-                if (filled[ny * W + nx]) { adj = true; break }
+        // Outermost rounded-corner AA ring (no border): geometry flood can stop one
+        // pixel short of the silhouette edge when EDT treats fringe as outside.
+        if (borderPx <= 0) {
+          for (let pass = 0; pass < 4; pass++) {
+            const extra: number[] = []
+            for (let y = 0; y < H; y++) {
+              for (let x = 0; x < W; x++) {
+                const p = y * W + x
+                if (filled[p]) continue
+                const a = data[p * 4 + 3]
+                if (a <= 8 || edt[p] > 2.5) continue
+                let adj = false
+                for (const [dx, dy] of dirs8) {
+                  const nx = x + dx, ny = y + dy
+                  if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
+                  if (filled[ny * W + nx]) { adj = true; break }
+                }
+                if (adj) extra.push(p)
               }
-              if (adj) extra.push(p)
             }
+            if (!extra.length) break
+            for (const p of extra) filled[p] = 1
           }
-          if (!extra.length) break
-          for (const p of extra) filled[p] = 1
         }
+
         recordOuterFill('fill', fill)
       } else if (
         sameRimColor ||
@@ -9599,6 +9568,8 @@ export function IconPaintEditor({
       ctx.putImageData(out, 0, 0)
       if (isTransparentPaintColor(color)) {
         applyTransparentFlood(filled, layerId ?? 'content', ctx.canvas)
+      } else if (solidOuterFill) {
+        recolorFilledBase(underlay, filled, fr, fg, fb, fa, data)
       } else {
         punchFilledFromBase(underlay, filled)
       }
