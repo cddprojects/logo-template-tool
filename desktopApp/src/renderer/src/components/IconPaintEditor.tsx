@@ -9442,7 +9442,7 @@ export function IconPaintEditor({
           if (a <= 8) return false
           const rgb = unpremul(p * 4)
           if (!rgb || !fillRgb) return false
-          const adaptiveTol = tol ?? (a >= 200 ? 48 : a >= 120 ? 72 : 96)
+          const adaptiveTol = tol ?? (a >= 200 ? 48 : a >= 120 ? 72 : 110)
           if (!rgbClose3(rgb, fillRgb, adaptiveTol)) return false
           if (fillDiffersFromRim && liveBorder && rgbClose3(rgb, liveBorder, 40)) return false
           if (fillDiffersFromRim && liveShadow && rgbClose3(rgb, liveShadow, 40) && a < 180) {
@@ -9462,13 +9462,20 @@ export function IconPaintEditor({
           return true
         }
 
-        const isOuterFillEdgePixel = (p: number) => {
+        const isOuterFillInteriorFringe = (p: number) => {
           const a = data[p * 4 + 3]
-          if (a <= 8 || a >= 245) return false
+          if (a <= 8) return false
           if (borderPx > 0 && edt[p] <= rimW + 0.5) return false
-          // Rounded outer corners are low-EDT fringe pixels; shadow sits further out.
-          if (edt[p] > 3.5 && a < 160) return false
-          return matchesLegacyFill(p)
+          const edgeBand = borderPx > 0 ? 2.75 : 5.5
+          if (a < 110 && edt[p] > edgeBand) return false
+          if (fillDiffersFromRim && a < 170) {
+            const rgb = unpremul(p * 4)
+            if (rgb && liveShadow && rgbClose3(rgb, liveShadow, 80)) return false
+            if (rgb && bakedShadow && rgbClose3(rgb, bakedShadow, 96)) return false
+          }
+          if (edt[p] > rimW + 0.5) return true
+          if (edt[p] <= edgeBand && a >= 20) return true
+          return matchesLegacyFill(p, 140)
         }
 
         // Inner-curve + outer rounded-corner AA — same pre-fill colour, not stroke/shadow.
@@ -9482,7 +9489,32 @@ export function IconPaintEditor({
             for (let x = 0; x < W; x++) {
               const p = y * W + x
               if (filled[p]) continue
-              if (!isOuterFillEdgePixel(p)) continue
+              const a = data[p * 4 + 3]
+              if (a <= 8 || a >= 245) continue
+              if (borderPx > 0 && edt[p] <= rimW + 0.5) continue
+              if (edt[p] > 3.5 && a < 160) continue
+              if (!matchesLegacyFill(p)) continue
+              let adj = false
+              for (const [dx, dy] of dirs8) {
+                const nx = x + dx, ny = y + dy
+                if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
+                if (filled[ny * W + nx]) { adj = true; break }
+              }
+              if (adj) extra.push(p)
+            }
+          }
+          if (!extra.length) break
+          for (const p of extra) filled[p] = 1
+        }
+
+        // Snap to the full interior silhouette so rounded-corner fringe cannot
+        // keep the baked base colour under a semi-transparent overlay stroke.
+        for (let pass = 0; pass < 10; pass++) {
+          const extra: number[] = []
+          for (let y = 0; y < H; y++) {
+            for (let x = 0; x < W; x++) {
+              const p = y * W + x
+              if (filled[p] || !isOuterFillInteriorFringe(p)) continue
               let adj = false
               for (const [dx, dy] of dirs8) {
                 const nx = x + dx, ny = y + dy
@@ -9546,16 +9578,19 @@ export function IconPaintEditor({
 
       const out = ctx.getImageData(0, 0, W, H)
       const od = out.data
+      const solidOuterFill = outerKind === 'fill' && !isTransparentPaintColor(color)
       for (let p = 0; p < filled.length; p++) {
         if (!filled[p]) continue
         const i = p * 4
         const srcA = data[i + 3]
         if (srcA <= EMPTY_A) continue
-        const outA = srcA < 150
-          ? Math.round((srcA * fa) / 255)
-          : srcA >= 12
-            ? fa
-            : Math.max(od[i + 3], Math.round((srcA * fa) / 255))
+        const outA = solidOuterFill
+          ? (srcA >= 170 ? fa : Math.max(12, Math.round((srcA * fa) / 255)))
+          : srcA < 150
+            ? Math.round((srcA * fa) / 255)
+            : srcA >= 12
+              ? fa
+              : Math.max(od[i + 3], Math.round((srcA * fa) / 255))
         od[i] = fr
         od[i + 1] = fg
         od[i + 2] = fb
