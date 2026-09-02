@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import App from '@renderer/App'
 import type { Version } from '@renderer/types'
-import { hideStartupSplash, markWebAppBooted } from '@renderer/utils/lazyWithRetry'
+import { hideStartupSplash } from '@renderer/utils/lazyWithRetry'
 import {
   fetchMe,
   getAuthUser,
@@ -27,7 +27,6 @@ export function WebShell(): JSX.Element {
 
   useEffect(() => {
     hideStartupSplash()
-    markWebAppBooted()
     const unsub = subscribeAuth(setUser)
     const bootTimeout = window.setTimeout(() => setReady(true), 9000)
     void fetchMe().finally(() => {

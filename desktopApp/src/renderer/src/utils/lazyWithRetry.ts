@@ -81,10 +81,12 @@ export function hideStartupSplash(): void {
   }
 }
 
-/** Call once React has mounted so future deploys can auto-reload stale chunks again. */
+/**
+ * Strip cache-bust query params after boot. Does NOT clear the chunk-reload counter —
+ * that only resets when a lazy import succeeds, otherwise stale cached JS can reload forever.
+ */
 export function markWebAppBooted(): void {
   if (!isBrowserWebBuild()) return
-  clearChunkReloadFlag()
   try {
     const url = new URL(window.location.href)
     if (!url.searchParams.has('_cb')) return

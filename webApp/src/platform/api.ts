@@ -267,7 +267,7 @@ export function installWebApi(): void {
       const result = await loadWorkspace()
       if (!result.ok) {
         console.error('[web] failed to load workspace from server:', result.error)
-        throw new Error(result.error || 'Failed to load workspace')
+        return []
       }
       cachedWorkspace = { versions: result.versions, history: result.history }
       clearLegacyBrowserVersions()
