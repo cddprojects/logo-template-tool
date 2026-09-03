@@ -4601,6 +4601,13 @@ function isTransparentPaintColor(color: string): boolean {
   return hexAlpha(color) <= 0
 }
 
+/** Force #RRGGBB / #RRGGBBAA to fully transparent while keeping RGB. */
+function withZeroAlpha(color: string): string {
+  const s = firstSolidColor(color).trim()
+  if (s.startsWith('#') && s.length >= 7) return (s.slice(0, 7) + '00').toLowerCase()
+  return '#00000000'
+}
+
 function shouldDrawObjectShadow(l: LineObj): boolean {
   if (!l.shadow) return false
   if (isTransparentPaintColor(l.shadowColor ?? '')) return false
@@ -8752,10 +8759,29 @@ export function IconPaintEditor({
       }
 
       if (transparent && !punch) {
-        // See-through: hide ink only — never punchThrough / stack-cut.
+        // See-through: hide ink only — never stack-cut (punchThrough).
+        if (item.type === 'text') {
+          // Keep other glyph punch masks. Clearing them re-solidified the rest of
+          // the string and left only Fill AA fringes punched later.
+          if (nearlyWhole) {
+            punchMaskCanvases.delete(item.id)
+            punchMaskBits.delete(item.id)
+            return {
+              ...item,
+              color: fill,
+              punchThrough: false,
+              punchEnclosedHole: false
+            }
+          }
+          setLocalPunchFromFilled(item, region, W, H)
+          return {
+            ...item,
+            punchThrough: false,
+            punchEnclosedHole: false
+          }
+        }
         if (nearlyWhole) {
           if (item.type === 'stamp') {
-            // Rasters need a local silhouette hole; colour alone does not hide them.
             setLocalPunchFromFilled(item, region, W, H)
           } else {
             punchMaskCanvases.delete(item.id)
@@ -8767,12 +8793,16 @@ export function IconPaintEditor({
             punchThrough: false,
             punchEnclosedHole: false,
             ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {}),
-            ...(item.type === 'text' || item.type === 'stamp' ? {} : { borderColor: fill })
+            ...(item.type === 'stamp' ? {} : { borderColor: fill })
           }
+        }
+        if (item.type === 'stamp') {
+          setLocalPunchFromFilled(item, region, W, H)
+          return { ...item, punchThrough: false, punchEnclosedHole: false }
         }
         punchMaskCanvases.delete(item.id)
         punchMaskBits.delete(item.id)
-        // Partial see-through → bake transparent pixels into a stamp below.
+        // Partial see-through on shape/poly → bake transparent pixels below.
       }
 
       let keepPunch = false
@@ -8781,7 +8811,9 @@ export function IconPaintEditor({
           (item.punchThrough || punchMaskBits.has(item.id) || punchMaskCanvases.has(item.id)) &&
           subtractLocalPunchRegion(item, region, W, H)
         keepPunch = punch || stillPunched
-        if (item.type === 'text' && nearlyWhole) {
+        // Vector text must stay vector — raster bake of white glyphs leaves AA
+        // fringe lines that survive later see-through / colour clears.
+        if (item.type === 'text' && wallHits === 0) {
           return {
             ...item,
             color: firstSolidColor(color),
@@ -8977,8 +9009,7 @@ export function IconPaintEditor({
       }
 
       // Transparent Fill: prefer a sectional flood (one glyph / connected region).
-      // Whole-object transparentObjectPatch is only for the colour-picker path —
-      // using it here punched every character in a text run.
+      // Whole-object transparentObjectPatch is for colour-picker / mode toggle.
       if (
         transparent &&
         (item.type === 'stamp' || item.type === 'text' || item.type === 'shape' || item.type === 'poly')
@@ -9213,15 +9244,27 @@ export function IconPaintEditor({
     setTransparentFillMode(mode)
     transparentFillModeRef.current = mode
     inheritedFillMode?.setMode(mode)
-    // Re-apply to the selected object when it is already transparent so toggling
-    // See-through ↔ Punch hole updates without re-picking the colour.
+    // Re-apply to the selected object when it is already transparent / punched so
+    // toggling See-through ↔ Punch hole updates without re-picking the colour.
     const id = selectedIdRef.current
-    if (!id || !isTransparentPaintColor(color)) return
+    if (!id) return
     const selected = linesRef.current.find((l) => l.id === id)
     if (!selected || selected.punchMask) return
     const target = checkedGroupTarget(selected) ?? selected
     if (target.type === 'group') return
-    updateSelectedLive((l) => transparentObjectPatch(l, pixelColor(l.color || color)))
+    const objColor = pixelColor(target.color || color)
+    const hasHole =
+      !!target.punchThrough ||
+      punchMaskBits.has(target.id) ||
+      punchMaskCanvases.has(target.id) ||
+      isTransparentPaintColor(objColor)
+    if (!isTransparentPaintColor(color) && !hasHole) return
+    const nextColor = isTransparentPaintColor(color) ? pixelColor(color) : withZeroAlpha(objColor)
+    if (!isTransparentPaintColor(color)) {
+      setColor(nextColor)
+      setHexText(nextColor)
+    }
+    updateSelectedLive((l) => transparentObjectPatch(l, nextColor))
     pushHistory()
   }
 
