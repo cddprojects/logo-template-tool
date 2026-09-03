@@ -84,8 +84,10 @@ function UseGuide(): JSX.Element {
           </li>
           <li>
             <span className="text-text">Apply inner to all</span> copies the active variant’s inner shape,
-            size, and position (including Inner paint object geometry) onto every other variant. Each variant
-            keeps its outer shape, Outer paint, and its own colors — source colors are not applied
+            type, size, position, and paint geometry (recoloured to each target’s palette). Each variant
+            keeps its outer shape and Outer paint.{' '}
+            <span className="text-text">Inner settings (keep colors)</span> copies type/shape/size only —
+            each variant keeps its own colours and paint edits
           </li>
           <li>
             <span className="text-text">Paint</span> opens the icon editor. The right panel’s

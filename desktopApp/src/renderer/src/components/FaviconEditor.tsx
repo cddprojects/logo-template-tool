@@ -21,6 +21,7 @@ import { recolorFieldsAfterImageChange } from '../utils/imageRecolor'
 import {
   applyPaintSaveToFavicon,
   applyFaviconInnerContent,
+  applyFaviconInnerSettingsKeepColors,
   clearFaviconUploadedImage,
   mapFaviconStashToIconStash,
   outsideContentFromFavicon,
@@ -139,6 +140,7 @@ export function FaviconEditor({
   const [styleClipboard, setStyleClipboard] = useState<FaviconConfig | null>(null)
   const [appliedToAll, setAppliedToAll] = useState(false)
   const [innerAppliedToAll, setInnerAppliedToAll] = useState(false)
+  const [innerSettingsAppliedToAll, setInnerSettingsAppliedToAll] = useState(false)
   const dragIndexRef = useRef<number | null>(null)
   const variantsRef = useRef(variants)
   const logoVariantsRef = useRef(logoVariants)
@@ -627,6 +629,19 @@ export function FaviconEditor({
     window.setTimeout(() => setInnerAppliedToAll(false), 1600)
   }
 
+  /** Inner type/shape/size only — keep each variant’s colours and paint session. */
+  const applyActiveInnerSettingsKeepColors = () => {
+    if (!config || !active || variants.length < 2) return
+    onChange(
+      variants.map((variant) => ({
+        ...variant,
+        config: applyFaviconInnerSettingsKeepColors(config, variant.config)
+      }))
+    )
+    setInnerSettingsAppliedToAll(true)
+    window.setTimeout(() => setInnerSettingsAppliedToAll(false), 1600)
+  }
+
   // Drag-to-reorder variants.
   const handleVariantDrop = (targetId: string) => {
     const from = dragIndexRef.current
@@ -864,7 +879,7 @@ export function FaviconEditor({
             <button
               type="button"
               onClick={applyActiveInnerToAll}
-              title="Copy only the inner content shape/type. Each variant keeps its outer settings and its own colors (primary, secondary, text, …)."
+              title="Copy only the inner content shape/type and paint geometry. Each variant keeps its outer settings and its own colors (primary, secondary, text, …)."
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
                 innerAppliedToAll
                   ? 'border-success/60 bg-success/10 text-success'
@@ -873,6 +888,19 @@ export function FaviconEditor({
             >
               {innerAppliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
               {innerAppliedToAll ? 'Inner applied' : 'Apply inner to all'}
+            </button>
+            <button
+              type="button"
+              onClick={applyActiveInnerSettingsKeepColors}
+              title="Copy inner type, shape, and size only. Each variant keeps its own colors and its paint edits."
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
+                innerSettingsAppliedToAll
+                  ? 'border-success/60 bg-success/10 text-success'
+                  : 'border-border bg-surface3 text-muted hover:text-text hover:border-muted'
+              }`}
+            >
+              {innerSettingsAppliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
+              {innerSettingsAppliedToAll ? 'Settings applied' : 'Inner settings (keep colors)'}
             </button>
           </div>
         )}

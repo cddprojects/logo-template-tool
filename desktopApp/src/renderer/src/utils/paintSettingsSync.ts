@@ -615,6 +615,34 @@ export function applyFaviconInnerContent(source: FaviconConfig, target: FaviconC
 }
 
 /**
+ * Copy inner type / shape / size / offset only. Keeps each target’s colour slots
+ * and its full paint session (no paint geometry or colour remap).
+ */
+export function applyFaviconInnerSettingsKeepColors(
+  source: FaviconConfig,
+  target: FaviconConfig
+): FaviconConfig {
+  const primary = faviconPrimaryFill(target.content)
+  const secondary = faviconSecondaryFill(target.content)
+  const merged = withFaviconContentSizeRatio(
+    withFaviconTargetColors(structuredClone(source.content), target.content),
+    faviconContentSizeRatio(source.content)
+  )
+  return {
+    ...target,
+    content: merged,
+    contentTypeStash: mergeTypeStashColors(
+      source.contentTypeStash,
+      target.contentTypeStash,
+      FAVICON_CONTENT_COLOR_KEYS,
+      primary,
+      secondary
+    ) as FaviconConfig['contentTypeStash'],
+    paintSession: target.paintSession
+  }
+}
+
+/**
  * Copy active icon’s inner shape, size, and position onto a target.
  * Colors (and Outer/container) stay on the target.
  */
@@ -650,6 +678,42 @@ export function applyIconInnerContent(source: IconConfig, target: IconConfig): I
       primary,
       secondary
     )
+  }
+}
+
+/**
+ * Copy icon inner type / shape / size / offset only — keep target colours + paint.
+ */
+export function applyIconInnerSettingsKeepColors(
+  source: IconConfig,
+  target: IconConfig
+): IconConfig {
+  const outer = pickKeys(
+    target as unknown as Record<string, unknown>,
+    ICON_OUTER_KEYS
+  ) as Partial<IconConfig>
+  const primary = iconPrimaryFill(target)
+  const secondary = target.secondaryColor || ''
+  const merged = withIconContentSizeRatio(
+    withIconTargetColors(
+      {
+        ...structuredClone(source),
+        ...outer
+      },
+      target
+    ),
+    iconContentSizeRatio(source)
+  )
+  return {
+    ...merged,
+    contentTypeStash: mergeTypeStashColors(
+      source.contentTypeStash,
+      target.contentTypeStash,
+      ICON_CONTENT_COLOR_KEYS,
+      primary,
+      secondary
+    ) as IconConfig['contentTypeStash'],
+    paintSession: target.paintSession
   }
 }
 

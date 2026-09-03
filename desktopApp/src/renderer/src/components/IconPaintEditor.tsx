@@ -8668,9 +8668,10 @@ export function IconPaintEditor({
       const clickX = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
       const clickY = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
       const clickI = (clickY * W + clickX) * 4
+      const inkHitT = item.type === 'text' ? 28 : 80
       // Counters (empty space inside "b") are not glyph ink. Do not spiral onto
       // the letter and punch the character instead of the hole.
-      if (interior[clickI + 3] < 80 && od[clickI + 3] < 80) return null
+      if (interior[clickI + 3] < inkHitT && od[clickI + 3] < inkHitT) return null
       const overlay = layerCanvas(vectorLayerOf(item)).getContext('2d')?.getImageData(0, 0, W, H)
       const ov = overlay?.data
       const rgbCut = (i: number) =>
@@ -8685,16 +8686,21 @@ export function IconPaintEditor({
         if (ia > 2 && fa > 2 && rgbCut(i)) return true
         return false
       }
+      const inkT = item.type === 'text' ? 28 : 80
       const seed = findFillSeed(W, H, canvasPoint.x, canvasPoint.y, (x, y) => {
         const i = (y * W + x) * 4
-        return interior[i + 3] >= 80 && !isCut(i)
+        return interior[i + 3] >= inkT && !isCut(i)
       })
       if (!seed) return null
       const seedI = (seed.y * W + seed.x) * 4
       const tr = interior[seedI], tg = interior[seedI + 1], tb = interior[seedI + 2]
+      // Text: connect by alpha only so soft AA does not split one glyph into
+      // two islands (RGB fringe from prior fills). Separate letters stay apart
+      // because they are not 4-connected. Other types keep colour matching.
       const region = floodFillConnected(W, H, seed.x, seed.y, (i) => {
-        if (interior[i + 3] < 80) return false
+        if (interior[i + 3] < inkT) return false
         if (isCut(i)) return false
+        if (item.type === 'text') return true
         return Math.abs(interior[i] - tr) + Math.abs(interior[i + 1] - tg) + Math.abs(interior[i + 2] - tb) <= 48
       })
       const dirs4: [number, number][] = [[-1, 0], [1, 0], [0, -1], [0, 1]]
@@ -8704,9 +8710,14 @@ export function IconPaintEditor({
           if (region[p]) continue
           const i = p * 4
           const a = interior[i + 3]
-          if (a <= 8 || a >= 80) continue
+          if (a <= 8 || a >= inkT) continue
           if (isCut(i)) continue
-          if (Math.abs(interior[i] - tr) + Math.abs(interior[i + 1] - tg) + Math.abs(interior[i + 2] - tb) > 48) continue
+          if (
+            item.type !== 'text' &&
+            Math.abs(interior[i] - tr) + Math.abs(interior[i + 1] - tg) + Math.abs(interior[i + 2] - tb) > 48
+          ) {
+            continue
+          }
           let adj = false
           for (const [dx, dy] of dirs4) {
             const nx = x + dx, ny = y + dy
@@ -8716,6 +8727,8 @@ export function IconPaintEditor({
           if (adj) region[p] = 1
         }
       }
+      // Text solid fill: harden AA to full cover so recolour does not leave
+      // fringe that compounds on every Fill.
       const fill = pixelColor(color)
       const fr = parseInt(fill.slice(1, 3), 16)
       const fg = parseInt(fill.slice(3, 5), 16)
@@ -8734,7 +8747,12 @@ export function IconPaintEditor({
         od[i] = fr
         od[i + 1] = fg
         od[i + 2] = fb
-        od[i + 3] = interior[i + 3] >= 180 ? fa : Math.round((interior[i + 3] * fa) / 255)
+        if (item.type === 'text' && !isTransparentPaintColor(color)) {
+          // Flatten soft edges to solid so repeated fills do not stack fringe.
+          od[i + 3] = fa
+        } else {
+          od[i + 3] = interior[i + 3] >= 180 ? fa : Math.round((interior[i + 3] * fa) / 255)
+        }
         flooded++
       }
       if (!flooded) return null
@@ -8761,8 +8779,16 @@ export function IconPaintEditor({
       if (transparent && !punch) {
         // See-through: hide ink only — never stack-cut (punchThrough).
         if (item.type === 'text') {
-          // Keep other glyph punch masks. Clearing them re-solidified the rest of
-          // the string and left only Fill AA fringes punched later.
+          const clickP = Math.floor(canvasPoint.y) * W + Math.floor(canvasPoint.x)
+          const bits = punchMaskBits.get(item.id)
+          // Already a hole under the click — flip to see-through; do not grow the mask.
+          if (bits && bits.length === W * H && bits[Math.max(0, Math.min(bits.length - 1, clickP))]) {
+            return {
+              ...item,
+              punchThrough: false,
+              punchEnclosedHole: false
+            }
+          }
           if (nearlyWhole) {
             punchMaskCanvases.delete(item.id)
             punchMaskBits.delete(item.id)
@@ -8778,6 +8804,18 @@ export function IconPaintEditor({
             ...item,
             punchThrough: false,
             punchEnclosedHole: false
+          }
+        }
+        {
+          const clickP = Math.floor(canvasPoint.y) * W + Math.floor(canvasPoint.x)
+          const bits = punchMaskBits.get(item.id)
+          if (bits && bits.length === W * H && bits[Math.max(0, Math.min(bits.length - 1, clickP))]) {
+            return {
+              ...item,
+              punchThrough: false,
+              punchEnclosedHole: false,
+              ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {})
+            }
           }
         }
         if (nearlyWhole) {
@@ -9016,12 +9054,25 @@ export function IconPaintEditor({
       ) {
         // Empty letter counters are not glyph ink — leave for layer floodFill.
         if (item.type === 'text' && hit !== 'fill' && hit !== 'shadow' && !inPunchHole) return item
+        // See-through on an existing punch hole: convert to see-through without
+        // growing the mask (fillObjectRespectingCuts misses empty hole pixels).
+        if (!punch && inPunchHole) {
+          changed = true
+          if (item.type === 'text') textFillKind = 'glyph'
+          return {
+            ...item,
+            punchThrough: false,
+            punchEnclosedHole: false,
+            ...(item.type === 'shape' || item.type === 'poly' ? { fill: true } : {})
+          }
+        }
         const sectional = fillObjectRespectingCuts(item, canvasPoint)
         if (sectional) {
           if (sectional.imageDataUrl) imageUrls.push(sectional.imageDataUrl)
           changed = true
           if (item.type === 'text') textFillKind = 'glyph'
-          return { ...sectional, punchThrough: punch || !!sectional.punchThrough }
+          // Honour the toolbar mode; never keep a prior punchThrough on See-through.
+          return { ...sectional, punchThrough: punch }
         }
         // Text with no sectional hit (e.g. counter) — do not whole-object punch.
         if (item.type === 'text') return item
@@ -9486,11 +9537,12 @@ export function IconPaintEditor({
     filled: Uint8Array,
     layerId: PaintLayerId,
     _overlay: HTMLCanvasElement,
-    forcePunch = false
+    encloseInObject = false
   ) => {
     if (!isTransparentPaintColor(color)) return
-    const punch = forcePunch || transparentFillPunch()
-    if (forcePunch && attachHoleToEnclosingObject(filled, punch)) return
+    // Honour See-through vs Punch — never force punch just because the hole is enclosed.
+    const punch = transparentFillPunch()
+    if (encloseInObject && attachHoleToEnclosingObject(filled, punch)) return
     addPunchStampFromMask(filled, layerId, punch)
   }
 
