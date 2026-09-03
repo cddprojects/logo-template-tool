@@ -8732,27 +8732,78 @@ export function IconPaintEditor({
       }
       if (!flooded) return null
       const punch = transparentFillPunch()
-      if (isTransparentPaintColor(color)) {
+      const transparent = isTransparentPaintColor(color)
+      const nearlyWhole = wallHits === 0 && opaque > 0 && flooded >= opaque * 0.98
+
+      if (transparent && punch) {
+        // Punch hole: silhouette cuts layers below.
         setLocalPunchFromFilled(item, region, W, H)
-        return { ...item, punchThrough: punch || !!item.punchThrough }
+        if (nearlyWhole) {
+          return {
+            ...item,
+            color: fill,
+            punchThrough: true,
+            punchEnclosedHole: false,
+            ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {}),
+            ...(item.type === 'text' || item.type === 'stamp' ? {} : { borderColor: fill })
+          }
+        }
+        return { ...item, punchThrough: true, punchEnclosedHole: false }
       }
-      // Solid refill of a punched region: close the hole so the new colour shows.
-      const stillPunched =
-        (item.punchThrough || punchMaskBits.has(item.id) || punchMaskCanvases.has(item.id)) &&
-        subtractLocalPunchRegion(item, region, W, H)
-      const keepPunch = punch || stillPunched
-      if (item.type === 'text' && wallHits === 0 && opaque > 0 && flooded >= opaque * 0.98) {
-        return { ...item, color: firstSolidColor(color), punchThrough: keepPunch, punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false }
+
+      if (transparent && !punch) {
+        // See-through: hide ink only — never punchThrough / stack-cut.
+        if (nearlyWhole) {
+          if (item.type === 'stamp') {
+            // Rasters need a local silhouette hole; colour alone does not hide them.
+            setLocalPunchFromFilled(item, region, W, H)
+          } else {
+            punchMaskCanvases.delete(item.id)
+            punchMaskBits.delete(item.id)
+          }
+          return {
+            ...item,
+            color: fill,
+            punchThrough: false,
+            punchEnclosedHole: false,
+            ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {}),
+            ...(item.type === 'text' || item.type === 'stamp' ? {} : { borderColor: fill })
+          }
+        }
+        punchMaskCanvases.delete(item.id)
+        punchMaskBits.delete(item.id)
+        // Partial see-through → bake transparent pixels into a stamp below.
       }
-      if (
-        (item.type === 'shape' || item.type === 'poly') &&
-        !item.paintStrokes?.length &&
-        wallHits === 0 &&
-        opaque > 0 &&
-        flooded >= opaque * 0.98
-      ) {
-        return { ...item, color: firstSolidColor(color), fill: true, punchThrough: keepPunch, punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false }
+
+      let keepPunch = false
+      if (!transparent) {
+        const stillPunched =
+          (item.punchThrough || punchMaskBits.has(item.id) || punchMaskCanvases.has(item.id)) &&
+          subtractLocalPunchRegion(item, region, W, H)
+        keepPunch = punch || stillPunched
+        if (item.type === 'text' && nearlyWhole) {
+          return {
+            ...item,
+            color: firstSolidColor(color),
+            punchThrough: keepPunch,
+            punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false
+          }
+        }
+        if (
+          (item.type === 'shape' || item.type === 'poly') &&
+          !item.paintStrokes?.length &&
+          nearlyWhole
+        ) {
+          return {
+            ...item,
+            color: firstSolidColor(color),
+            fill: true,
+            punchThrough: keepPunch,
+            punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false
+          }
+        }
       }
+
       ctx.putImageData(obj, 0, 0)
       const bounds = lineNeedsDisplayTransform(item)
         ? (alphaBoundsFromCanvas(canvas) ?? boundsForLine(item))
@@ -8784,7 +8835,8 @@ export function IconPaintEditor({
           sourceStampSize: undefined,
           keepStrokeOnResize: undefined,
           linkedOutsideText: undefined,
-          color: firstSolidColor(color),
+          // Baked pixels own colour/alpha (including see-through holes).
+          color: transparent ? fill : firstSolidColor(color),
           punchThrough: keepPunch,
           punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false
         }
@@ -12542,15 +12594,15 @@ export function IconPaintEditor({
         v.type === 'text'
       )
     })
-    // See-through holes on Inner must be baked with the live base into decorations
+    // See-through on Inner must be baked with the live base into decorations
     // (and live Inner skipped) — exporting them as punchMasks would cut Outer too.
-    const hasContentSeeThrough = vectors.some(
-      (v) =>
-        (v.layer ?? 'content') === 'content' &&
-        !!v.punchMask &&
-        !v.punchThrough &&
-        (v.visible ?? v.editable ?? true) !== false
-    )
+    const hasContentSeeThrough = vectors.some((v) => {
+      if ((v.layer ?? 'content') !== 'content') return false
+      if (v.punchThrough) return false
+      if ((v.visible ?? v.editable ?? true) === false) return false
+      if (v.punchMask) return true
+      return isTransparentPaintColor(v.color ?? '')
+    })
     // Warped Inner proxy is baked into decorations. Also skip live Inner when
     // the user removed the letters/lucide stand-in and left a library stamp —
     // otherwise the live glyph/stroke peeks around the stamp on the small logo.
