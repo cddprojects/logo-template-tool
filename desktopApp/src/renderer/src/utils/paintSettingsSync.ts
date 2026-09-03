@@ -811,6 +811,16 @@ export function canvasHasOpaquePaint(canvas: HTMLCanvasElement, minAlpha = 24): 
   return false
 }
 
+/** Zero-alpha / CSS transparent — must not become live backgroundColor. */
+function isTransparentSyncColor(color: string): boolean {
+  const c = color.trim().toLowerCase()
+  if (!c || c === 'transparent' || c === 'none') return true
+  if (c.startsWith('linear-gradient(') || c.startsWith('radial-gradient(')) return false
+  if (/^#[0-9a-f]{8}$/.test(c) && c.slice(7, 9) === '00') return true
+  if (/^rgba?\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*0(?:\.0+)?\s*\)$/.test(c)) return true
+  return false
+}
+
 /**
  * Dominant RGB from pixels that are already nearly opaque (solid fill / border).
  * Soft outer-shadow fringes are ignored so a shadow recolor cannot become the
@@ -1220,6 +1230,11 @@ export function buildPaintContentSync(opts: {
   /** Fill-all on Outer: push the colour onto fill, border, and shadow together. */
   outerFillAll?: boolean
   /**
+   * When true, Outer Fill still syncs live colours but the paint overlay is kept
+   * (brush / eraser / stamps after Fill must survive outside Paint).
+   */
+  preserveOuterOverlay?: boolean
+  /**
    * Inner drawable area at paint resolution (smaller than canvas when outer
    * shadow insets the shape). sizeRatio is stored relative to this, not the
    * full canvas, so saved content matches what Paint shows vs the outer shape.
@@ -1253,19 +1268,28 @@ export function buildPaintContentSync(opts: {
       const fillColor = colors.fill || (target === 'fill' || opts.outerFillAll ? fallback : undefined)
       const borderColor = colors.border || (target === 'border' || opts.outerFillAll ? fallback : undefined)
       const shadowColor = colors.shadow || (target === 'shadow' || opts.outerFillAll ? fallback : undefined)
-      if (opts.outerFillAll && fallback) {
-        sync.outerFillColor = fallback
-        sync.outerBorderColor = fallback
-        sync.outerShadowColor = fallback
-        sync.clearOuterOverlay = true
+      // Transparent Fill is a hole (see-through / punch), not a live Outer colour.
+      // Promoting #rrggbb00 to backgroundColor clears the whole shape on Save.
+      const solidFill = fillColor && !isTransparentSyncColor(fillColor) ? fillColor : undefined
+      const solidBorder = borderColor && !isTransparentSyncColor(borderColor) ? borderColor : undefined
+      const solidShadow = shadowColor && !isTransparentSyncColor(shadowColor) ? shadowColor : undefined
+      const solidFallback =
+        fallback && !isTransparentSyncColor(fallback) ? fallback : undefined
+      if (opts.outerFillAll && solidFallback) {
+        sync.outerFillColor = solidFallback
+        sync.outerBorderColor = solidFallback
+        sync.outerShadowColor = solidFallback
+        // Brush / eraser after Fill must stay on the overlay outside Paint.
+        if (!opts.preserveOuterOverlay) sync.clearOuterOverlay = true
       } else {
-        if (fillColor) sync.outerFillColor = fillColor
-        if (borderColor) sync.outerBorderColor = borderColor
-        if (shadowColor) sync.outerShadowColor = shadowColor
+        if (solidFill) sync.outerFillColor = solidFill
+        if (solidBorder) sync.outerBorderColor = solidBorder
+        if (solidShadow) sync.outerShadowColor = solidShadow
         // Fill punches the bake, so overlay-cover of the leftover base is always
         // low. Keep the overlay and the live renderer fights: white fill/border
-        // AA shows through. Hand colour back to live and drop the overlay.
-        if (fillColor || borderColor || shadowColor) {
+        // AA shows through. Hand colour back to live and drop the overlay — unless
+        // the user painted on Outer after the Fill.
+        if ((solidFill || solidBorder || solidShadow) && !opts.preserveOuterOverlay) {
           sync.clearOuterOverlay = true
         }
       }

@@ -4850,6 +4850,8 @@ export function IconPaintEditor({
   const lastOuterFillColorsRef = useRef<{ fill?: string; border?: string; shadow?: string }>({})
   /** Fill-all on Outer: live fill + border + shadow should all take the paint colour. */
   const lastOuterFillAllRef = useRef(false)
+  /** Brush / eraser / non-fill paint on Outer after a Fill — keep overlay on Save. */
+  const preserveOuterOverlayRef = useRef(false)
 
   const [tool, setTool] = useState<Tool>('pointer')
   const toolRef = useRef<Tool>('pointer')
@@ -5416,6 +5418,10 @@ export function IconPaintEditor({
   const activeAddLayer = (): 'container' | 'content' =>
     layerOrderRef.current.find(layerIsEditable) ?? 'content'
 
+  const markOuterOverlayPreserved = () => {
+    if (activeAddLayer() === 'container') preserveOuterOverlayRef.current = true
+  }
+
   /**
    * Stamp target for floating images / paste commit.
    * The topmost checked layer receives committed images.
@@ -5629,6 +5635,7 @@ export function IconPaintEditor({
       lastOuterFillColorRef.current = null
       lastOuterFillColorsRef.current = {}
       lastOuterFillAllRef.current = false
+      preserveOuterOverlayRef.current = false
       if (usable && hasContainer) {
         editContainerRef.current = true
         setEditContainer(true)
@@ -8394,7 +8401,9 @@ export function IconPaintEditor({
   const decorationsCanvas = (
     layer?: PaintLayerId,
     includeLinkedText = false,
-    includeContentBound = false
+    includeContentBound = false,
+    /** Bake live Inner base under overlay so see-through holes reveal Outer outside Paint. */
+    includeContentBase = false
   ): HTMLCanvasElement => {
     const c = document.createElement('canvas')
     c.width = W; c.height = H
@@ -8423,6 +8432,9 @@ export function IconPaintEditor({
       try {
         const t = tmp.getContext('2d')!
         for (const step of belowSteps) paintObjectStep(t, step.l)
+        if (includeContentBase && id === 'content') {
+          t.drawImage(baseCanvas(id), 0, 0)
+        }
         t.drawImage(layerCanvas(id), 0, 0)
         for (const step of aboveSteps) paintObjectStep(t, step.l)
         x.drawImage(tmp, 0, 0)
@@ -8849,6 +8861,8 @@ export function IconPaintEditor({
     lastOuterFillColorRef.current = css
     lastOuterFillColorsRef.current = { ...lastOuterFillColorsRef.current, [kind]: css }
     lastOuterFillAllRef.current = false
+    // This Fill itself is synced to live colour — later brush work must set the flag.
+    preserveOuterOverlayRef.current = false
   }
 
   const transparentFillPunch = () =>
@@ -8865,6 +8879,53 @@ export function IconPaintEditor({
     if (!nl) return
     nl.punchThrough = punchThrough
     const next = [...linesRef.current, nl]
+    linesRef.current = next
+    commitLines(next)
+  }
+
+  /**
+   * Solid Fill over a transparent / punched region must remove overlapping hole
+   * stamps — otherwise dest-out keeps punching the new colour away.
+   */
+  const erasePunchStampsOverlapping = (filled: Uint8Array, layerId: PaintLayerId) => {
+    let changed = false
+    const next: LineObj[] = []
+    for (const l of linesRef.current) {
+      if (!l.punchMask || vectorLayerOf(l) !== layerId) {
+        next.push(l)
+        continue
+      }
+      const bits = punchMaskBits.get(l.id)
+      let overlap = 0
+      let stampN = 0
+      if (bits && bits.length === filled.length) {
+        for (let p = 0; p < bits.length; p++) {
+          if (!bits[p]) continue
+          stampN++
+          if (filled[p]) overlap++
+        }
+      } else if (l.pts.length >= 2) {
+        const a = l.pts[0], b = l.pts[1]
+        const x0 = Math.max(0, Math.floor(Math.min(a.x, b.x)))
+        const y0 = Math.max(0, Math.floor(Math.min(a.y, b.y)))
+        const x1 = Math.min(W, Math.ceil(Math.max(a.x, b.x)))
+        const y1 = Math.min(H, Math.ceil(Math.max(a.y, b.y)))
+        for (let y = y0; y < y1; y++) {
+          for (let x = x0; x < x1; x++) {
+            stampN++
+            if (filled[y * W + x]) overlap++
+          }
+        }
+      }
+      if (stampN > 0 && overlap / stampN >= 0.12) {
+        changed = true
+        punchMaskCanvases.delete(l.id)
+        punchMaskBits.delete(l.id)
+        continue
+      }
+      next.push(l)
+    }
+    if (!changed) return
     linesRef.current = next
     commitLines(next)
   }
@@ -9029,7 +9090,14 @@ export function IconPaintEditor({
       if (!filled[p]) continue
       const i = p * 4
       const srcA = composite[i + 3]
-      if (srcA <= 8) continue
+      if (srcA <= 8) {
+        // Restore punched / see-through holes so live bake matches the new fill.
+        bd[i] = fr
+        bd[i + 1] = fg
+        bd[i + 2] = fb
+        bd[i + 3] = fa
+        continue
+      }
       const outA = srcA >= 170 ? fa : Math.max(12, Math.round((srcA * fa) / 255))
       bd[i] = fr
       bd[i + 1] = fg
@@ -9074,6 +9142,7 @@ export function IconPaintEditor({
       applyTransparentFlood(punched, layerId ?? 'content', ctx.canvas)
     } else {
       punchFilledFromBase(underlay, punched)
+      if (layerId) erasePunchStampsOverlapping(punched, layerId)
     }
     if (layerId === 'container') {
       const css = cssPaintColor(fill)
@@ -9081,6 +9150,7 @@ export function IconPaintEditor({
       lastOuterFillColorRef.current = css
       lastOuterFillColorsRef.current = { fill: css, border: css, shadow: css }
       lastOuterFillAllRef.current = true
+      preserveOuterOverlayRef.current = false
     }
   }
 
@@ -9258,14 +9328,15 @@ export function IconPaintEditor({
     const EMPTY_A = 8
     const clickedEmpty = ta <= EMPTY_A
     let enclosedHole = false
-    if (clickedEmpty && isTransparentPaintColor(color)) {
+    if (clickedEmpty) {
       const ink = new Uint8Array(W * H)
       for (let p = 0; p < W * H; p++) {
         if (data[p * 4 + 3] > EMPTY_A || isWall(p * 4)) ink[p] = 1
       }
       const outside = floodOutsideEmpty(ink, W, H)
+      // Never flood the empty stage around the icon — only enclosed holes.
       if (outside[py * W + px]) return
-      enclosedHole = true
+      if (isTransparentPaintColor(color)) enclosedHole = true
     }
 
     const tol = 32
@@ -9442,7 +9513,14 @@ export function IconPaintEditor({
         const rimCutoff = borderPx > 0 ? rimW + 0.75 : 0
         const isOuterFillRegion = (p: number) => {
           const a = data[p * 4 + 3]
-          if (a <= 8) return false
+          if (a <= 8) {
+            // Solid Outer recolor: also cover punched / see-through holes that sit
+            // inside the silhouette (high EDT = interior, not the empty stage).
+            if (!isTransparentPaintColor(color) && edt[p] > Math.max(rimCutoff, 1) + 0.5) {
+              return true
+            }
+            return false
+          }
           if (borderPx > 0 && edt[p] <= rimCutoff) return false
           if (a < 100 && edt[p] > 8) return false
           if (fillDiffersFromRim && a < 150) {
@@ -9552,7 +9630,15 @@ export function IconPaintEditor({
         if (!filled[p]) continue
         const i = p * 4
         const srcA = data[i + 3]
-        if (srcA <= EMPTY_A) continue
+        if (srcA <= EMPTY_A) {
+          // Refill punched / see-through holes with a solid Outer colour.
+          if (!solidOuterFill) continue
+          od[i] = fr
+          od[i + 1] = fg
+          od[i + 2] = fb
+          od[i + 3] = fa
+          continue
+        }
         const outA = solidOuterFill
           ? (srcA >= 170 ? fa : Math.max(12, Math.round((srcA * fa) / 255)))
           : srcA < 150
@@ -9570,8 +9656,10 @@ export function IconPaintEditor({
         applyTransparentFlood(filled, layerId ?? 'content', ctx.canvas)
       } else if (solidOuterFill) {
         recolorFilledBase(underlay, filled, fr, fg, fb, fa, data)
+        erasePunchStampsOverlapping(filled, layerId ?? 'content')
       } else {
         punchFilledFromBase(underlay, filled)
+        erasePunchStampsOverlapping(filled, layerId ?? 'content')
       }
       return
     }
@@ -9845,6 +9933,10 @@ export function IconPaintEditor({
       applyTransparentFlood(filled, layerId ?? 'content', ctx.canvas, enclosedHole)
     } else if (!clickedEmpty) {
       punchFilledFromBase(underlay, filled)
+      erasePunchStampsOverlapping(filled, layerId ?? 'content')
+    } else {
+      // Filling a transparent / punched hole with a solid colour.
+      erasePunchStampsOverlapping(filled, layerId ?? 'content')
     }
   }
 
@@ -11529,6 +11621,9 @@ export function IconPaintEditor({
             size, c, true
           )
         }
+        if (targetCtxs().some((ctx) => ctx.canvas === layerCanvas('container'))) {
+          preserveOuterOverlayRef.current = true
+        }
         lastPt.current = snap.pt
         schedulePaintView(false, () => {
           drawEraserCursor(snap.pt)
@@ -11559,6 +11654,7 @@ export function IconPaintEditor({
       for (const ctx of addPaintCtxs()) {
         strokeBrushTip(ctx, brushTip, lastPt.current.x, lastPt.current.y, pt.x, pt.y, size, c, false)
       }
+      markOuterOverlayPreserved()
       lastPt.current = pt
       schedulePaintView()
     }
@@ -11891,12 +11987,16 @@ export function IconPaintEditor({
       for (const ctx of addPaintCtxs()) {
         stampBrushTip(ctx, brushTip, pt.x, pt.y, size, c, false)
       }
+      markOuterOverlayPreserved()
       redrawLines()
       startPointerDragCapture()
     } else if (tool === 'eraser') {
       const c = pixelColor(color)
       for (const ctx of targets) {
         stampBrushTip(ctx, eraserTip, initialPoint.x, initialPoint.y, size, c, true)
+      }
+      if (targets.some((ctx) => ctx.canvas === layerCanvas('container'))) {
+        preserveOuterOverlayRef.current = true
       }
       redrawLines()
       eraserArrowLockedRef.current = false
@@ -11954,7 +12054,8 @@ export function IconPaintEditor({
       outerFillTarget: lastOuterFillTargetRef.current ?? undefined,
       outerFillPaintColor: lastOuterFillColorRef.current ?? undefined,
       outerFillColors: lastOuterFillColorsRef.current,
-      outerFillAll: lastOuterFillAllRef.current || undefined
+      outerFillAll: lastOuterFillAllRef.current || undefined,
+      preserveOuterOverlay: preserveOuterOverlayRef.current
     })
     // Full Outer recolor via Fill → clear overlay so live backgroundColor /
     // containerColor owns the color (keeps favicon↔logo sync consistent).
@@ -11982,14 +12083,29 @@ export function IconPaintEditor({
         v.type === 'text'
       )
     })
+    // See-through holes on Inner must be baked with the live base into decorations
+    // (and live Inner skipped) — exporting them as punchMasks would cut Outer too.
+    const hasContentSeeThrough = vectors.some(
+      (v) =>
+        (v.layer ?? 'content') === 'content' &&
+        !!v.punchMask &&
+        !v.punchThrough &&
+        (v.visible ?? v.editable ?? true) !== false
+    )
     // Warped Inner proxy is baked into decorations. Also skip live Inner when
     // the user removed the letters/lucide stand-in and left a library stamp —
     // otherwise the live glyph/stroke peeks around the stamp on the small logo.
     const bakeContentProxy =
       vectors.some((v) => v.contentBound && reshapeIsApplied(v.reshapeQuad, v.reshapeSrc)) ||
-      (!hasLiveInnerStandIn && hasReplacementContent)
+      (!hasLiveInnerStandIn && hasReplacementContent) ||
+      hasContentSeeThrough
     const containerDecor = decorationsCanvas('container')
-    const contentDecor = decorationsCanvas('content', bakeLinkedText, bakeContentProxy)
+    const contentDecor = decorationsCanvas(
+      'content',
+      bakeLinkedText,
+      bakeContentProxy,
+      hasContentSeeThrough
+    )
     // Overlays only — live Outer/Inner settings stay outside Paint.
     await onSave(
       {
@@ -12016,9 +12132,28 @@ export function IconPaintEditor({
           c.width = W
           c.height = H
           const x = c.getContext('2d')!
+          const exportPunch = (item: LineObj) => {
+            if (item.type === 'group') {
+              for (const child of vectors) {
+                if (child.parentId === item.id) exportPunch(child)
+              }
+              return
+            }
+            // Punch hole: cut through layers below (export for outside Paint).
+            if (item.punchThrough) {
+              renderPunchSilhouette(x, item, vectors, (v) => (v.visible ?? v.editable ?? true) !== false)
+              return
+            }
+            // See-through on Outer only: applied before Inner, so Inner still shows.
+            // See-through on Inner must NOT become a destination-out mask outside —
+            // that punches Outer through to the page (looks like Punch hole).
+            if (id === 'container' && item.punchMask) {
+              renderPunchSilhouette(x, item, vectors, (v) => (v.visible ?? v.editable ?? true) !== false)
+            }
+          }
           for (const l of vectors) {
             if (l.parentId || vectorLayerOf(l) !== id) continue
-            renderPunchSilhouette(x, l, vectors, (item) => (item.visible ?? item.editable ?? true) !== false)
+            exportPunch(l)
           }
           const data = x.getImageData(0, 0, W, H).data
           for (let i = 3; i < data.length; i += 16) {
