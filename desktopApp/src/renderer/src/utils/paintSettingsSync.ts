@@ -1322,23 +1322,34 @@ export function buildPaintContentSync(opts: {
       !!colors.border ||
       !!colors.shadow
     if (hasExplicitOuterFill) {
-      const sampled = opts.containerOverlay && canvasHasOpaquePaint(opts.containerOverlay)
-        ? sampleDominantOpaqueColor(
-            opts.containerOverlay,
-            target === 'shadow' ? 8 : 24
-          )
-        : null
-      const fallback = opts.outerFillPaintColor || sampled
-      const fillColor = colors.fill || (target === 'fill' || opts.outerFillAll ? fallback : undefined)
-      const borderColor = colors.border || (target === 'border' || opts.outerFillAll ? fallback : undefined)
-      const shadowColor = colors.shadow || (target === 'shadow' || opts.outerFillAll ? fallback : undefined)
-      // Transparent Fill is a hole (see-through / punch), not a live Outer colour.
-      // Promoting #rrggbb00 to backgroundColor clears the whole shape on Save.
-      const solidFill = fillColor && !isTransparentSyncColor(fillColor) ? fillColor : undefined
-      const solidBorder = borderColor && !isTransparentSyncColor(borderColor) ? borderColor : undefined
-      const solidShadow = shadowColor && !isTransparentSyncColor(shadowColor) ? shadowColor : undefined
-      const solidFallback =
-        fallback && !isTransparentSyncColor(fallback) ? fallback : undefined
+      // Only the Fill-tool colour recorded this session — never sample Outer
+      // overlay paint (brush / object stamps on Outer would rewrite live colour).
+      const fallback =
+        opts.outerFillPaintColor && !isTransparentSyncColor(opts.outerFillPaintColor)
+          ? opts.outerFillPaintColor
+          : undefined
+      const fillColor =
+        colors.fill && !isTransparentSyncColor(colors.fill)
+          ? colors.fill
+          : target === 'fill' || opts.outerFillAll
+            ? fallback
+            : undefined
+      const borderColor =
+        colors.border && !isTransparentSyncColor(colors.border)
+          ? colors.border
+          : target === 'border' || opts.outerFillAll
+            ? fallback
+            : undefined
+      const shadowColor =
+        colors.shadow && !isTransparentSyncColor(colors.shadow)
+          ? colors.shadow
+          : target === 'shadow' || opts.outerFillAll
+            ? fallback
+            : undefined
+      const solidFill = fillColor
+      const solidBorder = borderColor
+      const solidShadow = shadowColor
+      const solidFallback = fallback
       if (opts.outerFillAll && solidFallback) {
         sync.outerFillColor = solidFallback
         sync.outerBorderColor = solidFallback

@@ -555,7 +555,7 @@ function punchStampFromFilled(
     thickness: 0,
     color: '#00000000',
     fill: true,
-    punchThrough: true,
+    punchThrough: false,
     punchMask: true,
     imageDataUrl: dataUrl,
     stampSource: 'image',
@@ -632,7 +632,10 @@ async function restorePunchMasks(
     )
     if (hasOp) continue
     const stamp = punchStampFromFilled(bits, layer, W, H)
-    if (stamp) next.push(stamp)
+    if (stamp) {
+      stamp.punchThrough = true
+      next.push(stamp)
+    }
   }
   return next
 }
@@ -8985,33 +8988,29 @@ export function IconPaintEditor({
   }
 
   const fillSelectedObjectLayer = (canvasPoint: Pt): boolean => {
-    // Fill follows the clicked icon even when it was not selected beforehand.
-    const clickedStamp = [...linesRef.current].reverse().find((item) => {
-      if (item.type !== 'stamp' || item.punchMask || !isPaintHitVisible(item) || item.pts.length < 2) return false
-      if (isLiveInnerVector(item) && overlayHasOpaque(vectorLayerOf(item))) return false
-      return paintObjectHit(item, canvasPoint, W, H) != null || objectPunchHoleAt(item, canvasPoint)
-    })
-    const clickedText = [...linesRef.current].reverse().find((item) => {
-      if (item.type !== 'text' || !isPaintHitVisible(item)) return false
-      if (isLiveInnerVector(item) && overlayHasOpaque(vectorLayerOf(item))) return false
-      return textFillHit(item, canvasPoint, W, H) != null || objectPunchHoleAt(item, canvasPoint)
-    })
-    const clickedPunched = [...linesRef.current].reverse().find((item) => {
+    // Fill follows the clicked object even when it was not selected beforehand.
+    // Include shape/poly (not only stamp/text) — otherwise Fill falls through to
+    // layer floodFill, which creates free punch stamps / Outer sync (looks like Punch).
+    // Do not skip live Inner when the overlay has paint: object-local see-through
+    // must still win over layer flood.
+    const clicked = topmostPaintHit((item) => {
       if (item.punchMask || !isPaintHitVisible(item)) return false
-      if (item.type !== 'stamp' && item.type !== 'text' && item.type !== 'shape' && item.type !== 'poly') {
+      if (
+        item.type !== 'stamp' &&
+        item.type !== 'text' &&
+        item.type !== 'shape' &&
+        item.type !== 'poly'
+      ) {
         return false
       }
-      if (isLiveInnerVector(item) && overlayHasOpaque(vectorLayerOf(item))) return false
-      return objectPunchHoleAt(item, canvasPoint)
+      return objectOwnsFillClick(item, canvasPoint)
     })
     const selectedExisting = linesRef.current.find((item) => item.id === selectedIdRef.current)
     const selectedHit =
       selectedExisting &&
       isPaintHitVisible(selectedExisting) &&
-      !(isLiveInnerVector(selectedExisting) && overlayHasOpaque(vectorLayerOf(selectedExisting))) &&
       objectOwnsFillClick(selectedExisting, canvasPoint)
-    const selected =
-      clickedStamp ?? clickedText ?? clickedPunched ?? (selectedHit ? selectedExisting : undefined)
+    const selected = clicked ?? (selectedHit ? selectedExisting : undefined)
     if (!selected || !isPaintHitVisible(selected)) return false
     const target = checkedGroupTarget(selected) ?? selected
     const targetIds =
@@ -9190,6 +9189,9 @@ export function IconPaintEditor({
   }
 
   const recordOuterFill = (kind: 'fill' | 'border' | 'shadow', hex: string) => {
+    // Transparent Outer Fill is a hole (see-through / punch) — never promote its
+    // RGB to live backgroundColor / containerColor on Save.
+    if (isTransparentPaintColor(hex)) return
     const css = cssPaintColor(hex)
     lastOuterFillTargetRef.current = kind
     lastOuterFillColorRef.current = css
@@ -9525,7 +9527,8 @@ export function IconPaintEditor({
     setLocalPunchFromFilled(owner, holeBits, W, H)
     const next = linesRef.current.map((l) =>
       l.id === owner!.id
-        ? { ...l, punchThrough: punchThrough || !!l.punchThrough, punchEnclosedHole: true }
+        // Honour toolbar mode: See-through must clear a prior punchThrough.
+        ? { ...l, punchThrough, punchEnclosedHole: true }
         : l
     )
     linesRef.current = next
@@ -9542,7 +9545,14 @@ export function IconPaintEditor({
     if (!isTransparentPaintColor(color)) return
     // Honour See-through vs Punch — never force punch just because the hole is enclosed.
     const punch = transparentFillPunch()
-    if (encloseInObject && attachHoleToEnclosingObject(filled, punch)) return
+    // Bind holes to the enclosing object when possible (selected or not). Skip for
+    // Outer-wide floods so a letter bbox cannot steal a background see-through.
+    if (
+      (encloseInObject || layerId !== 'container') &&
+      attachHoleToEnclosingObject(filled, punch)
+    ) {
+      return
+    }
     addPunchStampFromMask(filled, layerId, punch)
   }
 
@@ -9635,10 +9645,10 @@ export function IconPaintEditor({
     ctx.putImageData(out, 0, 0)
     if (isTransparentPaintColor(color)) {
       applyTransparentFlood(punched, layerId ?? 'content', ctx.canvas)
-    } else {
-      punchFilledFromBase(underlay, punched)
-      if (layerId) clearPunchHolesOverlapping(punched, layerId, { clearAllOnLayer: layerId === 'container' })
+      return
     }
+    punchFilledFromBase(underlay, punched)
+    if (layerId) clearPunchHolesOverlapping(punched, layerId, { clearAllOnLayer: layerId === 'container' })
     if (layerId === 'container') {
       const css = cssPaintColor(fill)
       lastOuterFillTargetRef.current = 'fill'
@@ -9918,7 +9928,13 @@ export function IconPaintEditor({
     // Outer fill stays interior-only. Border and shadow are one flood when they
     // share a colour (same as a normal fill), so curved strokes + matching glow
     // recolour together instead of a Manhattan ring that misses the curve.
-    if (layerId === 'container' && !clickedEmpty && !clickOnWall) {
+    const clickOnPaintObject = linesRef.current.some(
+      (item) =>
+        !item.punchMask &&
+        isPaintHitVisible(item) &&
+        objectOwnsFillClick(item, { x: sx, y: sy })
+    )
+    if (layerId === 'container' && !clickedEmpty && !clickOnWall && !clickOnPaintObject) {
       const edt = alphaOutsideEDT(data, W, H, 185)
       outerKind = classifyOuterFillTarget(data, sx, sy, edt)
       const borderPx = Math.max(0, outerBorderWidthPx || 0)
@@ -12540,15 +12556,36 @@ export function IconPaintEditor({
         let id = floodFillTargetLayer(pt.x, pt.y)
         // Inner object ink sits on top of Outer. Never treat that click as an
         // Outer Fill — it would recolor the live shape on save.
+        const clickOwnsObject = linesRef.current.some(
+          (item) =>
+            !item.punchMask &&
+            isPaintHitVisible(item) &&
+            objectOwnsFillClick(item, pt)
+        )
         if (
           id === 'container' &&
           layerIsEditable('content') &&
-          (vectorAlphaAt('content', pt.x, pt.y) > 8 ||
+          (clickOwnsObject ||
+            vectorAlphaAt('content', pt.x, pt.y) > 8 ||
             punchHoleAt('content', pt.x, pt.y) ||
             pointInEnclosedObjectHole('content', pt.x, pt.y))
         ) {
-          id = 'content'
+          // Prefer content when the click is on an Inner object. Container-layer
+          // shapes are handled by fillSelectedObjectLayer above.
+          if (
+            !linesRef.current.some(
+              (item) =>
+                vectorLayerOf(item) === 'container' &&
+                !item.punchMask &&
+                isPaintHitVisible(item) &&
+                objectOwnsFillClick(item, pt)
+            )
+          ) {
+            id = 'content'
+          }
         }
+        // Clicks on paint objects must never run Outer Fill sync (live background).
+        if (id === 'container' && clickOwnsObject) return
         if (id) {
           const ctx = layerCanvas(id).getContext('2d')
           if (ctx) floodFill(ctx, pt.x, pt.y, baseCanvas(id), id)
