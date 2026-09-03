@@ -2832,11 +2832,17 @@ function textPunchBitsFromSavedLayer(
       holeN++
     }
   }
-  // Older saves dest-outed the whole glyph as the punch mask.
+  // Prefer the persisted flag when present (re-enter Paint after Save).
+  if (l.punchEnclosedHole) {
+    return holeN > 8 ? { bits: hole, enclosed: true } : { bits, enclosed: true }
+  }
+  // Whole-character / multi-glyph punch-through must keep `bits` as-is —
+  // inverting to counters left punchThrough with no mask (see-through + fringe).
   const looksLikeFullGlyph = glyph > 0 && overlap >= glyph * 0.45 && holeN < overlap * 0.35
   if (looksLikeFullGlyph) {
-    return holeN > 8 ? { bits: hole, enclosed: true } : null
+    return { bits, enclosed: false }
   }
+  // Mask mostly off-glyph → enclosed counter hole.
   return { bits, enclosed: mask > 0 && overlap < mask * 0.35 }
 }
 
@@ -3024,6 +3030,28 @@ function setLocalPunchFromFilled(item: LineObj, filled: Uint8Array, W: number, H
   ctx.putImageData(img, 0, 0)
   punchMaskCanvases.set(item.id, canvas)
   rewritePunchBitsFromLocal(item, W, H)
+}
+
+/** Remove punch coverage for a filled region; returns whether any punch bits remain. */
+function subtractLocalPunchRegion(item: LineObj, region: Uint8Array, W: number, H: number): boolean {
+  const bits = punchMaskBits.get(item.id)
+  if (!bits || bits.length !== region.length) {
+    punchMaskCanvases.delete(item.id)
+    punchMaskBits.delete(item.id)
+    return false
+  }
+  let remain = 0
+  const next = new Uint8Array(bits.length)
+  for (let p = 0; p < bits.length; p++) {
+    if (!bits[p] || region[p]) continue
+    next[p] = 1
+    remain++
+  }
+  punchMaskCanvases.delete(item.id)
+  punchMaskBits.delete(item.id)
+  if (remain === 0) return false
+  setLocalPunchFromFilled(item, next, W, H)
+  return true
 }
 
 function objectHasFillHole(l: LineObj): boolean {
@@ -5380,12 +5408,35 @@ export function IconPaintEditor({
     return alpha
   }
 
+  /** True when a punch / see-through hole on `id` covers the canvas point. */
+  const punchHoleAt = (id: PaintLayerId, x: number, y: number): boolean => {
+    const px = Math.max(0, Math.min(W - 1, Math.floor(x)))
+    const py = Math.max(0, Math.min(H - 1, Math.floor(y)))
+    const p = py * W + px
+    for (const l of linesRef.current) {
+      if (vectorLayerOf(l) !== id) continue
+      const bits = punchMaskBits.get(l.id)
+      if (bits && bits.length === W * H && bits[p]) return true
+      if (!l.punchMask || l.pts.length < 2) continue
+      const a = l.pts[0], b = l.pts[1]
+      const x0 = Math.min(a.x, b.x), y0 = Math.min(a.y, b.y)
+      const x1 = Math.max(a.x, b.x), y1 = Math.max(a.y, b.y)
+      if (px >= x0 && px < x1 && py >= y0 && py < y1) return true
+    }
+    return false
+  }
+
   /** Fill the topmost visible layer that already has ink at the click — never empty-flood Inner over Outer. */
   const floodFillTargetLayer = (x: number, y: number): PaintLayerId | null => {
     for (const id of layerOrderRef.current) {
       if (!layerIsEditable(id)) continue
       if (layerCompositeAlphaAt(id, x, y) > 8) return id
       if (vectorAlphaAt(id, x, y) > 8) return id
+    }
+    // Empty click inside a punched hole → that hole's layer (not Outer fallback).
+    for (const id of layerOrderRef.current) {
+      if (!layerIsEditable(id)) continue
+      if (punchHoleAt(id, x, y)) return id
     }
     const editable = layerOrderRef.current.filter(layerIsEditable)
     return editable[editable.length - 1] ?? null
@@ -8640,8 +8691,13 @@ export function IconPaintEditor({
         setLocalPunchFromFilled(item, region, W, H)
         return { ...item, punchThrough: punch || !!item.punchThrough }
       }
+      // Solid refill of a punched region: close the hole so the new colour shows.
+      const stillPunched =
+        (item.punchThrough || punchMaskBits.has(item.id) || punchMaskCanvases.has(item.id)) &&
+        subtractLocalPunchRegion(item, region, W, H)
+      const keepPunch = punch || stillPunched
       if (item.type === 'text' && wallHits === 0 && opaque > 0 && flooded >= opaque * 0.98) {
-        return { ...item, color: firstSolidColor(color), punchThrough: punch || !!item.punchThrough }
+        return { ...item, color: firstSolidColor(color), punchThrough: keepPunch, punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false }
       }
       if (
         (item.type === 'shape' || item.type === 'poly') &&
@@ -8650,7 +8706,7 @@ export function IconPaintEditor({
         opaque > 0 &&
         flooded >= opaque * 0.98
       ) {
-        return { ...item, color: firstSolidColor(color), fill: true, punchThrough: punch || !!item.punchThrough }
+        return { ...item, color: firstSolidColor(color), fill: true, punchThrough: keepPunch, punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false }
       }
       ctx.putImageData(obj, 0, 0)
       const bounds = lineNeedsDisplayTransform(item)
@@ -8684,7 +8740,8 @@ export function IconPaintEditor({
           keepStrokeOnResize: undefined,
           linkedOutsideText: undefined,
           color: firstSolidColor(color),
-          punchThrough: punch || !!item.punchThrough
+          punchThrough: keepPunch,
+          punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false
         }
         if (bakeXform && punchMaskCanvases.has(item.id)) {
           const bits = punchMaskBits.get(item.id)
@@ -8701,6 +8758,15 @@ export function IconPaintEditor({
     }
   }
 
+  /** Click lands inside this object's punch / see-through hole mask. */
+  const objectPunchHoleAt = (item: LineObj, canvasPoint: Pt): boolean => {
+    const bits = punchMaskBits.get(item.id)
+    if (!bits || bits.length !== W * H) return false
+    const px = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
+    const py = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
+    return !!bits[py * W + px]
+  }
+
   /** True when this object (or a group child) actually has fillable ink at the point. */
   const objectOwnsFillClick = (item: LineObj, canvasPoint: Pt): boolean => {
     const l = checkedGroupTarget(item) ?? item
@@ -8710,6 +8776,7 @@ export function IconPaintEditor({
         return !!child && child.type !== 'group' && objectOwnsFillClick(child, canvasPoint)
       })
     }
+    if (objectPunchHoleAt(l, canvasPoint)) return true
     if (l.type === 'text') return textFillHit(l, canvasPoint, W, H) != null
     if (l.type === 'stamp' || l.type === 'shape' || l.type === 'poly') {
       return paintObjectHit(l, canvasPoint, W, H) != null
@@ -8755,12 +8822,20 @@ export function IconPaintEditor({
     const clickedStamp = [...linesRef.current].reverse().find((item) => {
       if (item.type !== 'stamp' || item.punchMask || !isPaintHitVisible(item) || item.pts.length < 2) return false
       if (isLiveInnerVector(item) && overlayHasOpaque(vectorLayerOf(item))) return false
-      return paintObjectHit(item, canvasPoint, W, H) != null
+      return paintObjectHit(item, canvasPoint, W, H) != null || objectPunchHoleAt(item, canvasPoint)
     })
     const clickedText = [...linesRef.current].reverse().find((item) => {
       if (item.type !== 'text' || !isPaintHitVisible(item)) return false
       if (isLiveInnerVector(item) && overlayHasOpaque(vectorLayerOf(item))) return false
-      return textFillHit(item, canvasPoint, W, H) != null
+      return textFillHit(item, canvasPoint, W, H) != null || objectPunchHoleAt(item, canvasPoint)
+    })
+    const clickedPunched = [...linesRef.current].reverse().find((item) => {
+      if (item.punchMask || !isPaintHitVisible(item)) return false
+      if (item.type !== 'stamp' && item.type !== 'text' && item.type !== 'shape' && item.type !== 'poly') {
+        return false
+      }
+      if (isLiveInnerVector(item) && overlayHasOpaque(vectorLayerOf(item))) return false
+      return objectPunchHoleAt(item, canvasPoint)
     })
     const selectedExisting = linesRef.current.find((item) => item.id === selectedIdRef.current)
     const selectedHit =
@@ -8768,7 +8843,8 @@ export function IconPaintEditor({
       isPaintHitVisible(selectedExisting) &&
       !(isLiveInnerVector(selectedExisting) && overlayHasOpaque(vectorLayerOf(selectedExisting))) &&
       objectOwnsFillClick(selectedExisting, canvasPoint)
-    const selected = clickedStamp ?? clickedText ?? (selectedHit ? selectedExisting : undefined)
+    const selected =
+      clickedStamp ?? clickedText ?? clickedPunched ?? (selectedHit ? selectedExisting : undefined)
     if (!selected || !isPaintHitVisible(selected)) return false
     const target = checkedGroupTarget(selected) ?? selected
     const targetIds =
@@ -8792,6 +8868,7 @@ export function IconPaintEditor({
     const next = linesRef.current.map((item): LineObj => {
       if (!targetIds.has(item.id) || item.type === 'group') return item
       const hit = paintObjectHit(item, canvasPoint, W, H)
+      const inPunchHole = objectPunchHoleAt(item, canvasPoint)
       if (hit === 'shadow') {
         textFillKind = 'shadow'
         changed = true
@@ -8802,19 +8879,78 @@ export function IconPaintEditor({
         return { ...item, shadow: true, shadowColor: fillColor }
       }
 
-      // Transparent Fill on an object = same as select-object → set #xxxxxx00
-      // (See-through or Punch hole). Do this before sectional flood so Fill and
-      // colour-picker stay consistent for whole-object transparent.
+      // Transparent Fill: prefer a sectional flood (one glyph / connected region).
+      // Whole-object transparentObjectPatch is only for the colour-picker path —
+      // using it here punched every character in a text run.
       if (
         transparent &&
         (item.type === 'stamp' || item.type === 'text' || item.type === 'shape' || item.type === 'poly')
       ) {
         // Empty letter counters are not glyph ink — leave for layer floodFill.
-        if (item.type === 'text' && hit !== 'fill' && hit !== 'shadow') return item
+        if (item.type === 'text' && hit !== 'fill' && hit !== 'shadow' && !inPunchHole) return item
+        const sectional = fillObjectRespectingCuts(item, canvasPoint)
+        if (sectional) {
+          if (sectional.imageDataUrl) imageUrls.push(sectional.imageDataUrl)
+          changed = true
+          if (item.type === 'text') textFillKind = 'glyph'
+          return { ...sectional, punchThrough: punch || !!sectional.punchThrough }
+        }
+        // Text with no sectional hit (e.g. counter) — do not whole-object punch.
+        if (item.type === 'text') return item
+        // Shape / stamp / poly: whole-object see-through or punch.
         changed = true
-        if (item.type === 'text') textFillKind = 'glyph'
         const patch = transparentObjectPatch(item, fillColor)
         return { ...item, ...patch }
+      }
+
+      // Solid Fill into an existing punch hole: close that hole and restore/recolour ink.
+      if (inPunchHole && !transparent) {
+        const bits = punchMaskBits.get(item.id)
+        const sectionalAtClick = fillObjectRespectingCuts(item, canvasPoint)
+        if (sectionalAtClick) {
+          if (sectionalAtClick.imageDataUrl) imageUrls.push(sectionalAtClick.imageDataUrl)
+          changed = true
+          if (item.type === 'text') textFillKind = 'glyph'
+          return sectionalAtClick
+        }
+        if (bits && bits.length === W * H) {
+          const px = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
+          const py = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
+          const holeRegion = floodFillConnected(W, H, px, py, (byteI) => !!bits[(byteI / 4) | 0])
+          const probe = takeCanvas(W, H)
+          try {
+            const pctx = probe.getContext('2d')!
+            renderLine(pctx, { ...item, shadow: false, color: '#000000' }, { skipHole: true })
+            const d = pctx.getImageData(0, 0, W, H).data
+            let seed: Pt | null = null
+            for (let p = 0; p < holeRegion.length; p++) {
+              if (!holeRegion[p] || d[p * 4 + 3] < 80) continue
+              seed = { x: p % W, y: (p / W) | 0 }
+              break
+            }
+            if (seed) {
+              const sectional = fillObjectRespectingCuts(item, seed)
+              if (sectional) {
+                if (sectional.imageDataUrl) imageUrls.push(sectional.imageDataUrl)
+                changed = true
+                if (item.type === 'text') textFillKind = 'glyph'
+                return sectional
+              }
+            }
+          } finally {
+            releaseCanvas(probe)
+          }
+          const still = subtractLocalPunchRegion(item, holeRegion, W, H)
+          changed = true
+          if (item.type === 'text') textFillKind = 'glyph'
+          return {
+            ...item,
+            color: firstSolidColor(fillColor),
+            punchThrough: still,
+            punchEnclosedHole: still ? item.punchEnclosedHole : false,
+            ...(item.type === 'shape' || item.type === 'poly' ? { fill: true } : {})
+          }
+        }
       }
 
       if (item.type === 'stamp') {
@@ -12178,7 +12314,7 @@ export function IconPaintEditor({
         if (
           id === 'container' &&
           layerIsEditable('content') &&
-          vectorAlphaAt('content', pt.x, pt.y) > 8
+          (vectorAlphaAt('content', pt.x, pt.y) > 8 || punchHoleAt('content', pt.x, pt.y))
         ) {
           id = 'content'
         }
