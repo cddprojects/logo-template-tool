@@ -2409,7 +2409,14 @@ function sampleLineAlphaAt(l: LineObj, x: number, y: number, withShadow: boolean
     const ctx = c.getContext('2d')
     if (!ctx) return 0
     ctx.setTransform(1, 0, 0, 1, -x + pad, -y + pad)
-    renderLine(ctx, withShadow ? l : { ...l, shadow: false })
+    // See-through / transparent fills hide ink — probe an opaque silhouette so
+    // Fill can still hit and recolour those objects.
+    const probe: LineObj = {
+      ...(withShadow ? l : { ...l, shadow: false }),
+      color: isTransparentPaintColor(l.color) ? '#000000' : l.color,
+      punchThrough: false
+    }
+    renderLine(ctx, probe, { skipHole: true })
     return ctx.getImageData(pad, pad, 1, 1).data[3]
   } finally {
     releaseCanvas(c)
@@ -5426,17 +5433,55 @@ export function IconPaintEditor({
     return false
   }
 
+  /** Empty click inside a letter counter / object hole on this layer (not stage). */
+  const pointInEnclosedObjectHole = (id: PaintLayerId, x: number, y: number): boolean => {
+    const px = Math.max(0, Math.min(W - 1, Math.floor(x)))
+    const py = Math.max(0, Math.min(H - 1, Math.floor(y)))
+    for (const l of linesRef.current) {
+      if (vectorLayerOf(l) !== id || l.punchMask || l.marqueeItem) continue
+      if (l.type !== 'text' && l.type !== 'shape' && l.type !== 'stamp' && l.type !== 'poly') continue
+      if (!isVectorVisible(l)) continue
+      const probe = takeCanvas(W, H)
+      try {
+        const pctx = probe.getContext('2d')!
+        renderLine(
+          pctx,
+          { ...l, shadow: false, punchThrough: false, color: '#000000' },
+          { skipHole: true }
+        )
+        const gd = pctx.getImageData(0, 0, W, H).data
+        if (gd[(py * W + px) * 4 + 3] >= 80) continue
+        const ink = new Uint8Array(W * H)
+        let any = false
+        for (let p = 0; p < ink.length; p++) {
+          if (gd[p * 4 + 3] <= 8) continue
+          ink[p] = 1
+          any = true
+        }
+        if (!any) continue
+        const outside = floodOutsideEmpty(ink, W, H)
+        if (outside[py * W + px]) continue
+        return true
+      } finally {
+        releaseCanvas(probe)
+      }
+    }
+    return false
+  }
+
   /** Fill the topmost visible layer that already has ink at the click — never empty-flood Inner over Outer. */
   const floodFillTargetLayer = (x: number, y: number): PaintLayerId | null => {
+    // Punch / see-through holes first — Outer ink showing through must not steal the fill.
+    for (const id of layerOrderRef.current) {
+      if (!layerIsEditable(id)) continue
+      if (punchHoleAt(id, x, y)) return id
+    }
     for (const id of layerOrderRef.current) {
       if (!layerIsEditable(id)) continue
       if (layerCompositeAlphaAt(id, x, y) > 8) return id
       if (vectorAlphaAt(id, x, y) > 8) return id
-    }
-    // Empty click inside a punched hole → that hole's layer (not Outer fallback).
-    for (const id of layerOrderRef.current) {
-      if (!layerIsEditable(id)) continue
-      if (punchHoleAt(id, x, y)) return id
+      // Letter counters before Outer under them wins the next iteration.
+      if (pointInEnclosedObjectHole(id, x, y)) return id
     }
     const editable = layerOrderRef.current.filter(layerIsEditable)
     return editable[editable.length - 1] ?? null
@@ -9580,6 +9625,16 @@ export function IconPaintEditor({
         if (vectorLayerOf(root) !== layerId || !isLiveInnerVector(root)) continue
         renderObjectTree(sampleCtx, root, linesRef.current, isVectorVisible)
       }
+      // Punch-through holes must read as empty in the sample — otherwise Fill
+      // "hits" the still-drawn glyph body under the hole and only paints overlay
+      // beneath the vector (no visible change).
+      for (const l of linesRef.current) {
+        if (l.parentId || l.marqueeItem) continue
+        if (vectorLayerOf(l) !== layerId) continue
+        if (!l.punchThrough && !punchMaskBits.has(l.id) && !punchMaskCanvases.has(l.id)) continue
+        if (l.punchMask) continue
+        punchObjectFromComposite(sampleCtx, l, linesRef.current, isVectorVisible)
+      }
     }
     const under = sampleCtx.getImageData(0, 0, W, H).data
     sampleCtx.drawImage(ctx.canvas, 0, 0)
@@ -10294,6 +10349,33 @@ export function IconPaintEditor({
       // Filling a transparent / punched hole with a solid colour — restore bake
       // pixels too so Save/live Outer is not left clear under the overlay.
       if (underlay) recolorFilledBase(underlay, filled, fr, fg, fb, fa, data)
+      // Prefer recolouring the punched object itself; overlay under a restored
+      // glyph is invisible once punchThrough is cleared.
+      let rebound = false
+      if (layerId) {
+        const next = linesRef.current.map((item): LineObj => {
+          if (vectorLayerOf(item) !== layerId || item.punchMask) return item
+          const bits = punchMaskBits.get(item.id)
+          if (!bits || bits.length !== filled.length) return item
+          let overlap = 0
+          let seed: Pt | null = null
+          for (let p = 0; p < filled.length; p++) {
+            if (!filled[p] || !bits[p]) continue
+            overlap++
+            if (!seed) seed = { x: p % W, y: (p / W) | 0 }
+          }
+          if (overlap < 4 || !seed) return item
+          const sectional = fillObjectRespectingCuts(item, seed)
+          if (!sectional) return item
+          rebound = true
+          if (sectional.imageDataUrl) ensureStampImage(sectional.imageDataUrl, () => redrawLinesRef.current())
+          return sectional
+        })
+        if (rebound) {
+          linesRef.current = next
+          commitLines(next)
+        }
+      }
       clearPunchHolesOverlapping(filled, layerId ?? 'content')
       if (layerId === 'container' && !isTransparentPaintColor(color)) {
         // Keep the hole fill on the overlay; don't treat this as a full Outer sync wipe.
@@ -12314,7 +12396,9 @@ export function IconPaintEditor({
         if (
           id === 'container' &&
           layerIsEditable('content') &&
-          (vectorAlphaAt('content', pt.x, pt.y) > 8 || punchHoleAt('content', pt.x, pt.y))
+          (vectorAlphaAt('content', pt.x, pt.y) > 8 ||
+            punchHoleAt('content', pt.x, pt.y) ||
+            pointInEnclosedObjectHole('content', pt.x, pt.y))
         ) {
           id = 'content'
         }
@@ -12530,11 +12614,24 @@ export function IconPaintEditor({
             if (l.parentId || vectorLayerOf(l) !== id) continue
             exportPunch(l)
           }
-          const data = x.getImageData(0, 0, W, H).data
-          for (let i = 3; i < data.length; i += 16) {
-            if (data[i] > 8) return [{ layer: id, png: c.toDataURL('image/png') }]
+          const img = x.getImageData(0, 0, W, H)
+          const data = img.data
+          let any = false
+          // Hard binary alpha — soft AA fringes become white edge lines outside Paint.
+          for (let i = 0; i < data.length; i += 4) {
+            if (data[i + 3] > 32) {
+              data[i] = 0
+              data[i + 1] = 0
+              data[i + 2] = 0
+              data[i + 3] = 255
+              any = true
+            } else {
+              data[i + 3] = 0
+            }
           }
-          return []
+          if (!any) return []
+          x.putImageData(img, 0, 0)
+          return [{ layer: id, png: c.toDataURL('image/png') }]
         })
       },
       {

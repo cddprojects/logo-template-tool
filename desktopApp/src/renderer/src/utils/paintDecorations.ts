@@ -178,8 +178,78 @@ export async function applyPaintPunchMask(
   if (!png) return
   ctx.save()
   ctx.globalCompositeOperation = 'destination-out'
-  await drawScaledPng(ctx, png, x, y, size, session, shapeFallback)
+  // Soft AA + scaled smoothing leaves thin white fringe columns on punched edges.
+  ctx.imageSmoothingEnabled = false
+  await drawScaledPunchPng(ctx, png, x, y, size, session, shapeFallback)
   ctx.restore()
+}
+
+/**
+ * Draw a punch PNG with a hard alpha threshold (+1px dilate) so destination-out
+ * does not leave semi-transparent fringe after live-size rescale.
+ */
+async function drawScaledPunchPng(
+  ctx: CanvasRenderingContext2D,
+  dataUrl: string,
+  x: number,
+  y: number,
+  size: number,
+  session: PaintSession,
+  shapeFallback?: number
+): Promise<void> {
+  const img = await loadCachedImage(dataUrl)
+  if (!img) return
+  const { origin, shape } = resolvePaintShapeSize(session, shapeFallback)
+  const ox = Math.floor(origin)
+  const oy = Math.floor(origin)
+  const sw = Math.max(1, Math.round(shape))
+  const sh = Math.max(1, Math.round(shape))
+  const src = takeCanvas(sw, sh)
+  try {
+    const sctx = src.getContext('2d')!
+    sctx.imageSmoothingEnabled = false
+    sctx.drawImage(img, ox, oy, sw, sh, 0, 0, sw, sh)
+    const image = sctx.getImageData(0, 0, sw, sh)
+    const d = image.data
+    const hard = new Uint8Array(sw * sh)
+    for (let p = 0; p < hard.length; p++) {
+      hard[p] = d[p * 4 + 3] > 32 ? 1 : 0
+    }
+    // Dilate 1px so soft export edges still fully erase live pixels underneath.
+    const dil = new Uint8Array(hard.length)
+    for (let y0 = 0; y0 < sh; y0++) {
+      for (let x0 = 0; x0 < sw; x0++) {
+        const p = y0 * sw + x0
+        if (!hard[p]) continue
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x0 + dx
+            const ny = y0 + dy
+            if (nx < 0 || ny < 0 || nx >= sw || ny >= sh) continue
+            dil[ny * sw + nx] = 1
+          }
+        }
+      }
+    }
+    for (let p = 0; p < dil.length; p++) {
+      const i = p * 4
+      if (dil[p]) {
+        d[i] = 0
+        d[i + 1] = 0
+        d[i + 2] = 0
+        d[i + 3] = 255
+      } else {
+        d[i] = 0
+        d[i + 1] = 0
+        d[i + 2] = 0
+        d[i + 3] = 0
+      }
+    }
+    sctx.putImageData(image, 0, 0)
+    ctx.drawImage(src, x, y, size, size)
+  } finally {
+    releaseCanvas(src)
+  }
 }
 
 /** Apply every punch mask after the full Outer+Inner stack so a fill hole is not covered by Inner. */
