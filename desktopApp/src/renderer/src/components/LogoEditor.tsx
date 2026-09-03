@@ -909,7 +909,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
     window.setTimeout(() => setInnerAppliedToAll(false), 1600)
   }
 
-  /** Inner type/shape/size + outer shape geometry — keep each variant’s colours and paint. */
+  /** Duplicate icon settings (keep colors) — geometry from source, colours + paint stay. */
   const applyActiveInnerSettingsKeepColors = () => {
     if (!safeConfig || !effectiveIcon || variants.length < 2) return
 
@@ -1083,6 +1083,11 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             outerFillColor={effectiveIcon.containerColor}
             initialVectors={paintVectors}
             initialPunchMasks={paintPunchMasks}
+            initialContentBakedInDecorations={
+              !!(isSyncedWithFavicon
+                ? matchingFaviconVariant?.config?.paintSession
+                : effectiveIcon.paintSession)?.contentBakedInDecorations
+            }
             initialLayerOrder={paintLayerOrder}
             initialPaintShapeSize={
               (isSyncedWithFavicon
@@ -1251,7 +1256,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
               }`}
             >
               {innerSettingsAppliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
-              {innerSettingsAppliedToAll ? 'Settings applied' : 'Inner settings (keep colors)'}
+              {innerSettingsAppliedToAll ? 'Settings applied' : 'Duplicate icon settings (keep colors)'}
             </button>
           </div>
         )}

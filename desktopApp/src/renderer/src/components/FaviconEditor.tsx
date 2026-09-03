@@ -629,7 +629,7 @@ export function FaviconEditor({
     window.setTimeout(() => setInnerAppliedToAll(false), 1600)
   }
 
-  /** Inner type/shape/size + outer shape geometry — keep each variant’s colours and paint. */
+  /** Duplicate icon settings (keep colors) — geometry from source, colours + paint stay. */
   const applyActiveInnerSettingsKeepColors = () => {
     if (!config || !active || variants.length < 2) return
     onChange(
@@ -768,6 +768,7 @@ export function FaviconEditor({
             outerFillColor={config.backgroundColor}
             initialVectors={paintVectors}
             initialPunchMasks={paintPunchMasks}
+            initialContentBakedInDecorations={!!config.paintSession?.contentBakedInDecorations}
             initialLayerOrder={paintLayerOrder}
             initialPaintShapeSize={config.paintSession?.paintShapeSize}
             outsideContentSettings={paintOutsideContent}
@@ -900,7 +901,7 @@ export function FaviconEditor({
               }`}
             >
               {innerSettingsAppliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
-              {innerSettingsAppliedToAll ? 'Settings applied' : 'Inner settings (keep colors)'}
+              {innerSettingsAppliedToAll ? 'Settings applied' : 'Duplicate icon settings (keep colors)'}
             </button>
           </div>
         )}

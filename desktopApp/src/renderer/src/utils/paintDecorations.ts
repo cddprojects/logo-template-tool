@@ -95,8 +95,8 @@ function shouldRenderContentVectorsLive(session: PaintSession): boolean {
 
 /**
  * When outside Inner letters settings change, keep the paint session's linked
- * text vector in sync and stop using decorations that baked the old glyphs
- * (so the live letters preview updates immediately).
+ * text vector in sync and drop stale content punches / baked glyphs so live
+ * letters (e.g. TE→BO) are not covered by holes shaped for the old text.
  */
 export function syncOutsideLettersIntoPaintSession(
   session: PaintSession | null | undefined,
@@ -127,20 +127,32 @@ export function syncOutsideLettersIntoPaintSession(
       bold: w >= 700,
       italic: !!letters.fontItalic,
       letterSpacing,
+      // Old punch/see-through holes were for previous glyphs — clear them.
+      punchThrough: false,
+      punchEnclosedHole: false,
+      punchMask: undefined,
       ...(anchor ? { pts: [{ x: anchor.x, y: anchor.y }] } : {}),
       ...shadow
     }
   })
 
   const hadLinkedInDecor = !!session.linkedTextInDecorations
+  const hadBakedContent = !!session.contentBakedInDecorations
+  const hadContentPunch = !!session.punchMasks?.some((m) => m.layer === 'content')
+  const dropStaleContentDecor = hadLinkedInDecor || hadBakedContent || hadContentPunch
   return {
     ...session,
     vectors,
     linkedTextInDecorations: false,
-    // Drop flat decorations that still contain old linked glyphs (stale color/transform).
-    decorationsPng: hadLinkedInDecor ? undefined : session.decorationsPng,
-    containerDecorationsPng: hadLinkedInDecor ? undefined : session.containerDecorationsPng,
-    contentDecorationsPng: hadLinkedInDecor ? undefined : session.contentDecorationsPng
+    contentBakedInDecorations: dropStaleContentDecor ? false : session.contentBakedInDecorations,
+    // Drop content decorations / punches shaped for the previous letters.
+    decorationsPng: dropStaleContentDecor ? undefined : session.decorationsPng,
+    containerDecorationsPng: session.containerDecorationsPng,
+    contentDecorationsPng: dropStaleContentDecor ? undefined : session.contentDecorationsPng,
+    contentPng: dropStaleContentDecor ? undefined : session.contentPng,
+    punchMasks: dropStaleContentDecor
+      ? session.punchMasks?.filter((m) => m.layer !== 'content')
+      : session.punchMasks
   }
 }
 
@@ -224,6 +236,30 @@ async function drawScaledPunchPng(
         d[i + 2] = 0
         d[i + 3] = 0
       }
+    }
+    // 1px hard dilate — matches Paint export so white AA columns of the original
+    // fill colour do not survive scaled punch outside Paint.
+    const grow = new Uint8Array(sw * sh)
+    for (let y = 0; y < sh; y++) {
+      for (let x = 0; x < sw; x++) {
+        if (d[(y * sw + x) * 4 + 3] < 128) continue
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const nx = x + dx
+            const ny = y + dy
+            if (nx < 0 || ny < 0 || nx >= sw || ny >= sh) continue
+            grow[ny * sw + nx] = 1
+          }
+        }
+      }
+    }
+    for (let p = 0; p < grow.length; p++) {
+      if (!grow[p]) continue
+      const i = p * 4
+      d[i] = 0
+      d[i + 1] = 0
+      d[i + 2] = 0
+      d[i + 3] = 255
     }
     sctx.putImageData(image, 0, 0)
     ctx.imageSmoothingEnabled = false
@@ -446,10 +482,14 @@ export function sanitizePaintSessionProxies(
   return {
     ...session,
     vectors: stripContentProxyVectors(session.vectors),
-    // Drop flatten that may still include the proxy raster.
-    decorationsPng: undefined,
-    containerDecorationsPng: undefined,
-    contentDecorationsPng: undefined,
+    // Keep baked decorations when Inner was rasterized (see-through / punch edits).
+    decorationsPng: session.contentBakedInDecorations ? session.decorationsPng : undefined,
+    containerDecorationsPng: session.contentBakedInDecorations
+      ? session.containerDecorationsPng
+      : undefined,
+    contentDecorationsPng: session.contentBakedInDecorations
+      ? session.contentDecorationsPng
+      : undefined,
     punchMasks: session.punchMasks
   }
 }
