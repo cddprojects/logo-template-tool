@@ -3404,7 +3404,10 @@ function punchObjectFromComposite(
   const w = ctx.canvas.width
   const h = ctx.canvas.height
   if (destOutPunchThroughOnComposite(ctx, item)) return
-  if (!item.punchMask && punchLocalBox(item)) return
+  // Local-box objects normally punch via punchMaskCanvases. If that mask is
+  // missing (e.g. select-object → transparent + Punch without a prior Fill),
+  // fall through to silhouette rendering instead of silently doing nothing.
+  if (!item.punchMask && punchLocalBox(item) && punchMaskCanvases.has(item.id)) return
   const bits = punchMaskBits.get(item.id)
   if (bits && bits.length === w * h) {
     destOutFilledMask(ctx, bits, w, h)
@@ -8778,7 +8781,7 @@ export function IconPaintEditor({
               )
             )
           : new Set([target.id])
-    const fillColor = firstSolidColor(color)
+    const fillColor = pixelColor(color)
     const punch = transparentFillPunch()
     const transparent = isTransparentPaintColor(color)
     const imageUrls: string[] = []
@@ -8798,6 +8801,22 @@ export function IconPaintEditor({
         }
         return { ...item, shadow: true, shadowColor: fillColor }
       }
+
+      // Transparent Fill on an object = same as select-object → set #xxxxxx00
+      // (See-through or Punch hole). Do this before sectional flood so Fill and
+      // colour-picker stay consistent for whole-object transparent.
+      if (
+        transparent &&
+        (item.type === 'stamp' || item.type === 'text' || item.type === 'shape' || item.type === 'poly')
+      ) {
+        // Empty letter counters are not glyph ink — leave for layer floodFill.
+        if (item.type === 'text' && hit !== 'fill' && hit !== 'shadow') return item
+        changed = true
+        if (item.type === 'text') textFillKind = 'glyph'
+        const patch = transparentObjectPatch(item, fillColor)
+        return { ...item, ...patch }
+      }
+
       if (item.type === 'stamp') {
         const hasCuts = !!item.paintStrokes?.length || overlayHasOpaque(vectorLayerOf(item))
         const filled =
@@ -8815,8 +8834,7 @@ export function IconPaintEditor({
           changed = true
           return { ...sectional, punchThrough: punch || !!sectional.punchThrough }
         }
-        // Empty counters are not glyph ink. Let flood-fill bind the hole.
-        if (transparent || hit !== 'fill') return item
+        if (hit !== 'fill') return item
         textFillKind = 'glyph'
         changed = true
         return { ...item, color: fillColor, punchThrough: punch || !!item.punchThrough }
@@ -8842,6 +8860,7 @@ export function IconPaintEditor({
       setTxtShadowColor(fillColor)
     } else if (textFillKind === 'glyph') {
       setColor(fillColor)
+      setHexText(fillColor)
     }
     for (const url of imageUrls) ensureStampImage(url, () => redrawLinesRef.current())
     redrawLines()
@@ -8868,10 +8887,109 @@ export function IconPaintEditor({
   const transparentFillPunch = () =>
     isTransparentPaintColor(color) && transparentFillModeRef.current === 'punch'
 
+  /**
+   * Build a full-object punch silhouette so Punch hole works when the user sets
+   * transparent colour via the picker (not only via Fill → click).
+   */
+  const ensureObjectPunchSilhouette = (item: LineObj) => {
+    if (item.punchMask || item.type === 'group') return
+    const probe = takeCanvas(W, H)
+    try {
+      const pctx = probe.getContext('2d')!
+      pctx.imageSmoothingEnabled = false
+      const draft: LineObj = {
+        ...item,
+        punchThrough: false,
+        shadow: false,
+        // Force opaque ink — transparent fills hide the body otherwise.
+        color: '#000000',
+        borderColor: '#000000',
+        fill: item.type === 'shape' || item.type === 'poly' ? true : item.fill
+      }
+      if (item.type === 'text') {
+        renderText(pctx, draft)
+      } else {
+        renderLineBase(pctx, draft)
+      }
+      const data = pctx.getImageData(0, 0, W, H).data
+      const filled = new Uint8Array(W * H)
+      let n = 0
+      for (let p = 0; p < filled.length; p++) {
+        if (data[p * 4 + 3] <= 8) continue
+        filled[p] = 1
+        n++
+      }
+      if (n > 0) setLocalPunchFromFilled(item, filled, W, H)
+    } finally {
+      releaseCanvas(probe)
+    }
+  }
+
+  const clearObjectPunchMasks = (item: LineObj) => {
+    punchMaskCanvases.delete(item.id)
+    punchMaskBits.delete(item.id)
+  }
+
+  /**
+   * Patch for select-object colour / Fill-on-object when alpha is 0.
+   * See-through: transparent colour (vectors) or local silhouette hole (stamps).
+   * Punch: transparent + punchThrough + silhouette for every object type.
+   */
+  const transparentObjectPatch = (
+    item: LineObj,
+    nextColor: string
+  ): Partial<LineObj> => {
+    const transparent = isTransparentPaintColor(nextColor)
+    const punch = transparent && transparentFillModeRef.current === 'punch'
+    if (!transparent) {
+      clearObjectPunchMasks(item)
+      return {
+        color: nextColor,
+        ...(item.type === 'poly' || item.type === 'shape'
+          ? {}
+          : { borderColor: nextColor }),
+        punchThrough: false
+      }
+    }
+    // Stamps are rasters — transparent colour alone does not hide them. Always
+    // build a silhouette hole; See-through keeps it local, Punch cuts below.
+    if (item.type === 'stamp' || punch) {
+      ensureObjectPunchSilhouette(item)
+      return {
+        color: nextColor,
+        ...(item.type === 'poly' || item.type === 'shape'
+          ? { fill: true }
+          : item.type === 'stamp'
+            ? {}
+            : { borderColor: nextColor }),
+        punchThrough: punch
+      }
+    }
+    // Vector see-through: hide the fill; drop any prior punch silhouette.
+    clearObjectPunchMasks(item)
+    return {
+      color: nextColor,
+      ...(item.type === 'poly' || item.type === 'shape'
+        ? { fill: true }
+        : { borderColor: nextColor }),
+      punchThrough: false
+    }
+  }
+
   const applyTransparentFillMode = (mode: 'see-through' | 'punch') => {
     setTransparentFillMode(mode)
     transparentFillModeRef.current = mode
     inheritedFillMode?.setMode(mode)
+    // Re-apply to the selected object when it is already transparent so toggling
+    // See-through ↔ Punch hole updates without re-picking the colour.
+    const id = selectedIdRef.current
+    if (!id || !isTransparentPaintColor(color)) return
+    const selected = linesRef.current.find((l) => l.id === id)
+    if (!selected || selected.punchMask) return
+    const target = checkedGroupTarget(selected) ?? selected
+    if (target.type === 'group') return
+    updateSelectedLive((l) => transparentObjectPatch(l, pixelColor(l.color || color)))
+    pushHistory()
   }
 
   const addPunchStampFromMask = (filled: Uint8Array, layerId: PaintLayerId, punchThrough: boolean) => {
@@ -8885,16 +9003,22 @@ export function IconPaintEditor({
 
   /**
    * Solid Fill over a transparent / punched region must remove overlapping hole
-   * stamps — otherwise dest-out keeps punching the new colour away.
+   * stamps and clear punchThrough silhouettes — otherwise dest-out keeps punching
+   * the new colour away (in Paint and again on Save outside).
    */
-  const erasePunchStampsOverlapping = (filled: Uint8Array, layerId: PaintLayerId) => {
+  const clearPunchHolesOverlapping = (
+    filled: Uint8Array,
+    layerId: PaintLayerId,
+    opts?: { clearAllOnLayer?: boolean }
+  ) => {
     let changed = false
     const next: LineObj[] = []
     for (const l of linesRef.current) {
-      if (!l.punchMask || vectorLayerOf(l) !== layerId) {
+      if (vectorLayerOf(l) !== layerId) {
         next.push(l)
         continue
       }
+
       const bits = punchMaskBits.get(l.id)
       let overlap = 0
       let stampN = 0
@@ -8904,7 +9028,7 @@ export function IconPaintEditor({
           stampN++
           if (filled[p]) overlap++
         }
-      } else if (l.pts.length >= 2) {
+      } else if ((l.punchMask || l.punchThrough) && l.pts.length >= 2) {
         const a = l.pts[0], b = l.pts[1]
         const x0 = Math.max(0, Math.floor(Math.min(a.x, b.x)))
         const y0 = Math.max(0, Math.floor(Math.min(a.y, b.y)))
@@ -8917,17 +9041,60 @@ export function IconPaintEditor({
           }
         }
       }
-      if (stampN > 0 && overlap / stampN >= 0.12) {
-        changed = true
-        punchMaskCanvases.delete(l.id)
-        punchMaskBits.delete(l.id)
+
+      const overlapsFill = opts?.clearAllOnLayer || (stampN > 0 && overlap / stampN >= 0.12)
+      const isHoleOp =
+        !!l.punchMask ||
+        !!l.punchThrough ||
+        punchMaskCanvases.has(l.id) ||
+        punchMaskBits.has(l.id)
+
+      if (!isHoleOp || !overlapsFill) {
+        next.push(l)
         continue
       }
-      next.push(l)
+
+      changed = true
+      punchMaskCanvases.delete(l.id)
+      punchMaskBits.delete(l.id)
+      // Dedicated punch-mask stamps go away entirely.
+      if (l.punchMask) continue
+      next.push({ ...l, punchThrough: false, punchEnclosedHole: false })
     }
     if (!changed) return
     linesRef.current = next
     commitLines(next)
+  }
+
+  /** Union of punch / see-through hole bits on a layer (for refilling empty holes). */
+  const punchCoverageOnLayer = (layerId: PaintLayerId): Uint8Array | null => {
+    const cover = new Uint8Array(W * H)
+    let any = false
+    for (const l of linesRef.current) {
+      if (vectorLayerOf(l) !== layerId) continue
+      const bits = punchMaskBits.get(l.id)
+      if (bits && bits.length === W * H) {
+        for (let p = 0; p < bits.length; p++) {
+          if (!bits[p]) continue
+          cover[p] = 1
+          any = true
+        }
+        continue
+      }
+      if (!l.punchMask || l.pts.length < 2) continue
+      const a = l.pts[0], b = l.pts[1]
+      const x0 = Math.max(0, Math.floor(Math.min(a.x, b.x)))
+      const y0 = Math.max(0, Math.floor(Math.min(a.y, b.y)))
+      const x1 = Math.min(W, Math.ceil(Math.max(a.x, b.x)))
+      const y1 = Math.min(H, Math.ceil(Math.max(a.y, b.y)))
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          cover[y * W + x] = 1
+          any = true
+        }
+      }
+    }
+    return any ? cover : null
   }
 
   /** Bind an enclosed transparent hole to the object whose ink rings it, so it moves with that object. */
@@ -9142,7 +9309,7 @@ export function IconPaintEditor({
       applyTransparentFlood(punched, layerId ?? 'content', ctx.canvas)
     } else {
       punchFilledFromBase(underlay, punched)
-      if (layerId) erasePunchStampsOverlapping(punched, layerId)
+      if (layerId) clearPunchHolesOverlapping(punched, layerId, { clearAllOnLayer: layerId === 'container' })
     }
     if (layerId === 'container') {
       const css = cssPaintColor(fill)
@@ -9286,6 +9453,8 @@ export function IconPaintEditor({
     if (px < 0 || py < 0 || px >= W || py >= H) return
 
     // Session drawings are walls. Live Inner letters/icons are fillable content.
+    // Punch-through objects must not wall over their own holes — otherwise Fill
+    // cannot refill see-through / punch regions.
     const wallCanvas = document.createElement('canvas')
     wallCanvas.width = W
     wallCanvas.height = H
@@ -9295,8 +9464,22 @@ export function IconPaintEditor({
       if (isLiveInnerVector(root)) continue
       renderObjectTree(wallCtx, root, linesRef.current, isPaintHitVisible)
     }
+    for (const l of linesRef.current) {
+      if (l.parentId || l.marqueeItem) continue
+      if (layerId && vectorLayerOf(l) !== layerId) continue
+      if (!l.punchThrough && !punchMaskBits.has(l.id) && !punchMaskCanvases.has(l.id)) continue
+      if (l.punchMask) continue
+      punchObjectFromComposite(wallCtx, l, linesRef.current, isVectorVisible)
+    }
     const wall = wallCtx.getImageData(0, 0, W, H).data
-    const isWall = (i: number) => wall[i + 3] > 20
+    const holeCoverEarly = layerId ? punchCoverageOnLayer(layerId) : null
+    const isWall = (i: number) => {
+      if (wall[i + 3] <= 20) return false
+      const p = (i / 4) | 0
+      // Pixels inside an existing punch/see-through hole stay fillable.
+      if (holeCoverEarly && holeCoverEarly[p]) return false
+      return true
+    }
 
     const clickOnWall = isWall((Math.floor(sy) * W + Math.floor(sx)) * 4)
     const clickI = (Math.floor(sy) * W + Math.floor(sx)) * 4
@@ -9328,15 +9511,51 @@ export function IconPaintEditor({
     const EMPTY_A = 8
     const clickedEmpty = ta <= EMPTY_A
     let enclosedHole = false
+    /** When set, empty flood is limited to a punch/see-through hole (may touch stage). */
+    let holeConstraint: Uint8Array | null = null
     if (clickedEmpty) {
       const ink = new Uint8Array(W * H)
       for (let p = 0; p < W * H; p++) {
         if (data[p * 4 + 3] > EMPTY_A || isWall(p * 4)) ink[p] = 1
       }
       const outside = floodOutsideEmpty(ink, W, H)
-      // Never flood the empty stage around the icon — only enclosed holes.
-      if (outside[py * W + px]) return
-      if (isTransparentPaintColor(color)) enclosedHole = true
+      const cover = holeCoverEarly ?? (layerId ? punchCoverageOnLayer(layerId) : null)
+      const clickInPunchHole = !!(cover && cover[py * W + px])
+      if (outside[py * W + px] && !clickInPunchHole) {
+        // Truly outside the icon silhouette — never flood the empty stage.
+        // Exception: empty pixels that sit next to opaque ink (soft fringe of a
+        // punched hole whose mask was already cleared) — treat as refillable.
+        let nearInk = false
+        for (const [dx, dy] of [[-2, 0], [2, 0], [0, -2], [0, 2], [-2, -2], [2, 2], [-2, 2], [2, -2]] as const) {
+          const nx = px + dx, ny = py + dy
+          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
+          if (data[(ny * W + nx) * 4 + 3] > EMPTY_A) { nearInk = true; break }
+        }
+        if (!nearInk) return
+        // Build a soft hole constraint: empty pixels that are outside-connected
+        // but within a few px of ink (typical punched interior).
+        const soft = new Uint8Array(W * H)
+        for (let p = 0; p < W * H; p++) {
+          if (!outside[p] || data[p * 4 + 3] > EMPTY_A) continue
+          const x = p % W
+          const y = (p / W) | 0
+          let adj = false
+          for (let dy = -3; dy <= 3 && !adj; dy++) {
+            for (let dx = -3; dx <= 3; dx++) {
+              const ax = x + dx, ay = y + dy
+              if (ax < 0 || ay < 0 || ax >= W || ay >= H) continue
+              if (data[(ay * W + ax) * 4 + 3] > EMPTY_A) { adj = true; break }
+            }
+          }
+          if (adj) soft[p] = 1
+        }
+        if (!soft[py * W + px]) return
+        holeConstraint = soft
+      } else if (clickInPunchHole) {
+        holeConstraint = cover
+      } else if (isTransparentPaintColor(color)) {
+        enclosedHole = true
+      }
     }
 
     const tol = 32
@@ -9656,10 +9875,10 @@ export function IconPaintEditor({
         applyTransparentFlood(filled, layerId ?? 'content', ctx.canvas)
       } else if (solidOuterFill) {
         recolorFilledBase(underlay, filled, fr, fg, fb, fa, data)
-        erasePunchStampsOverlapping(filled, layerId ?? 'content')
+        clearPunchHolesOverlapping(filled, layerId ?? 'content', { clearAllOnLayer: true })
       } else {
         punchFilledFromBase(underlay, filled)
-        erasePunchStampsOverlapping(filled, layerId ?? 'content')
+        clearPunchHolesOverlapping(filled, layerId ?? 'content')
       }
       return
     }
@@ -9679,6 +9898,7 @@ export function IconPaintEditor({
       const a = data[i + 3]
       if (clickedEmpty) {
         if (a > EMPTY_A) return false
+        if (holeConstraint && !holeConstraint[p]) return false
         return true
       }
       if (a <= EMPTY_A) return false
@@ -9933,10 +10153,16 @@ export function IconPaintEditor({
       applyTransparentFlood(filled, layerId ?? 'content', ctx.canvas, enclosedHole)
     } else if (!clickedEmpty) {
       punchFilledFromBase(underlay, filled)
-      erasePunchStampsOverlapping(filled, layerId ?? 'content')
+      clearPunchHolesOverlapping(filled, layerId ?? 'content')
     } else {
-      // Filling a transparent / punched hole with a solid colour.
-      erasePunchStampsOverlapping(filled, layerId ?? 'content')
+      // Filling a transparent / punched hole with a solid colour — restore bake
+      // pixels too so Save/live Outer is not left clear under the overlay.
+      if (underlay) recolorFilledBase(underlay, filled, fr, fg, fb, fa, data)
+      clearPunchHolesOverlapping(filled, layerId ?? 'content')
+      if (layerId === 'container' && !isTransparentPaintColor(color)) {
+        // Keep the hole fill on the overlay; don't treat this as a full Outer sync wipe.
+        preserveOuterOverlayRef.current = true
+      }
     }
   }
 
@@ -12028,6 +12254,19 @@ export function IconPaintEditor({
     const ct = ensureOffscreenCanvas(contentCanvasRef)
     const baseCc = ensureOffscreenCanvas(baseContainerCanvasRef)
     const baseCt = ensureOffscreenCanvas(baseContentCanvasRef)
+    // Solid Outer Fill this session: drop leftover Outer punch/see-through holes
+    // before cloning vectors / building punchMasks so Save cannot destination-out
+    // the new live backgroundColour.
+    const outerFillCss = lastOuterFillColorsRef.current.fill
+    if (
+      outerFillCss &&
+      !isTransparentPaintColor(outerFillCss) &&
+      (lastOuterFillTargetRef.current === 'fill' || lastOuterFillAllRef.current)
+    ) {
+      const all = new Uint8Array(W * H)
+      all.fill(1)
+      clearPunchHolesOverlapping(all, 'container', { clearAllOnLayer: true })
+    }
     const vectors = normalizeLinkedTextVectors(
       cloneLines(linesRef.current) as unknown as PaintVector[],
       selectedIdRef.current
@@ -13047,11 +13286,7 @@ export function IconPaintEditor({
                 if (n) {
                   setColor(n)
                   if (selectedIdRef.current) {
-                    updateSelectedLive((l) =>
-                      l.type === 'poly' || l.type === 'shape'
-                        ? { color: n, punchThrough: isTransparentPaintColor(n) && transparentFillModeRef.current === 'punch' }
-                        : { color: n, borderColor: n, punchThrough: isTransparentPaintColor(n) && transparentFillModeRef.current === 'punch' }
-                    )
+                    updateSelectedLive((l) => transparentObjectPatch(l, n))
                   }
                 }
               }}
@@ -13068,11 +13303,7 @@ export function IconPaintEditor({
                 setColor(c)
                 if (!isGradientColor(c)) setHexText(c)
                 if (selectedIdRef.current) {
-                  updateSelectedLive((l) =>
-                    l.type === 'poly' || l.type === 'shape'
-                      ? { color: c, punchThrough: isTransparentPaintColor(c) && transparentFillModeRef.current === 'punch' }
-                      : { color: c, borderColor: c, punchThrough: isTransparentPaintColor(c) && transparentFillModeRef.current === 'punch' }
-                  )
+                  updateSelectedLive((l) => transparentObjectPatch(l, c))
                 }
               }}
               onClose={() => {
@@ -13094,11 +13325,7 @@ export function IconPaintEditor({
                 setColor(c)
                 setHexText(c)
                 if (selectedIdRef.current) {
-                  updateSelectedLive((l) =>
-                    l.type === 'poly' || l.type === 'shape'
-                      ? { color: c, punchThrough: isTransparentPaintColor(c) && transparentFillModeRef.current === 'punch' }
-                      : { color: c, borderColor: c, punchThrough: isTransparentPaintColor(c) && transparentFillModeRef.current === 'punch' }
-                  )
+                  updateSelectedLive((l) => transparentObjectPatch(l, c))
                 }
               }}
               onMouseUp={() => { if (selectedIdRef.current) pushHistory() }}
