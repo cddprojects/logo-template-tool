@@ -207,6 +207,44 @@ const ICON_OUTER_KEYS = [
   'transparentFillMode'
 ] as const
 
+/** Outer colour slots kept on the target for “settings keep colors”. */
+const ICON_OUTER_COLOR_KEYS = [
+  'containerColor',
+  'containerBorderColor',
+  'shadowColor'
+] as const
+
+/** Favicon outer colour slots kept on the target for “settings keep colors”. */
+const FAVICON_OUTER_COLOR_KEYS = [
+  'backgroundColor',
+  'borderColor',
+  'shadowColor',
+  'outerShapeSvgColor',
+  'outerShapeSvgSecondaryColor',
+  'outerShapeSvgTertiaryColor',
+  'outerShapeSvgColor4',
+  'outerShapeSvgColor5',
+  'outerShapeSvgUseOriginalColors'
+] as const
+
+/** Favicon outer geometry copied from source while colours stay on the target. */
+const FAVICON_OUTER_GEOMETRY_KEYS = [
+  'outerShape',
+  'outerShapeImageDataUrl',
+  'outerShapeSvgMarkup',
+  'outerShapeSvgSizeRatio',
+  'outerShapeOffsetX',
+  'outerShapeOffsetY',
+  'borderWidth',
+  'borderRadius',
+  'transparentBg',
+  'shadowEnabled',
+  'shadowBlur',
+  'shadowSpread',
+  'shadowOffsetX',
+  'shadowOffsetY'
+] as const
+
 function pickColorFields<T extends Record<string, unknown>>(
   source: T,
   keys: readonly string[]
@@ -615,8 +653,8 @@ export function applyFaviconInnerContent(source: FaviconConfig, target: FaviconC
 }
 
 /**
- * Copy inner type / shape / size / offset only. Keeps each target’s colour slots
- * and its full paint session (no paint geometry or colour remap).
+ * Copy inner type/shape/size and outer shape geometry. Keeps each target’s colour
+ * slots and its full paint session (no paint geometry or colour remap).
  */
 export function applyFaviconInnerSettingsKeepColors(
   source: FaviconConfig,
@@ -628,8 +666,18 @@ export function applyFaviconInnerSettingsKeepColors(
     withFaviconTargetColors(structuredClone(source.content), target.content),
     faviconContentSizeRatio(source.content)
   )
+  const outerGeom = pickKeys(
+    source as unknown as Record<string, unknown>,
+    FAVICON_OUTER_GEOMETRY_KEYS
+  ) as Partial<FaviconConfig>
+  const outerColors = pickKeys(
+    target as unknown as Record<string, unknown>,
+    FAVICON_OUTER_COLOR_KEYS
+  ) as Partial<FaviconConfig>
   return {
     ...target,
+    ...outerGeom,
+    ...outerColors,
     content: merged,
     contentTypeStash: mergeTypeStashColors(
       source.contentTypeStash,
@@ -682,15 +730,16 @@ export function applyIconInnerContent(source: IconConfig, target: IconConfig): I
 }
 
 /**
- * Copy icon inner type / shape / size / offset only — keep target colours + paint.
+ * Copy icon inner type/shape/size and outer shape geometry — keep target colours + paint.
  */
 export function applyIconInnerSettingsKeepColors(
   source: IconConfig,
   target: IconConfig
 ): IconConfig {
-  const outer = pickKeys(
+  // Source geometry (inner + outer shape); only outer colour slots stay on target.
+  const outerColors = pickKeys(
     target as unknown as Record<string, unknown>,
-    ICON_OUTER_KEYS
+    ICON_OUTER_COLOR_KEYS
   ) as Partial<IconConfig>
   const primary = iconPrimaryFill(target)
   const secondary = target.secondaryColor || ''
@@ -698,7 +747,7 @@ export function applyIconInnerSettingsKeepColors(
     withIconTargetColors(
       {
         ...structuredClone(source),
-        ...outer
+        ...outerColors
       },
       target
     ),

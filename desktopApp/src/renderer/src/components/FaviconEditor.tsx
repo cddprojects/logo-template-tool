@@ -629,7 +629,7 @@ export function FaviconEditor({
     window.setTimeout(() => setInnerAppliedToAll(false), 1600)
   }
 
-  /** Inner type/shape/size only — keep each variant’s colours and paint session. */
+  /** Inner type/shape/size + outer shape geometry — keep each variant’s colours and paint. */
   const applyActiveInnerSettingsKeepColors = () => {
     if (!config || !active || variants.length < 2) return
     onChange(

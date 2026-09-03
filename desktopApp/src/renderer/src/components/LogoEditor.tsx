@@ -909,7 +909,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
     window.setTimeout(() => setInnerAppliedToAll(false), 1600)
   }
 
-  /** Inner type/shape/size only — keep each variant’s colours and paint session. */
+  /** Inner type/shape/size + outer shape geometry — keep each variant’s colours and paint. */
   const applyActiveInnerSettingsKeepColors = () => {
     if (!safeConfig || !effectiveIcon || variants.length < 2) return
 
