@@ -3371,15 +3371,17 @@ function applyStampColorKeepHoles(item: LineObj, nextColor: string): Partial<Lin
   const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
   for (let i = 0; i < d.length; i += 4) {
     if (d[i + 3] <= 8) continue
+    const srcA = d[i + 3]
     d[i] = fr
     d[i + 1] = fg
     d[i + 2] = fb
-    d[i + 3] = fa
+    // Preserve edge coverage — full-fa flatten expands the silhouette.
+    d[i + 3] = fa >= 250 ? srcA : Math.round((srcA * fa) / 255)
   }
   ctx.putImageData(img, 0, 0)
   const imageDataUrl = canvas.toDataURL('image/png')
   ensureStampImage(imageDataUrl)
-  return { imageDataUrl, color: '#ffffffff' }
+  return { imageDataUrl, color: fill }
 }
 
 function destOutObjectPunch(ctx: CanvasRenderingContext2D, l: LineObj): void {
@@ -3781,8 +3783,11 @@ function renderLineBody(ctx: CanvasRenderingContext2D, l: LineObj): void {
     const img = ensureStampImage(renderUrl) ?? ensureStampImage(l.imageDataUrl)
     if (img) {
       ctx.save()
-      ctx.imageSmoothingEnabled = true
-      ctx.imageSmoothingQuality = 'high'
+      // Paint-edited rasters must stay crisp — smoothing + later Fill hardens AA
+      // outward and blurs sections that were not clicked.
+      const softSvg = !!(l.sourceSvgMarkup && l.keepStrokeOnResize)
+      ctx.imageSmoothingEnabled = softSvg
+      if (softSvg) ctx.imageSmoothingQuality = 'high'
       if (shouldDrawObjectShadow(l)) {
         const blur = l.shadowBlur ?? 0
         const ox = l.shadowOffsetX ?? 0
@@ -9038,12 +9043,12 @@ export function IconPaintEditor({
       localPoint.x > x + displayW || localPoint.y > y + displayH
     ) return null
 
-    const width = Math.max(1, Math.round(displayW))
-    const height = Math.max(1, Math.round(displayH))
-    // Use the stamp's stable committed image as the edit source. The resized
-    // SVG preview may still be decoding and is only a presentation cache.
     const image = ensureStampImage(item.imageDataUrl)
     if (!image) return null
+    // Edit at the stamp's native pixel grid — never rescale through display size
+    // (that softens edges; the next Fill then hardens AA and grows the silhouette).
+    const width = Math.max(1, image.naturalWidth || image.width)
+    const height = Math.max(1, image.naturalHeight || image.height)
     const canvas = document.createElement('canvas')
     canvas.width = width
     canvas.height = height
@@ -9064,25 +9069,25 @@ export function IconPaintEditor({
     const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
     let changed = false
 
-    if (ta > 2) {
+    if (ta > 8) {
       // Connected section only — unconnected same-colour islands stay until clicked.
       const region = floodFillConnected(width, height, px, py, (i) => {
         if (data[i + 3] <= 8) return false
-        return Math.abs(data[i] - tr) + Math.abs(data[i + 1] - tg) + Math.abs(data[i + 2] - tb) <= 48
+        return Math.abs(data[i] - tr) + Math.abs(data[i + 1] - tg) + Math.abs(data[i + 2] - tb) <= 40
       })
       for (let p = 0; p < width * height; p++) {
         if (!region[p]) continue
         const i = p * 4
+        const srcA = data[i + 3]
         data[i] = fr
         data[i + 1] = fg
         data[i + 2] = fb
-        // Hard alpha — soft multiply compounds blur on every Fill.
-        data[i + 3] = data[i + 3] >= 24 ? fa : 0
+        // Preserve coverage alpha — do not promote fringe to opaque (expands shape).
+        data[i + 3] = Math.round((srcA * fa) / 255)
         changed = true
       }
     } else {
-      // Transparent padding / counters: do not paint the stamp. Fall through so
-      // Fill can recolour the Outer shape showing through the letters / icon.
+      // Transparent padding / counters: do not paint the stamp.
       return null
     }
 
@@ -9094,8 +9099,6 @@ export function IconPaintEditor({
       ...item,
       imageDataUrl,
       color: fill,
-      // Pixel fill makes this stamp a raster-edited object. Keeping the old SVG
-      // would overwrite the edit during the next resize/redraw.
       sourceSvgMarkup: undefined,
       sourceStampSize: undefined,
       keepStrokeOnResize: undefined
@@ -9207,8 +9210,9 @@ export function IconPaintEditor({
           // Flatten soft edges to solid so repeated fills do not stack fringe.
           od[i + 3] = fa
         } else if (!isTransparentPaintColor(color)) {
-          // Shapes/stamps: hard coverage — soft multiply expands/blurs on repeat.
-          od[i + 3] = interior[i + 3] >= 24 ? fa : 0
+          // Preserve coverage — promoting fringe to opaque expands the silhouette.
+          const srcA = interior[i + 3]
+          od[i + 3] = Math.round((srcA * fa) / 255)
         } else {
           od[i + 3] = interior[i + 3] >= 180 ? fa : Math.round((interior[i + 3] * fa) / 255)
         }
@@ -9695,10 +9699,9 @@ export function IconPaintEditor({
       }
 
       if (item.type === 'stamp') {
-        const hasCuts = !!item.paintStrokes?.length || overlayHasOpaque(vectorLayerOf(item))
-        const filled =
-          fillObjectRespectingCuts(item, canvasPoint) ??
-          (hasCuts || punch ? null : fillStampPixels(item, canvasPoint))
+        // Only edit native stamp pixels — never re-rasterize via fillObjectRespectingCuts
+        // (that redraws every section with AA and grows edges on repeat Fill).
+        const filled = fillStampPixels(item, canvasPoint)
         if (!filled) return item
         if (filled.imageDataUrl) imageUrls.push(filled.imageDataUrl)
         changed = true
@@ -9717,6 +9720,20 @@ export function IconPaintEditor({
         return { ...item, color: fillColor, punchThrough: hasPunchCoverage(item.id) }
       }
       if (item.type === 'shape' || item.type === 'poly') {
+        // Solid Fill on vectors: colour only — never bake to stamp.
+        if (!transparent && !item.paintStrokes?.length) {
+          changed = true
+          return {
+            ...item,
+            color: fillColor,
+            fill: true,
+            punchThrough: hasPunchCoverage(item.id),
+            punchEnclosedHole:
+              hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
+                ? item.punchEnclosedHole
+                : false
+          }
+        }
         const filled = fillObjectRespectingCuts(item, canvasPoint)
         if (filled) {
           if (filled.imageDataUrl) imageUrls.push(filled.imageDataUrl)
@@ -9816,7 +9833,10 @@ export function IconPaintEditor({
       return {
         ...l,
         punchThrough: hasPunchCoverage(l.id),
-        punchEnclosedHole: true,
+        punchEnclosedHole:
+          hasPunchCoverage(l.id) || hasSeeThroughCoverage(l.id)
+            ? !!l.punchEnclosedHole
+            : false,
         ...(l.type === 'shape' || l.type === 'poly' ? { fill: true as const } : {})
       }
     })
@@ -13597,11 +13617,15 @@ export function IconPaintEditor({
       'content',
       linkedBake,
       contentBake,
-      // Include live Inner base under see-through holes so Outer shows through.
-      hasContentSeeThrough || (hasContentPunchEnclosed && contentBake)
+      // Never composite unpunched Inner base under ST holes — that restores the
+      // pre-punch solid colour outside Paint. Transparent holes must stay empty
+      // so Outer shows through when live Inner is skipped.
+      false
     )
     // Never ship skip-live Inner with an empty decorations plane (async stamp miss).
-    if (contentBake) {
+    // If we had see-through, keep bake flag even when the plane looks empty —
+    // falling back to live Inner restores solid pre-punch colour.
+    if (contentBake && !preparedHadSeeThrough && !hasContentSeeThrough) {
       const d = contentDecor.getContext('2d')?.getImageData(0, 0, W, H).data
       let any = false
       if (d) {
