@@ -3184,33 +3184,60 @@ function bakeObjectAppearanceToStamp(item: LineObj, W: number, H: number): LineO
 }
 
 /**
- * Paint solid colour into an empty counter (no prior ink) while keeping other
- * punch/see-through pockets. Does not expand the object AABB beyond the paint.
+ * Solid-fill a punch/see-through pocket.
+ * - Vector same-colour restore: mask clear only (no raster / no expand).
+ * - Otherwise: crisp paint into the pocket only; keep other hole masks.
  */
-function paintCounterFillKeepHoles(
+function refillHolePocket(
   item: LineObj,
   holeRegion: Uint8Array,
   fillColor: string,
   W: number,
   H: number
 ): LineObj {
+  const fill = pixelColor(fillColor)
+  const fr = parseInt(fill.slice(1, 3), 16)
+  const fg = parseInt(fill.slice(3, 5), 16)
+  const fb = parseInt(fill.slice(5, 7), 16)
+  const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
+  syncHoleFlags(item as HoleItem)
+
+  const itemSolid = firstSolidColor(item.color ?? '#ffffffff').slice(0, 7).toLowerCase()
+  const fillSolid = fill.slice(0, 7).toLowerCase()
+  const sameColour = itemSolid === fillSolid
+  const isVector =
+    (item.type === 'shape' || item.type === 'poly' || item.type === 'text') &&
+    !item.paintStrokes?.length &&
+    item.type !== 'stamp'
+
+  // Same colour on a vector: clearing the hole mask restores ink — do not bake.
+  if (sameColour && isVector) {
+    return {
+      ...item,
+      color: fill,
+      ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {}),
+      punchThrough: hasPunchCoverage(item.id),
+      punchEnclosedHole:
+        hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
+          ? item.punchEnclosedHole
+          : false
+    }
+  }
+
   const canvas = takeCanvas(W, H)
   try {
     const ctx = canvas.getContext('2d')!
+    ctx.imageSmoothingEnabled = false
     const wasPunch = item.punchThrough
     item.punchThrough = false
     try {
-      renderLine(ctx, { ...item, punchThrough: false, shadow: !!item.shadow })
+      // Remaining holes still cut; this pocket is already cleared from maps.
+      renderLine(ctx, { ...item, punchThrough: false, shadow: false })
     } finally {
       item.punchThrough = wasPunch
     }
     const img = ctx.getImageData(0, 0, W, H)
     const d = img.data
-    const fill = pixelColor(fillColor)
-    const fr = parseInt(fill.slice(1, 3), 16)
-    const fg = parseInt(fill.slice(3, 5), 16)
-    const fb = parseInt(fill.slice(5, 7), 16)
-    const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
     for (let p = 0; p < holeRegion.length; p++) {
       if (!holeRegion[p]) continue
       const i = p * 4
@@ -3220,20 +3247,25 @@ function paintCounterFillKeepHoles(
       d[i + 3] = fa
     }
     ctx.putImageData(img, 0, 0)
-    // Prefer original object box so counter fill cannot grow the stamp.
+
     const bounds =
       punchLocalBox(item) ??
       boundsFromLineFallback(item) ??
       alphaBoundsFromCanvas(canvas)
     if (!bounds) {
-      syncHoleFlags(item as HoleItem)
-      return { ...item, punchThrough: hasPunchCoverage(item.id) }
+      return {
+        ...item,
+        color: fill,
+        punchThrough: hasPunchCoverage(item.id)
+      }
     }
     const cw = Math.max(1, Math.round(bounds.w))
     const ch = Math.max(1, Math.round(bounds.h))
     const cropped = takeCanvas(cw, ch)
     try {
-      cropped.getContext('2d')!.drawImage(
+      const cctx = cropped.getContext('2d')!
+      cctx.imageSmoothingEnabled = false
+      cctx.drawImage(
         canvas,
         bounds.x,
         bounds.y,
@@ -3246,15 +3278,13 @@ function paintCounterFillKeepHoles(
       )
       const imageDataUrl = cropped.toDataURL('image/png')
       ensureStampImage(imageDataUrl)
-      // Drop the refilled pocket from both hole maps so leftover punch cannot
-      // cut the new colour. Bake remaining ST into stamp pixels (already drawn);
-      // keep other punch bits for Outer cuts.
-      const scrub = (bits: Uint8Array | undefined, map: Map<string, Uint8Array>, canvases: Map<string, HTMLCanvasElement>) => {
-        if (!bits || bits.length !== holeRegion.length) {
-          canvases.delete(item.id)
-          map.delete(item.id)
-          return
-        }
+      // Scrub only this pocket from hole maps — keep other ST/punch sections.
+      const scrubPocket = (
+        bits: Uint8Array | undefined,
+        map: Map<string, Uint8Array>,
+        canvases: Map<string, HTMLCanvasElement>
+      ) => {
+        if (!bits || bits.length !== holeRegion.length) return
         let remain = 0
         const next = new Uint8Array(bits.length)
         for (let p = 0; p < bits.length; p++) {
@@ -3266,10 +3296,8 @@ function paintCounterFillKeepHoles(
         if (remain > 0) map.set(item.id, next)
         else map.delete(item.id)
       }
-      scrub(punchMaskBits.get(item.id), punchMaskBits, punchMaskCanvases)
-      // ST pockets were rasterized into the stamp above — clear ST maps entirely.
-      seeThroughMaskCanvases.delete(item.id)
-      seeThroughMaskBits.delete(item.id)
+      scrubPocket(punchMaskBits.get(item.id), punchMaskBits, punchMaskCanvases)
+      scrubPocket(seeThroughMaskBits.get(item.id), seeThroughMaskBits, seeThroughMaskCanvases)
       syncHoleFlags(item as HoleItem)
       const { contentBound: _cb, linkedOutsideText: _lt, ...rest } = item
       return {
@@ -3290,13 +3318,21 @@ function paintCounterFillKeepHoles(
         keepStrokeOnResize: undefined,
         contentBound: undefined,
         linkedOutsideText: undefined,
-        color: '#ffffffff',
+        // Keep the real fill colour — never force white (stamps may tint / fallback).
+        color: fill,
         punchThrough: hasPunchCoverage(item.id),
-        punchEnclosedHole: hasPunchCoverage(item.id),
+        punchEnclosedHole:
+          hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
+            ? true
+            : false,
         punchMask: false,
         holeMaskPng: undefined,
         seeThroughHoleMaskPng: undefined,
-        holeMaskMode: hasPunchCoverage(item.id) ? ('punch' as const) : undefined
+        holeMaskMode: hasPunchCoverage(item.id)
+          ? ('punch' as const)
+          : hasSeeThroughCoverage(item.id)
+            ? ('see-through' as const)
+            : undefined
       }
     } finally {
       releaseCanvas(cropped)
@@ -9012,8 +9048,7 @@ export function IconPaintEditor({
     canvas.width = width
     canvas.height = height
     const ctx = canvas.getContext('2d')!
-    ctx.imageSmoothingEnabled = true
-    ctx.imageSmoothingQuality = 'high'
+    ctx.imageSmoothingEnabled = false
     ctx.drawImage(image, 0, 0, width, height)
     const imageData = ctx.getImageData(0, 0, width, height)
     const data = imageData.data
@@ -9032,7 +9067,7 @@ export function IconPaintEditor({
     if (ta > 2) {
       // Connected section only — unconnected same-colour islands stay until clicked.
       const region = floodFillConnected(width, height, px, py, (i) => {
-        if (data[i + 3] <= 2) return false
+        if (data[i + 3] <= 8) return false
         return Math.abs(data[i] - tr) + Math.abs(data[i + 1] - tg) + Math.abs(data[i + 2] - tb) <= 48
       })
       for (let p = 0; p < width * height; p++) {
@@ -9041,7 +9076,8 @@ export function IconPaintEditor({
         data[i] = fr
         data[i + 1] = fg
         data[i + 2] = fb
-        data[i + 3] = Math.round((data[i + 3] * fa) / 255)
+        // Hard alpha — soft multiply compounds blur on every Fill.
+        data[i + 3] = data[i + 3] >= 24 ? fa : 0
         changed = true
       }
     } else {
@@ -9079,10 +9115,8 @@ export function IconPaintEditor({
     try {
       const ctx = canvas.getContext('2d')!
       const interiorCtx = interiorCanvas.getContext('2d')!
-      ctx.imageSmoothingEnabled = true
-      ctx.imageSmoothingQuality = 'high'
-      interiorCtx.imageSmoothingEnabled = true
-      interiorCtx.imageSmoothingQuality = 'high'
+      ctx.imageSmoothingEnabled = false
+      interiorCtx.imageSmoothingEnabled = false
       renderLine(interiorCtx, { ...item, paintStrokes: undefined, shadow: false }, { skipHole: true })
       renderLine(ctx, { ...item, shadow: false }, { skipHole: true })
       const obj = ctx.getImageData(0, 0, W, H)
@@ -9172,6 +9206,9 @@ export function IconPaintEditor({
         if (item.type === 'text' && !isTransparentPaintColor(color)) {
           // Flatten soft edges to solid so repeated fills do not stack fringe.
           od[i + 3] = fa
+        } else if (!isTransparentPaintColor(color)) {
+          // Shapes/stamps: hard coverage — soft multiply expands/blurs on repeat.
+          od[i + 3] = interior[i + 3] >= 24 ? fa : 0
         } else {
           od[i + 3] = interior[i + 3] >= 180 ? fa : Math.round((interior[i + 3] * fa) / 255)
         }
@@ -9288,11 +9325,9 @@ export function IconPaintEditor({
             punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false
           }
         }
-        if (
-          (item.type === 'shape' || item.type === 'poly') &&
-          !item.paintStrokes?.length &&
-          nearlyWhole
-        ) {
+        // Shapes/polys stay vector on solid Fill — baking expands and blurs edges
+        // on every repeat, and re-rasterises untouched ST sections.
+        if ((item.type === 'shape' || item.type === 'poly') && !item.paintStrokes?.length) {
           return {
             ...item,
             color: firstSolidColor(color),
@@ -9307,9 +9342,18 @@ export function IconPaintEditor({
       const bounds = lineNeedsDisplayTransform(item)
         ? (alphaBoundsFromCanvas(canvas) ?? boundsFromLineFallback(item))
         : (punchLocalBox(item) ?? boundsFromLineFallback(item))
+      if (!bounds) {
+        return {
+          ...item,
+          color: firstSolidColor(color),
+          punchThrough: hasPunchCoverage(item.id)
+        }
+      }
       const cropped = takeCanvas(Math.max(1, Math.round(bounds.w)), Math.max(1, Math.round(bounds.h)))
       try {
-        cropped.getContext('2d')!.drawImage(
+        const cctx = cropped.getContext('2d')!
+        cctx.imageSmoothingEnabled = false
+        cctx.drawImage(
           canvas,
           bounds.x, bounds.y, bounds.w, bounds.h,
           0, 0, cropped.width, cropped.height
@@ -9495,6 +9539,9 @@ export function IconPaintEditor({
     const next = linesRef.current.map((item): LineObj => {
       if (!targetIds.has(item.id) || item.type === 'group') return item
       const hit = paintObjectHit(item, canvasPoint, W, H)
+      if (punchMaskCanvases.has(item.id) || seeThroughMaskCanvases.has(item.id)) {
+        rewritePunchBitsFromLocal(item, W, H)
+      }
       const inPunchHole = objectPunchHoleAt(item, canvasPoint)
       if (hit === 'shadow') {
         textFillKind = 'shadow'
@@ -9598,13 +9645,16 @@ export function IconPaintEditor({
 
       // Solid Fill into an existing punch / see-through hole: close that pocket
       // and restore/recolour ink — never Outer flood, never expand the silhouette.
-      if (inPunchHole && !transparent) {
+      if (!transparent && (inPunchHole || hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id))) {
         const punchBits = punchMaskBits.get(item.id)
         const stBits = seeThroughMaskBits.get(item.id)
         const seed = findFillSeed(W, H, canvasPoint.x, canvasPoint.y, (x, y) => {
           const p = y * W + x
           return !!(punchBits?.[p] || stBits?.[p])
         })
+        if (!seed && !inPunchHole) {
+          // Has holes elsewhere but click is on solid ink — fall through to normal fill.
+        } else if (seed || inPunchHole) {
         const sx = seed?.x ?? Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
         const sy = seed?.y ?? Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
         const sp = sy * W + sx
@@ -9622,37 +9672,26 @@ export function IconPaintEditor({
           holeRegion = floodFillConnected(W, H, sx, sy, (byteI) => !!sourceBits[(byteI / 4) | 0])
           if (!holeRegion.some((v) => v)) holeRegion = null
         }
-        if (!holeRegion) {
+        if (holeRegion) {
+          // Clear only this mode's pocket. Tiny punch rim only (not ST) so leftover
+          // punch rings die without eating adjacent see-through sections.
+          if (mode === 'punch') {
+            const rim = dilateBitMask(holeRegion, W, H, 1)
+            subtractRegionFromMode(item as HoleItem, rim, 'punch', W, H, holeGeom)
+          } else {
+            subtractRegionFromMode(item as HoleItem, holeRegion, 'see-through', W, H, holeGeom)
+          }
+          syncHoleFlags(item as HoleItem)
+
+          // Paint the pocket (restored ink or empty counter) without growing bounds.
+          // Other ST/punch pockets keep their masks so Fill cannot bleed into them.
+          const refilled = refillHolePocket(item, holeRegion, fillColor, W, H)
+          if (refilled.imageDataUrl) imageUrls.push(refilled.imageDataUrl)
           changed = true
           if (item.type === 'text') textFillKind = 'glyph'
-          return {
-            ...item,
-            color: firstSolidColor(fillColor),
-            punchThrough: hasPunchCoverage(item.id),
-            punchEnclosedHole:
-              hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
-                ? item.punchEnclosedHole
-                : false
-          }
+          return refilled
         }
-
-        // Clear only this mode's pocket. Tiny punch rim only (not ST) so leftover
-        // punch rings die without eating adjacent see-through sections.
-        if (mode === 'punch') {
-          const rim = dilateBitMask(holeRegion, W, H, 1)
-          subtractRegionFromMode(item as HoleItem, rim, 'punch', W, H, holeGeom)
-        } else {
-          subtractRegionFromMode(item as HoleItem, holeRegion, 'see-through', W, H, holeGeom)
         }
-        syncHoleFlags(item as HoleItem)
-
-        // Paint the pocket (restored ink or empty counter) without growing bounds.
-        // Other ST/punch pockets stay intact (baked into stamp / remaining punch bits).
-        const refilled = paintCounterFillKeepHoles(item, holeRegion, fillColor, W, H)
-        if (refilled.imageDataUrl) imageUrls.push(refilled.imageDataUrl)
-        changed = true
-        if (item.type === 'text') textFillKind = 'glyph'
-        return refilled
       }
 
       if (item.type === 'stamp') {
