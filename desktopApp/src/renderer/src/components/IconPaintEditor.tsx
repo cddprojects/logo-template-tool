@@ -43,7 +43,8 @@ import {
   punchBitsEqual,
   bitsFromAlpha,
   clearAllHoles,
-  clearHolesOnTextEdit,
+  refreshHolesAfterTextChange,
+  pruneTinyHoleComponents,
   rewriteDisplayBits,
   attachFromFlood,
   serializeHolePng,
@@ -599,18 +600,7 @@ async function restorePunchMasks(
         x.drawImage(img, 0, 0, W, H)
         const bits = bitsFromAlpha(x.getImageData(0, 0, W, H).data, W, H)
         if (bits.some((v) => v)) {
-          let hole = bits
-          // Erode soft AA only for true counter pockets — not every see-through.
-          if (l.punchEnclosedHole) {
-            const probe = document.createElement('canvas')
-            probe.width = W
-            probe.height = H
-            const pctx = probe.getContext('2d')!
-            renderLineBase(pctx, { ...l, shadow: false, punchThrough: false, color: '#000000' })
-            const eroded = erodeHoleAwayFromInk(hole, pctx.getImageData(0, 0, W, H).data, W, H, 24, 2)
-            if (eroded.some((v) => v)) hole = eroded
-          }
-          setLocalPunchFromFilled(l, hole, W, H)
+          setLocalPunchFromFilled(l, bits, W, H)
           if (l.holeMaskMode === 'punch') l.punchThrough = true
           if (l.holeMaskMode === 'see-through') l.punchThrough = false
           continue
@@ -626,13 +616,6 @@ async function restorePunchMasks(
         if (!mapped) continue
         let hole = mapped.bits
         if (mapped.enclosed) {
-          const probe = document.createElement('canvas')
-          probe.width = W
-          probe.height = H
-          const pctx = probe.getContext('2d')!
-          renderLineBase(pctx, { ...l, shadow: false, punchThrough: false, color: '#000000' })
-          const eroded = erodeHoleAwayFromInk(hole, pctx.getImageData(0, 0, W, H).data, W, H, 24, 2)
-          if (eroded.some((v) => v)) hole = eroded
           l.punchEnclosedHole = true
         }
         setLocalPunchFromFilled(l, hole, W, H)
@@ -842,49 +825,6 @@ function floodOutsideEmpty(ink: Uint8Array, w: number, h: number): Uint8Array {
     tryPush(x, y - 1)
   }
   return outside
-}
-
-/**
- * Shrink an enclosed letter-counter mask away from glyph ink / AA.
- * Punching flush against anti-aliased edges leaves thin white fringe columns
- * (especially on "b", "a", "e", "g") when the hole cuts through layers below.
- */
-function erodeHoleAwayFromInk(
-  filled: Uint8Array,
-  inkAlpha: Uint8ClampedArray | Uint8Array,
-  w: number,
-  h: number,
-  inkThreshold = 32,
-  radius = 1
-): Uint8Array {
-  const out = new Uint8Array(filled.length)
-  const inkAt = (p: number) => {
-    // ImageData alpha stride vs packed 1-byte ink map
-    if (inkAlpha.length === w * h * 4) return inkAlpha[p * 4 + 3] >= inkThreshold
-    return inkAlpha[p] >= inkThreshold
-  }
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const p = y * w + x
-      if (!filled[p]) continue
-      if (inkAt(p)) continue
-      let nearInk = false
-      for (let dy = -radius; dy <= radius && !nearInk; dy++) {
-        for (let dx = -radius; dx <= radius; dx++) {
-          if (dx === 0 && dy === 0) continue
-          const nx = x + dx
-          const ny = y + dy
-          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
-          if (inkAt(ny * w + nx)) {
-            nearInk = true
-            break
-          }
-        }
-      }
-      if (!nearInk) out[p] = 1
-    }
-  }
-  return out
 }
 
 /**
@@ -2783,12 +2723,33 @@ function serializeHoleMaskPng(item: LineObj, W: number, H: number): string | und
 }
 
 /**
- * After text content changes, drop hole masks instead of auto-punching every
- * new counter (B/O bowls). Auto-rebuild made punched text look see-through and
- * left stale hole shapes from the previous string.
+ * After text content / font changes: rebuild enclosed counters in the same
+ * punch vs see-through mode. Clearing alone leaves Outer in the bowls
+ * (looks like an accidental see-through).
  */
-function refreshTextHoleMaskForNewGlyphs(item: LineObj, _W: number, _H: number): void {
-  clearHolesOnTextEdit(item as HoleItem)
+function refreshTextHoleMaskForNewGlyphs(item: LineObj, W: number, H: number): void {
+  if (item.type !== 'text') return
+  const hadHole =
+    !!item.punchThrough ||
+    !!item.punchEnclosedHole ||
+    punchMaskBits.has(item.id) ||
+    punchMaskCanvases.has(item.id) ||
+    !!item.holeMaskPng
+  if (!hadHole) return
+
+  const probe = takeCanvas(W, H)
+  try {
+    const pctx = probe.getContext('2d')!
+    renderText(pctx, { ...item, color: '#000000', shadow: false, punchThrough: false })
+    const data = pctx.getImageData(0, 0, W, H).data
+    const ink = new Uint8Array(W * H)
+    for (let p = 0; p < ink.length; p++) {
+      if (data[p * 4 + 3] >= 24) ink[p] = 1
+    }
+    refreshHolesAfterTextChange(item as HoleItem, ink, W, H, holeGeom)
+  } finally {
+    releaseCanvas(probe)
+  }
 }
 
 function objectHasFillHole(l: LineObj): boolean {
@@ -3019,17 +2980,8 @@ function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: Lin
     // Prefer the user's saved hole (partial counters) — auto-detect would
     // re-punch every counter and fight punch vs see-through intent.
     const hole = resolveEnclosedHoleBits(bits, hardHole, holeN, w, h) ?? bits
-    // Slight inset so punch-through never clips the hard stem.
-    const inkAlpha = new Uint8Array(w * h * 4)
-    for (let p = 0; p < ink.length; p++) {
-      if (ink[p]) inkAlpha[p * 4 + 3] = 255
-    }
-    const through = erodeHoleAwayFromInk(hole, inkAlpha, w, h, 128, 1)
-    if (!through.some((v) => v)) {
-      destOutFilledMask(ctx, hole, w, h)
-    } else {
-      destOutFilledMask(ctx, through, w, h)
-    }
+    // Cut the full counter — eroding here left Outer colour along the hole edge.
+    destOutFilledMask(ctx, hole, w, h)
     // Keep display bits as the saved/resolved hole — do not overwrite with
     // auto-detected full counters (that regenerates every bowl on move).
     punchMaskBits.set(item.id, hole)
@@ -5584,8 +5536,9 @@ export function IconPaintEditor({
         return !ink[p] && !outside[p]
       })
       if (!region.some((v) => v)) return false
-      let holeBits = erodeHoleAwayFromInk(region, gd, W, H, 24, 2)
-      if (!holeBits.some((v) => v)) holeBits = region
+      // Keep the full counter flood — eroding inset leaves Outer peeking as a
+      // coloured ring between the stem and the punched hole after Save.
+      const holeBits = region
       // Replace prior full-glyph silhouette so counters stay local.
       const prevBits = punchMaskBits.get(item.id)
       if (prevBits && prevBits.length === W * H) {
@@ -9825,21 +9778,10 @@ export function IconPaintEditor({
     // Fallback: lowest candidate in paint order whose bbox contains the hole.
     if (!owner || bestScore < 4) return false
 
-    // Keep the stored hole strictly inside the counter — never on glyph AA —
-    // so punch-through cannot leave white fringe along the stem.
+    // Keep the stored hole flush with the counter (no erode inset — that left
+    // Outer colour as a ring along the hole edge after Save).
     let holeBits = filled
-    {
-      const probe = takeCanvas(W, H)
-      try {
-        const pctx = probe.getContext('2d')!
-        const probeItem = { ...owner, shadow: false, punchThrough: false, color: owner.type === 'text' ? '#000000' : owner.color }
-        renderLineBase(pctx, probeItem)
-        holeBits = erodeHoleAwayFromInk(filled, pctx.getImageData(0, 0, W, H).data, W, H, 24, 2)
-      } finally {
-        releaseCanvas(probe)
-      }
-    }
-    if (!holeBits.some((v) => v)) holeBits = filled
+    if (!holeBits.some((v) => v)) return false
 
     // Enclosed counter fill must not keep a prior whole-glyph silhouette
     // (transparent Punch on the whole letter) — that makes every hole look like
@@ -13283,6 +13225,27 @@ export function IconPaintEditor({
               data[i + 3] = 0
             }
           }
+          // Drop speckles from sparse UV sampling (show up as black irregular
+          // dots around the shape after Save dilate).
+          if (any) {
+            const raw = new Uint8Array(W * H)
+            for (let p = 0; p < raw.length; p++) {
+              if (data[p * 4 + 3] >= 128) raw[p] = 1
+            }
+            const cleaned = pruneTinyHoleComponents(raw, W, H, 6)
+            for (let p = 0; p < cleaned.length; p++) {
+              const i = p * 4
+              if (cleaned[p]) {
+                data[i] = 0
+                data[i + 1] = 0
+                data[i + 2] = 0
+                data[i + 3] = 255
+              } else {
+                data[i + 3] = 0
+              }
+            }
+            any = cleaned.some((v) => v)
+          }
           // 1px hard dilate so scaled punch outside Paint does not leave white
           // AA columns of the original fill colour along hole edges.
           if (any) {
@@ -13937,12 +13900,17 @@ export function IconPaintEditor({
         patch.bold !== undefined ||
         patch.italic !== undefined ||
         patch.letterSpacing !== undefined
-      if (clearsHole) {
-        const live = linesRef.current.find((l) => l.id === selectedIdRef.current)
-        if (live) clearHolesOnTextEdit(live as HoleItem)
-      }
       if (commit) updateSelected(patch)
       else updateSelectedLive(patch)
+      // Rebuild after the glyph metrics/text are applied.
+      if (clearsHole) {
+        const live = linesRef.current.find((l) => l.id === selectedIdRef.current)
+        if (live) {
+          refreshTextHoleMaskForNewGlyphs(live, W, H)
+          redrawLines()
+          drawHandles()
+        }
+      }
     }
   }
 

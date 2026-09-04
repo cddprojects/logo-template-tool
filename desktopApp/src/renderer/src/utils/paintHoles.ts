@@ -10,7 +10,8 @@
  *    first, or use the local canvas path.
  * 4. Enclosed counters: prefer the user's saved hole bits over auto-detecting
  *    every counter (partial punch / see-through must survive redraw).
- * 5. Text / font string changes clear holes — do not invent B/O counters.
+ * 5. Text / font changes: rebuild enclosed counters in the same punch vs
+ *    see-through mode (clearing alone makes Outer show in bowls = fake see-through).
  * 6. Session `punchMasks` are export cache for stack punch only. Content
  *    see-through bakes into decorations; never put Inner see-through there.
  */
@@ -127,9 +128,122 @@ export function clearAllHoles(): void {
 }
 
 /**
- * After text content changes, drop hole masks instead of auto-punching every
- * new counter (B/O bowls).
+ * After text/font changes: drop stale masks, then rebuild enclosed counters in
+ * the same punch vs see-through mode. Clearing alone leaves Outer visible in
+ * letter bowls (looks like see-through).
+ *
+ * `inkBits` = hard glyph silhouette (alpha≥threshold → 1), same size as W×H.
  */
+export function refreshHolesAfterTextChange(
+  item: HoleItem,
+  inkBits: Uint8Array,
+  W: number,
+  H: number,
+  geom: HoleGeom
+): void {
+  if (item.type !== 'text') return
+  const wasPunch = !!item.punchThrough || item.holeMaskMode === 'punch'
+  const hadAny =
+    wasPunch ||
+    !!item.punchEnclosedHole ||
+    item.holeMaskMode === 'see-through' ||
+    punchMaskCanvases.has(item.id) ||
+    punchMaskBits.has(item.id) ||
+    !!item.holeMaskPng
+  if (!hadAny) return
+
+  clearObjectHoles(item)
+
+  if (inkBits.length !== W * H) return
+  const outside = floodOutsideEmptyBits(inkBits, W, H)
+  const hole = new Uint8Array(W * H)
+  let n = 0
+  for (let p = 0; p < hole.length; p++) {
+    if (inkBits[p] || outside[p]) continue
+    hole[p] = 1
+    n++
+  }
+  // No counters (e.g. "T" / "L") — leave solid, flags cleared.
+  if (n < 8) return
+  attachFromFlood(item, hole, W, H, geom, { replace: true })
+  item.punchEnclosedHole = true
+  item.punchThrough = wasPunch
+  item.holeMaskMode = wasPunch ? 'punch' : 'see-through'
+}
+
+/** Empty pixels reachable from the canvas border (not enclosed holes). */
+export function floodOutsideEmptyBits(ink: Uint8Array, w: number, h: number): Uint8Array {
+  const outside = new Uint8Array(w * h)
+  const stack: number[] = []
+  const tryPush = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= w || y >= h) return
+    const p = y * w + x
+    if (outside[p] || ink[p]) return
+    outside[p] = 1
+    stack.push(p)
+  }
+  for (let x = 0; x < w; x++) {
+    tryPush(x, 0)
+    tryPush(x, h - 1)
+  }
+  for (let y = 0; y < h; y++) {
+    tryPush(0, y)
+    tryPush(w - 1, y)
+  }
+  while (stack.length) {
+    const p = stack.pop()!
+    const x = p % w
+    const y = (p / w) | 0
+    tryPush(x + 1, y)
+    tryPush(x - 1, y)
+    tryPush(x, y + 1)
+    tryPush(x, y - 1)
+  }
+  return outside
+}
+
+/**
+ * Drop connected hole components smaller than `minArea` (export noise / speckles
+ * from sampling that become black irregular dots after dilate).
+ */
+export function pruneTinyHoleComponents(bits: Uint8Array, w: number, h: number, minArea = 6): Uint8Array {
+  const out = bits.slice()
+  const seen = new Uint8Array(bits.length)
+  const stack: number[] = []
+  for (let start = 0; start < bits.length; start++) {
+    if (!out[start] || seen[start]) continue
+    stack.length = 0
+    stack.push(start)
+    seen[start] = 1
+    const comp: number[] = []
+    while (stack.length) {
+      const p = stack.pop()!
+      comp.push(p)
+      const x = p % w
+      const y = (p / w) | 0
+      for (const [dx, dy] of [
+        [1, 0],
+        [-1, 0],
+        [0, 1],
+        [0, -1]
+      ] as const) {
+        const nx = x + dx
+        const ny = y + dy
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+        const np = ny * w + nx
+        if (!out[np] || seen[np]) continue
+        seen[np] = 1
+        stack.push(np)
+      }
+    }
+    if (comp.length < minArea) {
+      for (const p of comp) out[p] = 0
+    }
+  }
+  return out
+}
+
+/** @deprecated Prefer refreshHolesAfterTextChange so punch mode is preserved. */
 export function clearHolesOnTextEdit(item: HoleItem): void {
   if (item.type !== 'text') return
   if (
@@ -169,6 +283,10 @@ export function rewriteDisplayBits(item: HoleItem, W: number, H: number, geom: H
   const ch = src.height
   const img = src.getContext('2d')!.getImageData(0, 0, cw, ch).data
   const bits = new Uint8Array(W * H)
+  const stamp = (px: number, py: number) => {
+    if (px < 0 || py < 0 || px >= W || py >= H) return
+    bits[py * W + px] = 1
+  }
   for (let ly = 0; ly < ch; ly++) {
     for (let lx = 0; lx < cw; lx++) {
       if (img[(ly * cw + lx) * 4 + 3] <= 8) continue
@@ -177,10 +295,15 @@ export function rewriteDisplayBits(item: HoleItem, W: number, H: number, geom: H
         y: box.y + ((ly + 0.5) * box.h) / ch
       }
       const display = geom.mapDisplay(local, item)
-      const px = Math.floor(display.x)
-      const py = Math.floor(display.y)
-      if (px < 0 || py < 0 || px >= W || py >= H) continue
-      bits[py * W + px] = 1
+      // Cover fractional coverage without a full ±0.5 inflate (that ate stem ink).
+      const fx = display.x
+      const fy = display.y
+      const x0 = Math.floor(fx)
+      const y0 = Math.floor(fy)
+      stamp(x0, y0)
+      if (fx - x0 > 0.35) stamp(x0 + 1, y0)
+      if (fy - y0 > 0.35) stamp(x0, y0 + 1)
+      if (fx - x0 > 0.35 && fy - y0 > 0.35) stamp(x0 + 1, y0 + 1)
     }
   }
   punchMaskBits.set(item.id, bits)
@@ -234,14 +357,23 @@ export function attachFromFlood(
       for (let px = minX; px <= maxX; px++) {
         if (!filled[py * W + px]) continue
         const local = geom.unmapDisplay({ x: px + 0.5, y: py + 0.5 }, item)
-        const lx = Math.floor(((local.x - box.x) / box.w) * cw)
-        const ly = Math.floor(((local.y - box.y) / box.h) * ch)
-        if (lx < 0 || ly < 0 || lx >= cw || ly >= ch) continue
-        const i = (ly * cw + lx) * 4
-        d[i] = 255
-        d[i + 1] = 255
-        d[i + 2] = 255
-        d[i + 3] = 255
+        const u = ((local.x - box.x) / box.w) * cw
+        const v = ((local.y - box.y) / box.h) * ch
+        // Stamp a 2×2 neighbourhood so UV floor gaps do not leave Outer fringe.
+        const lx0 = Math.floor(u - 0.25)
+        const ly0 = Math.floor(v - 0.25)
+        const lx1 = Math.floor(u + 0.25)
+        const ly1 = Math.floor(v + 0.25)
+        for (let ly = ly0; ly <= ly1; ly++) {
+          for (let lx = lx0; lx <= lx1; lx++) {
+            if (lx < 0 || ly < 0 || lx >= cw || ly >= ch) continue
+            const i = (ly * cw + lx) * 4
+            d[i] = 255
+            d[i + 1] = 255
+            d[i + 2] = 255
+            d[i + 3] = 255
+          }
+        }
       }
     }
   }
