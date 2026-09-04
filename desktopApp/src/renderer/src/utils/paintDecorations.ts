@@ -158,6 +158,10 @@ function linkedTextHasHoleIntent(v: PaintVector): boolean {
     !!v.punchThrough ||
     !!v.punchEnclosedHole ||
     !!v.punchMask ||
+    !!v.holeMaskPng ||
+    !!v.seeThroughHoleMaskPng ||
+    v.holeMaskMode === 'punch' ||
+    v.holeMaskMode === 'see-through' ||
     isTransparentPaintColor(v.color ?? '')
   )
 }
@@ -190,17 +194,20 @@ function rebuildLinkedLetterPaintEffects(
     }
   }
 
+  const vectorHasSeeThrough = (v: PaintVector) =>
+    !!v.seeThroughHoleMaskPng ||
+    v.holeMaskMode === 'see-through' ||
+    (!v.punchThrough && !!v.punchEnclosedHole) ||
+    (!v.punchThrough && !!v.punchMask) ||
+    (!v.punchThrough && !!v.holeMaskPng) ||
+    (!v.punchThrough && isTransparentPaintColor(v.color ?? ''))
   const hasSeeThrough =
-    nextLinked.some(
-      (v) =>
-        (!v.punchThrough && !!v.punchEnclosedHole) ||
-        (!v.punchThrough && !!v.punchMask) ||
-        (!v.punchThrough && isTransparentPaintColor(v.color ?? ''))
-    ) ||
+    nextLinked.some(vectorHasSeeThrough) ||
     // Prior save baked see-through; keep rebaking when flags survived.
-    (!!session.contentBakedInDecorations &&
-      nextLinked.some((v) => !v.punchThrough && linkedTextHasHoleIntent(v)))
-  const hasPunch = nextLinked.some((v) => !!v.punchThrough)
+    (!!session.contentBakedInDecorations && nextLinked.some(vectorHasSeeThrough))
+  const hasPunch = nextLinked.some(
+    (v) => !!v.punchThrough || v.holeMaskMode === 'punch' || (!!v.holeMaskPng && v.holeMaskMode !== 'see-through')
+  )
 
   // ── Content punchMasks: rebuild from current punch-through vectors only.
   // Never patch the previous PNG — leftover TE holes accumulate into white
@@ -277,16 +284,21 @@ function rebuildLinkedLetterPaintEffects(
         punchThrough: false,
         punchMask: false
       })
-      if (v.holeMaskPng && (v.holeMaskMode === 'see-through' || !v.punchThrough)) {
-        const img = loadDataUrlImageSync(v.holeMaskPng)
-        if (img) {
-          dctx.save()
-          dctx.globalCompositeOperation = 'destination-out'
-          dctx.drawImage(img, 0, 0)
-          dctx.restore()
+      {
+        const stPng =
+          v.seeThroughHoleMaskPng ||
+          (v.holeMaskMode === 'see-through' || (!v.punchThrough && v.holeMaskPng) ? v.holeMaskPng : undefined)
+        if (stPng) {
+          const img = loadDataUrlImageSync(stPng)
+          if (img) {
+            dctx.save()
+            dctx.globalCompositeOperation = 'destination-out'
+            dctx.drawImage(img, 0, 0)
+            dctx.restore()
+          }
+          // Prefer persisted mask only — never invent every counter as a fallback.
+          continue
         }
-        // Prefer persisted mask only — never invent every counter as a fallback.
-        continue
       }
       // No holeMaskPng: leave solid glyphs (user re-applies see-through in Paint).
     }
@@ -365,6 +377,7 @@ export function syncOutsideLettersIntoPaintSession(
             punchThrough: false,
             punchEnclosedHole: false,
             holeMaskPng: undefined,
+            seeThroughHoleMaskPng: undefined,
             holeMaskMode: undefined
           }
         : {}),

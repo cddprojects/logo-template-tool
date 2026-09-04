@@ -489,6 +489,8 @@ export interface PaintVector {
    * holes survive Save → re-enter Paint without depending on in-memory maps.
    */
   holeMaskPng?: string
+  /** See-through pockets when punch and see-through coexist on one object. */
+  seeThroughHoleMaskPng?: string
   /** How holeMaskPng is applied: stack punch vs local see-through. */
   holeMaskMode?: 'punch' | 'see-through'
 }

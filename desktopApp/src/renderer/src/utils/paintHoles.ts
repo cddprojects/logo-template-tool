@@ -1,29 +1,25 @@
 /**
  * Authoritative in-Paint hole store (punch + see-through).
  *
+ * Dual masks: punch and see-through can coexist on different sections of the
+ * same object. `punchThrough` means “has any punch-mode coverage”.
+ *
  * Invariants:
- * 1. Object-local mask (`punchMaskCanvases`) is the source of truth when a
- *    local box exists. Canvas-fixed `punchMaskBits` are a derived cache.
- * 2. After any geometry change (move / rotate / scale / reshape / reopen
- *    scale), call `syncHolesAfterGeomChange` so display bits track the object.
- * 3. Never dest-out stale canvas-fixed bits when a local box exists — rewrite
- *    first, or use the local canvas path.
- * 4. Enclosed counters: prefer the user's saved hole bits over auto-detecting
- *    every counter (partial punch / see-through must survive redraw).
+ * 1. Object-local canvas is SoT when a local box exists; display bits are derived.
+ * 2. After geom change, call syncHolesAfterGeomChange (both modes).
+ * 3. Never dest-out stale canvas-fixed bits when a local box exists.
+ * 4. Enclosed counters: prefer saved hole bits over auto-detecting every counter.
  * 5. Text / font / shape-kind changes drop holes (do not invent new counters).
- *    Move / rotate / uniform scale keep holes via syncHolesAfterGeomChange.
- * 6. Session `punchMasks` are export cache for stack punch only. Content
- *    see-through bakes into decorations; never put Inner see-through there.
+ * 6. Session punchMasks export punch-mode only; see-through bakes into decorations.
  */
 
 export type HoleMode = 'none' | 'punch' | 'see-through'
 export type HoleKind = 'ink' | 'enclosed' | 'free'
+export type HoleFillMode = 'punch' | 'see-through'
 
 export type HolePt = { x: number; y: number }
-
 export type HoleLocalBox = { x: number; y: number; w: number; h: number }
 
-/** Minimal object fields the hole subsystem needs. */
 export type HoleItem = {
   id: string
   type?: string
@@ -31,6 +27,8 @@ export type HoleItem = {
   punchEnclosedHole?: boolean
   punchMask?: boolean
   holeMaskPng?: string
+  /** See-through pockets when punch and see-through coexist. */
+  seeThroughHoleMaskPng?: string
   holeMaskMode?: 'punch' | 'see-through'
   pts?: HolePt[]
 }
@@ -41,10 +39,17 @@ export type HoleGeom = {
   unmapDisplay: (p: HolePt, item: HoleItem) => HolePt
 }
 
-/** Sync punch-mask bitmaps so dest-out does not wait on image decode. */
 export const punchMaskCanvases = new Map<string, HTMLCanvasElement>()
-/** Exact flood-fill hole bits (W*H) for punch-through dest-out. */
 export const punchMaskBits = new Map<string, Uint8Array>()
+export const seeThroughMaskCanvases = new Map<string, HTMLCanvasElement>()
+export const seeThroughMaskBits = new Map<string, Uint8Array>()
+
+function canvasesFor(mode: HoleFillMode) {
+  return mode === 'punch' ? punchMaskCanvases : seeThroughMaskCanvases
+}
+function bitsFor(mode: HoleFillMode) {
+  return mode === 'punch' ? punchMaskBits : seeThroughMaskBits
+}
 
 export function mergePunchBits(prev: Uint8Array | undefined, region: Uint8Array): Uint8Array {
   if (!prev || prev.length !== region.length) return region.slice()
@@ -58,6 +63,10 @@ export function mergePunchBits(prev: Uint8Array | undefined, region: Uint8Array)
 export function clonePunchBitsMap(): Record<string, Uint8Array> {
   const out: Record<string, Uint8Array> = {}
   for (const [id, bits] of punchMaskBits) out[id] = bits.slice()
+  for (const [id, bits] of seeThroughMaskBits) {
+    const key = `st:${id}`
+    out[key] = bits.slice()
+  }
   return out
 }
 
@@ -77,15 +86,34 @@ export function bitsFromAlpha(data: Uint8ClampedArray, w: number, h: number): Ui
   return bits
 }
 
+export function hasPunchCoverage(id: string): boolean {
+  return punchMaskCanvases.has(id) || !!(punchMaskBits.get(id)?.some((v) => v))
+}
+
+export function hasSeeThroughCoverage(id: string): boolean {
+  return seeThroughMaskCanvases.has(id) || !!(seeThroughMaskBits.get(id)?.some((v) => v))
+}
+
+export function syncHoleFlags(item: HoleItem): void {
+  const hasPunch = hasPunchCoverage(item.id)
+  const hasSt = hasSeeThroughCoverage(item.id)
+  item.punchThrough = hasPunch
+  if (!hasPunch && !hasSt) {
+    item.punchEnclosedHole = false
+    item.holeMaskPng = undefined
+    item.seeThroughHoleMaskPng = undefined
+    item.holeMaskMode = undefined
+    return
+  }
+  if (hasPunch && hasSt) item.holeMaskMode = 'punch'
+  else if (hasPunch) item.holeMaskMode = 'punch'
+  else item.holeMaskMode = 'see-through'
+}
+
 export function holeModeOf(item: HoleItem): HoleMode {
-  if (item.holeMaskMode === 'punch' || item.punchThrough) return 'punch'
-  if (
-    item.holeMaskMode === 'see-through' ||
-    item.punchEnclosedHole ||
-    punchMaskCanvases.has(item.id) ||
-    punchMaskBits.has(item.id)
-  ) {
-    return item.punchThrough ? 'punch' : 'see-through'
+  if (hasPunchCoverage(item.id) || item.punchThrough) return 'punch'
+  if (hasSeeThroughCoverage(item.id) || item.holeMaskMode === 'see-through' || item.punchEnclosedHole) {
+    return 'see-through'
   }
   return 'none'
 }
@@ -93,31 +121,33 @@ export function holeModeOf(item: HoleItem): HoleMode {
 export function holeKindOf(item: HoleItem): HoleKind | 'none' {
   if (item.punchMask) return 'free'
   if (item.punchEnclosedHole) return 'enclosed'
-  if (item.punchThrough || punchMaskCanvases.has(item.id) || punchMaskBits.has(item.id)) return 'ink'
+  if (hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id) || item.punchThrough) return 'ink'
   return 'none'
 }
 
 export function objectHasFillHole(item: HoleItem): boolean {
-  // Free punch stamps are operators, not fillable hole owners.
   if (item.punchMask) return false
-  return !!item.punchThrough || punchMaskCanvases.has(item.id) || punchMaskBits.has(item.id)
+  return (
+    !!item.punchThrough ||
+    hasPunchCoverage(item.id) ||
+    hasSeeThroughCoverage(item.id)
+  )
 }
 
 export function objectHasLocalHoleMask(item: HoleItem): boolean {
-  return punchMaskCanvases.has(item.id) || punchMaskBits.has(item.id)
+  return hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
 }
 
-/** Drop maps + optional vector flags (text edit / clear). */
-export function clearObjectHoles(
-  item: HoleItem,
-  opts?: { clearFlags?: boolean }
-): void {
+export function clearObjectHoles(item: HoleItem, opts?: { clearFlags?: boolean }): void {
   punchMaskCanvases.delete(item.id)
   punchMaskBits.delete(item.id)
+  seeThroughMaskCanvases.delete(item.id)
+  seeThroughMaskBits.delete(item.id)
   if (opts?.clearFlags !== false) {
     item.punchThrough = false
     item.punchEnclosedHole = false
     item.holeMaskPng = undefined
+    item.seeThroughHoleMaskPng = undefined
     item.holeMaskMode = undefined
   }
 }
@@ -125,27 +155,25 @@ export function clearObjectHoles(
 export function clearAllHoles(): void {
   punchMaskBits.clear()
   punchMaskCanvases.clear()
+  seeThroughMaskBits.clear()
+  seeThroughMaskCanvases.clear()
 }
 
-/**
- * After text content / font changes, drop hole masks. Do not invent new counters
- * for the new string (that turned a single punched bowl into every B/O hole).
- */
 export function clearHolesOnTextEdit(item: HoleItem): void {
   if (item.type !== 'text') return
   if (
     !item.punchThrough &&
     !item.punchEnclosedHole &&
-    !punchMaskBits.has(item.id) &&
-    !punchMaskCanvases.has(item.id) &&
-    !item.holeMaskPng
+    !hasPunchCoverage(item.id) &&
+    !hasSeeThroughCoverage(item.id) &&
+    !item.holeMaskPng &&
+    !item.seeThroughHoleMaskPng
   ) {
     return
   }
   clearObjectHoles(item)
 }
 
-/** @deprecated Use clearHolesOnTextEdit — holes are dropped, not rebuilt. */
 export function refreshHolesAfterTextChange(
   item: HoleItem,
   _inkBits: Uint8Array,
@@ -156,7 +184,6 @@ export function refreshHolesAfterTextChange(
   clearHolesOnTextEdit(item)
 }
 
-/** Empty pixels reachable from the canvas border (not enclosed holes). */
 export function floodOutsideEmptyBits(ink: Uint8Array, w: number, h: number): Uint8Array {
   const outside = new Uint8Array(w * h)
   const stack: number[] = []
@@ -187,10 +214,6 @@ export function floodOutsideEmptyBits(ink: Uint8Array, w: number, h: number): Ui
   return outside
 }
 
-/**
- * Drop connected hole components smaller than `minArea` (export noise / speckles
- * from sampling that become black irregular dots after dilate).
- */
 export function pruneTinyHoleComponents(bits: Uint8Array, w: number, h: number, minArea = 6): Uint8Array {
   const out = bits.slice()
   const seen = new Uint8Array(bits.length)
@@ -228,10 +251,6 @@ export function pruneTinyHoleComponents(bits: Uint8Array, w: number, h: number, 
   return out
 }
 
-/**
- * Prefer the user's saved enclosed hole over auto-detecting every counter.
- * Auto-detect fights partial punch / see-through intent.
- */
 export function resolveEnclosedHoleBits(
   savedBits: Uint8Array | undefined,
   autoHole: Uint8Array,
@@ -245,10 +264,51 @@ export function resolveEnclosedHoleBits(
   return null
 }
 
-/** Rebuild canvas-fixed bits from the object-local mask via current geometry. */
-export function rewriteDisplayBits(item: HoleItem, W: number, H: number, geom: HoleGeom): void {
+/** Subtract a region from one mode's display bits (and drop empty maps). */
+export function subtractRegionFromMode(
+  item: HoleItem,
+  region: Uint8Array,
+  mode: HoleFillMode,
+  W: number,
+  H: number,
+  geom: HoleGeom
+): boolean {
+  const bitsMap = bitsFor(mode)
+  const canvasMap = canvasesFor(mode)
+  const bits = bitsMap.get(item.id)
+  if (!bits || bits.length !== region.length) {
+    canvasMap.delete(item.id)
+    bitsMap.delete(item.id)
+    syncHoleFlags(item)
+    return false
+  }
+  let remain = 0
+  const next = new Uint8Array(bits.length)
+  for (let p = 0; p < bits.length; p++) {
+    if (!bits[p] || region[p]) continue
+    next[p] = 1
+    remain++
+  }
+  canvasMap.delete(item.id)
+  bitsMap.delete(item.id)
+  if (remain === 0) {
+    syncHoleFlags(item)
+    return false
+  }
+  attachFromFlood(item, next, W, H, geom, { replace: true, mode, skipOtherSubtract: true })
+  syncHoleFlags(item)
+  return true
+}
+
+export function rewriteDisplayBits(
+  item: HoleItem,
+  W: number,
+  H: number,
+  geom: HoleGeom,
+  mode: HoleFillMode = 'punch'
+): void {
   const box = geom.localBox(item)
-  const src = punchMaskCanvases.get(item.id)
+  const src = canvasesFor(mode).get(item.id)
   if (!box || !src) return
   const cw = src.width
   const ch = src.height
@@ -266,7 +326,6 @@ export function rewriteDisplayBits(item: HoleItem, W: number, H: number, geom: H
         y: box.y + ((ly + 0.5) * box.h) / ch
       }
       const display = geom.mapDisplay(local, item)
-      // Cover fractional coverage without a full ±0.5 inflate (that ate stem ink).
       const fx = display.x
       const fy = display.y
       const x0 = Math.floor(fx)
@@ -277,27 +336,52 @@ export function rewriteDisplayBits(item: HoleItem, W: number, H: number, geom: H
       if (fx - x0 > 0.35 && fy - y0 > 0.35) stamp(x0 + 1, y0 + 1)
     }
   }
-  punchMaskBits.set(item.id, bits)
+  bitsFor(mode).set(item.id, bits)
 }
 
-/**
- * Attach / merge flood-fill hole coverage onto an object.
- * Writes object-local canvas when a local box exists, then rewrites display bits.
- */
+/** Move a connected hole region into `to` (and remove it from the other mode). */
+export function moveConnectedRegionToMode(
+  item: HoleItem,
+  region: Uint8Array,
+  to: HoleFillMode,
+  W: number,
+  H: number,
+  geom: HoleGeom
+): void {
+  attachFromFlood(item, region, W, H, geom, { mode: to })
+  syncHoleFlags(item)
+}
+
 export function attachFromFlood(
   item: HoleItem,
   filled: Uint8Array,
   W: number,
   H: number,
   geom: HoleGeom,
-  opts?: { replace?: boolean }
+  opts?: { replace?: boolean; mode?: HoleFillMode; skipOtherSubtract?: boolean }
 ): void {
+  const mode: HoleFillMode =
+    opts?.mode ??
+    (item.holeMaskMode === 'punch' || item.holeMaskMode === 'see-through'
+      ? item.holeMaskMode
+      : item.punchThrough
+        ? 'punch'
+        : 'see-through')
+  const other: HoleFillMode = mode === 'punch' ? 'see-through' : 'punch'
+  // A section cannot be both modes — remove coverage from the other map.
+  if (!opts?.skipOtherSubtract) {
+    subtractRegionFromMode(item, filled, other, W, H, geom)
+  }
+
+  const canvasMap = canvasesFor(mode)
+  const bitsMap = bitsFor(mode)
   const box = geom.localBox(item)
   if (!box) {
-    punchMaskBits.set(
+    bitsMap.set(
       item.id,
-      opts?.replace ? filled.slice() : mergePunchBits(punchMaskBits.get(item.id), filled)
+      opts?.replace ? filled.slice() : mergePunchBits(bitsMap.get(item.id), filled)
     )
+    syncHoleFlags(item)
     return
   }
   const cw = Math.max(1, Math.round(box.w))
@@ -306,7 +390,7 @@ export function attachFromFlood(
   canvas.width = cw
   canvas.height = ch
   const ctx = canvas.getContext('2d')!
-  const prev = opts?.replace ? undefined : punchMaskCanvases.get(item.id)
+  const prev = opts?.replace ? undefined : canvasMap.get(item.id)
   if (prev) ctx.drawImage(prev, 0, 0, cw, ch)
   const img = ctx.getImageData(0, 0, cw, ch)
   const d = img.data
@@ -330,7 +414,6 @@ export function attachFromFlood(
         const local = geom.unmapDisplay({ x: px + 0.5, y: py + 0.5 }, item)
         const u = ((local.x - box.x) / box.w) * cw
         const v = ((local.y - box.y) / box.h) * ch
-        // Stamp a 2×2 neighbourhood so UV floor gaps do not leave Outer fringe.
         const lx0 = Math.floor(u - 0.25)
         const ly0 = Math.floor(v - 0.25)
         const lx1 = Math.floor(u + 0.25)
@@ -349,27 +432,33 @@ export function attachFromFlood(
     }
   }
   ctx.putImageData(img, 0, 0)
-  punchMaskCanvases.set(item.id, canvas)
-  rewriteDisplayBits(item, W, H, geom)
+  canvasMap.set(item.id, canvas)
+  rewriteDisplayBits(item, W, H, geom, mode)
+  // Union the original flood into display bits so UV remapping cannot displace
+  // isolated counters / letter bowls relative to the click region.
+  const rewritten = bitsMap.get(item.id)
+  if (rewritten && rewritten.length === filled.length) {
+    for (let p = 0; p < filled.length; p++) {
+      if (filled[p]) rewritten[p] = 1
+    }
+  } else if (!opts?.replace) {
+    bitsMap.set(item.id, mergePunchBits(bitsMap.get(item.id), filled))
+  } else {
+    bitsMap.set(item.id, filled.slice())
+  }
+  syncHoleFlags(item)
 }
 
-/** PNG snapshot of an object's hole bits for Save / re-enter. */
-export function serializeHolePng(item: HoleItem, W: number, H: number, geom: HoleGeom): string | undefined {
-  // Always refresh derived bits from local SoT before encoding — prevents
-  // persisting a pre-move mask if a geom path skipped sync.
-  if (punchMaskCanvases.has(item.id)) {
-    rewriteDisplayBits(item, W, H, geom)
-  }
-  const full = punchMaskBits.get(item.id)
-  if (!full || full.length !== W * H || !full.some((v) => v)) return undefined
+function serializeBitsPng(bits: Uint8Array, W: number, H: number): string | undefined {
+  if (!bits.some((v) => v)) return undefined
   const c = document.createElement('canvas')
   c.width = W
   c.height = H
   const ctx = c.getContext('2d')!
   const img = ctx.createImageData(W, H)
   const d = img.data
-  for (let p = 0; p < full.length; p++) {
-    if (!full[p]) continue
+  for (let p = 0; p < bits.length; p++) {
+    if (!bits[p]) continue
     const i = p * 4
     d[i] = 0
     d[i + 1] = 0
@@ -380,10 +469,27 @@ export function serializeHolePng(item: HoleItem, W: number, H: number, geom: Hol
   return c.toDataURL('image/png')
 }
 
-/**
- * After move / rotate / scale / reshape: rewrite display bits for every object
- * that still has a local hole canvas. Call at drag-end and after reopen scale.
- */
+/** Punch-mode hole PNG (stack cut outside Paint). */
+export function serializeHolePng(item: HoleItem, W: number, H: number, geom: HoleGeom): string | undefined {
+  if (punchMaskCanvases.has(item.id)) rewriteDisplayBits(item, W, H, geom, 'punch')
+  const full = punchMaskBits.get(item.id)
+  if (!full || full.length !== W * H) return undefined
+  return serializeBitsPng(full, W, H)
+}
+
+/** See-through-mode hole PNG (local bake outside Paint). */
+export function serializeSeeThroughHolePng(
+  item: HoleItem,
+  W: number,
+  H: number,
+  geom: HoleGeom
+): string | undefined {
+  if (seeThroughMaskCanvases.has(item.id)) rewriteDisplayBits(item, W, H, geom, 'see-through')
+  const full = seeThroughMaskBits.get(item.id)
+  if (!full || full.length !== W * H) return undefined
+  return serializeBitsPng(full, W, H)
+}
+
 export function syncHolesAfterGeomChange(
   items: HoleItem[],
   W: number,
@@ -395,7 +501,7 @@ export function syncHolesAfterGeomChange(
     !ids || ids === 'all' ? null : ids instanceof Set ? ids : new Set(ids)
   for (const item of items) {
     if (filter && !filter.has(item.id)) continue
-    if (!punchMaskCanvases.has(item.id)) continue
-    rewriteDisplayBits(item, W, H, geom)
+    if (punchMaskCanvases.has(item.id)) rewriteDisplayBits(item, W, H, geom, 'punch')
+    if (seeThroughMaskCanvases.has(item.id)) rewriteDisplayBits(item, W, H, geom, 'see-through')
   }
 }

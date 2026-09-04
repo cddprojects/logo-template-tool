@@ -39,6 +39,8 @@ import { reuseCanvas, takeCanvas, releaseCanvas, reset2dState, ensureCanvas } fr
 import {
   punchMaskCanvases,
   punchMaskBits,
+  seeThroughMaskCanvases,
+  seeThroughMaskBits,
   clonePunchBitsMap,
   punchBitsEqual,
   bitsFromAlpha,
@@ -48,11 +50,19 @@ import {
   rewriteDisplayBits,
   attachFromFlood,
   serializeHolePng,
+  serializeSeeThroughHolePng,
   syncHolesAfterGeomChange,
+  syncHoleFlags,
+  hasPunchCoverage,
+  hasSeeThroughCoverage,
+  subtractRegionFromMode,
+  moveConnectedRegionToMode,
   resolveEnclosedHoleBits,
   objectHasFillHole as holeObjectHasFillHole,
+  clearObjectHoles,
   type HoleGeom,
-  type HoleItem
+  type HoleItem,
+  type HoleFillMode
 } from '../utils/paintHoles'
 
 type Tool = 'pointer' | 'brush' | 'eraser' | 'fill' | 'eyedropper' | 'line' | 'shape' | 'freepoly' | 'polygon' | 'select' | 'text' | 'reshape'
@@ -447,6 +457,7 @@ interface LineObj {
   punchMask?: boolean
   /** Serialized hole silhouette so holes survive Save → re-enter. */
   holeMaskPng?: string
+  seeThroughHoleMaskPng?: string
   holeMaskMode?: 'punch' | 'see-through'
 }
 
@@ -589,26 +600,46 @@ async function restorePunchMasks(
       ensureStampImage(l.imageDataUrl)
       continue
     }
-    // Per-object hole PNG (see-through or punch) — preferred over layer mask.
-    if (l.holeMaskPng && !punchMaskCanvases.has(l.id)) {
-      const img = await loadPaintImage(l.holeMaskPng)
-      if (img) {
-        const c = document.createElement('canvas')
-        c.width = W
-        c.height = H
-        const x = c.getContext('2d')!
-        x.drawImage(img, 0, 0, W, H)
-        const bits = bitsFromAlpha(x.getImageData(0, 0, W, H).data, W, H)
-        if (bits.some((v) => v)) {
-          setLocalPunchFromFilled(l, bits, W, H)
-          if (l.holeMaskMode === 'punch') l.punchThrough = true
-          if (l.holeMaskMode === 'see-through') l.punchThrough = false
-          continue
-        }
+    // Per-object hole PNG (punch and/or see-through) — preferred over layer mask.
+    const loadHolePng = async (
+      png: string | undefined,
+      mode: HoleFillMode,
+      skipIfPresent: boolean
+    ): Promise<boolean> => {
+      if (!png) return false
+      if (skipIfPresent) {
+        if (mode === 'punch' && punchMaskCanvases.has(l.id)) return true
+        if (mode === 'see-through' && seeThroughMaskCanvases.has(l.id)) return true
+      }
+      const img = await loadPaintImage(png)
+      if (!img) return false
+      const c = document.createElement('canvas')
+      c.width = W
+      c.height = H
+      const x = c.getContext('2d')!
+      x.drawImage(img, 0, 0, W, H)
+      const bits = bitsFromAlpha(x.getImageData(0, 0, W, H).data, W, H)
+      if (!bits.some((v) => v)) return false
+      setLocalPunchFromFilled(l, bits, W, H, { mode, replace: true, skipOtherSubtract: true })
+      return true
+    }
+    {
+      // Legacy: single holeMaskPng — route by holeMaskMode / punchThrough.
+      // When seeThroughHoleMaskPng also exists, holeMaskPng is punch-only.
+      const primaryMode: HoleFillMode = l.seeThroughHoleMaskPng
+        ? 'punch'
+        : l.holeMaskMode === 'punch' || (l.punchThrough && l.holeMaskMode !== 'see-through')
+          ? 'punch'
+          : 'see-through'
+      const loadedPrimary = await loadHolePng(l.holeMaskPng, primaryMode, true)
+      const loadedSt = await loadHolePng(l.seeThroughHoleMaskPng, 'see-through', true)
+      if (loadedPrimary || loadedSt) {
+        syncHoleFlags(l as HoleItem)
+        continue
       }
     }
     // Stack punchMasks PNG — punch-through objects only.
-    if (l.punchThrough && !punchMaskCanvases.has(l.id)) {
+    if (l.punchThrough && !punchMaskCanvases.has(l.id) && !hasPunchCoverage(l.id)) {
       const bits = layerBits.get((l.layer ?? 'content') as PaintLayerId)
       if (!bits) continue
       if (l.type === 'text') {
@@ -618,10 +649,11 @@ async function restorePunchMasks(
         if (mapped.enclosed) {
           l.punchEnclosedHole = true
         }
-        setLocalPunchFromFilled(l, hole, W, H)
+        setLocalPunchFromFilled(l, hole, W, H, { mode: 'punch' })
       } else {
-        setLocalPunchFromFilled(l, bits, W, H)
+        setLocalPunchFromFilled(l, bits, W, H, { mode: 'punch' })
       }
+      syncHoleFlags(l as HoleItem)
       continue
     }
     // Older sessions: enclosed flag without holeMaskPng — do NOT invent every
@@ -859,8 +891,19 @@ function drawEnclosedHoleObjectFlat(
 ): void {
   const w = ctx.canvas.width
   const h = ctx.canvas.height
-  if (punchMaskCanvases.has(l.id)) rewritePunchBitsFromLocal(l, w, h)
-  const savedBits = punchMaskBits.get(l.id)
+  if (punchMaskCanvases.has(l.id) || seeThroughMaskCanvases.has(l.id)) {
+    rewritePunchBitsFromLocal(l, w, h)
+  }
+  const punchSaved = punchMaskBits.get(l.id)
+  const stSaved = seeThroughMaskBits.get(l.id)
+  const savedBits =
+    punchSaved && stSaved && punchSaved.length === stSaved.length
+      ? (() => {
+          const u = punchSaved.slice()
+          for (let i = 0; i < u.length; i++) if (stSaved[i]) u[i] = 1
+          return u
+        })()
+      : punchSaved ?? stSaved
 
   const body = takeCanvas(w, h)
   try {
@@ -916,11 +959,10 @@ function drawEnclosedHoleObjectFlat(
       autoHole[p] = 1
       autoN++
     }
-    const punch = resolveEnclosedHoleBits(savedBits, autoHole, autoN, w, h)
-    if (punch && punch.length === w * h) {
-      destOutFilledMask(bctx, punch, w, h)
-      // Keep punch-through / later redraws in sync with the hard outline holes.
-      punchMaskBits.set(l.id, punch)
+    const hole = resolveEnclosedHoleBits(savedBits, autoHole, autoN, w, h)
+    if (hole && hole.length === w * h) {
+      destOutFilledMask(bctx, hole, w, h)
+      // Keep each mode's display bits — do not collapse dual maps into punch-only.
     }
 
     if (shouldDrawObjectShadow(l)) {
@@ -2724,7 +2766,8 @@ const holeGeom: HoleGeom = {
 }
 
 function rewritePunchBitsFromLocal(item: LineObj, W: number, H: number): void {
-  rewriteDisplayBits(item as HoleItem, W, H, holeGeom)
+  rewriteDisplayBits(item as HoleItem, W, H, holeGeom, 'punch')
+  rewriteDisplayBits(item as HoleItem, W, H, holeGeom, 'see-through')
 }
 
 function setLocalPunchFromFilled(
@@ -2732,14 +2775,19 @@ function setLocalPunchFromFilled(
   filled: Uint8Array,
   W: number,
   H: number,
-  opts?: { replace?: boolean }
+  opts?: { replace?: boolean; mode?: HoleFillMode; skipOtherSubtract?: boolean }
 ): void {
   attachFromFlood(item as HoleItem, filled, W, H, holeGeom, opts)
+  syncHoleFlags(item as HoleItem)
 }
 
-/** PNG snapshot of an object's hole bits for Save / re-enter. */
+/** PNG snapshot of an object's punch hole bits for Save / re-enter. */
 function serializeHoleMaskPng(item: LineObj, W: number, H: number): string | undefined {
   return serializeHolePng(item as HoleItem, W, H, holeGeom)
+}
+
+function serializeSeeThroughMaskPng(item: LineObj, W: number, H: number): string | undefined {
+  return serializeSeeThroughHolePng(item as HoleItem, W, H, holeGeom)
 }
 
 /**
@@ -2755,18 +2803,14 @@ function clearHolesOnShapeIdentityChange(item: LineObj): void {
   if (
     !item.punchThrough &&
     !item.punchEnclosedHole &&
-    !punchMaskBits.has(item.id) &&
-    !punchMaskCanvases.has(item.id) &&
-    !item.holeMaskPng
+    !hasPunchCoverage(item.id) &&
+    !hasSeeThroughCoverage(item.id) &&
+    !item.holeMaskPng &&
+    !item.seeThroughHoleMaskPng
   ) {
     return
   }
-  punchMaskCanvases.delete(item.id)
-  punchMaskBits.delete(item.id)
-  item.punchThrough = false
-  item.punchEnclosedHole = false
-  item.holeMaskPng = undefined
-  item.holeMaskMode = undefined
+  clearObjectHoles(item as HoleItem)
 }
 
 function objectHasFillHole(l: LineObj): boolean {
@@ -2870,12 +2914,20 @@ function textPunchBitsFromSavedLayer(
   return { bits, enclosed: mask > 0 && overlap < mask * 0.35 }
 }
 
-function destOutLocalPunch(ctx: CanvasRenderingContext2D, item: LineObj): boolean {
-  const hasLocalHole = item.punchMask || item.punchThrough || punchMaskCanvases.has(item.id)
+function destOutLocalPunch(
+  ctx: CanvasRenderingContext2D,
+  item: LineObj,
+  mode: HoleFillMode = 'see-through'
+): boolean {
+  const canvasMap = mode === 'punch' ? punchMaskCanvases : seeThroughMaskCanvases
+  const hasLocalHole =
+    item.punchMask ||
+    canvasMap.has(item.id) ||
+    (mode === 'punch' && !!item.punchThrough)
   if (!hasLocalHole) return false
   const box = punchLocalBox(item)
   if (!box) return false
-  const sync = punchMaskCanvases.get(item.id)
+  const sync = canvasMap.get(item.id)
   const cached = item.punchMask && item.imageDataUrl ? stampImgCache.get(item.imageDataUrl) : null
   const src = sync ?? (cached && cached.complete && cached.naturalWidth > 0 ? cached : null)
   if (!src) return false
@@ -2944,10 +2996,10 @@ function destOutLocalPunch(ctx: CanvasRenderingContext2D, item: LineObj): boolea
 
 /** Punch-through dest-out on the stack. Enclosed counters skip the glyph ink. */
 function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: LineObj): boolean {
-  if (!item.punchEnclosedHole) return destOutLocalPunch(ctx, item)
+  if (!item.punchEnclosedHole) return destOutLocalPunch(ctx, item, 'punch')
   // Reshape: canvas-fixed bits ignore warp; local canvas + warp matches the object.
   if (lineHasReshapeWarp(item)) {
-    if (!destOutLocalPunch(ctx, item)) return false
+    if (!destOutLocalPunch(ctx, item, 'punch')) return false
     const wasPunch = item.punchThrough
     item.punchThrough = false
     renderLine(ctx, item)
@@ -2958,7 +3010,7 @@ function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: Lin
   const h = ctx.canvas.height
   if (punchMaskCanvases.has(item.id)) rewritePunchBitsFromLocal(item, w, h)
   const bits = punchMaskBits.get(item.id)
-  if (!bits || bits.length !== w * h) return destOutLocalPunch(ctx, item)
+  if (!bits || bits.length !== w * h) return destOutLocalPunch(ctx, item, 'punch')
 
   const sil = takeCanvas(w, h)
   try {
@@ -3013,34 +3065,24 @@ function destOutPunchThroughOnComposite(ctx: CanvasRenderingContext2D, item: Lin
   }
 }
 
-/** Remove punch coverage for a filled region; returns whether any punch bits remain. */
+/** Remove hole coverage for a filled region from both modes; returns whether any hole remains. */
 function subtractLocalPunchRegion(item: LineObj, region: Uint8Array, W: number, H: number): boolean {
-  const bits = punchMaskBits.get(item.id)
-  if (!bits || bits.length !== region.length) {
-    punchMaskCanvases.delete(item.id)
-    punchMaskBits.delete(item.id)
-    return false
-  }
-  let remain = 0
-  const next = new Uint8Array(bits.length)
-  for (let p = 0; p < bits.length; p++) {
-    if (!bits[p] || region[p]) continue
-    next[p] = 1
-    remain++
-  }
-  punchMaskCanvases.delete(item.id)
-  punchMaskBits.delete(item.id)
-  if (remain === 0) return false
-  setLocalPunchFromFilled(item, next, W, H)
-  return true
+  const punchLeft = subtractRegionFromMode(item as HoleItem, region, 'punch', W, H, holeGeom)
+  const stLeft = subtractRegionFromMode(item as HoleItem, region, 'see-through', W, H, holeGeom)
+  syncHoleFlags(item as HoleItem)
+  return punchLeft || stLeft || hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
 }
 
-/** See-through hole on this object (local mask or transparent fill — not stack punch). */
+/** See-through hole on this object (local mask or transparent fill — not stack punch alone). */
 function objectHasSeeThroughHole(l: LineObj): boolean {
-  if (l.punchThrough) return false
-  if (l.punchMask) return true
+  if (hasSeeThroughCoverage(l.id) || l.seeThroughHoleMaskPng) return true
+  if (l.punchMask && !l.punchThrough) return true
   if (isTransparentPaintColor(l.color ?? '')) return true
-  return punchMaskCanvases.has(l.id) || punchMaskBits.has(l.id)
+  // Legacy: see-through stored only as holeMaskMode / enclosed without punchThrough.
+  if (!l.punchThrough && (l.holeMaskMode === 'see-through' || l.punchEnclosedHole)) {
+    return punchMaskCanvases.has(l.id) || punchMaskBits.has(l.id) || !!l.holeMaskPng
+  }
+  return false
 }
 
 /**
@@ -3071,8 +3113,7 @@ function bakeObjectAppearanceToStamp(item: LineObj, W: number, H: number): LineO
       )
       const imageDataUrl = cropped.toDataURL('image/png')
       ensureStampImage(imageDataUrl)
-      punchMaskCanvases.delete(item.id)
-      punchMaskBits.delete(item.id)
+      clearObjectHoles(item as HoleItem)
       const { contentBound: _cb, linkedOutsideText: _lt, ...rest } = item
       return {
         ...rest,
@@ -3095,7 +3136,10 @@ function bakeObjectAppearanceToStamp(item: LineObj, W: number, H: number): LineO
         color: '#ffffffff',
         punchThrough: false,
         punchEnclosedHole: false,
-        punchMask: false
+        punchMask: false,
+        holeMaskPng: undefined,
+        seeThroughHoleMaskPng: undefined,
+        holeMaskMode: undefined
       }
     } finally {
       releaseCanvas(cropped)
@@ -3109,12 +3153,22 @@ function destOutObjectPunch(ctx: CanvasRenderingContext2D, l: LineObj): void {
   if (l.punchMask || !objectHasFillHole(l)) return
   // Enclosed counters are flattened + hard-cut while drawing (isolated buffer).
   if (l.punchEnclosedHole) return
+  // Always cut see-through pockets from object ink (even when punchThrough cuts below).
+  if (hasSeeThroughCoverage(l.id) || seeThroughMaskCanvases.has(l.id)) {
+    if (!destOutLocalPunch(ctx, l, 'see-through')) {
+      const bits = seeThroughMaskBits.get(l.id)
+      if (bits && !punchLocalBox(l)) {
+        destOutFilledMask(ctx, bits, ctx.canvas.width, ctx.canvas.height)
+      }
+    }
+  }
   if (l.punchThrough) return
-  if (destOutLocalPunch(ctx, l)) return
+  if (destOutLocalPunch(ctx, l, 'punch')) return
+  if (destOutLocalPunch(ctx, l, 'see-through')) return
   // Canvas-fixed bits stay at the punch origin. After a move they leave a ghost
   // of Outer fill between the object and its shadow. Local-box objects skip them.
   if (punchLocalBox(l)) return
-  const bits = punchMaskBits.get(l.id)
+  const bits = punchMaskBits.get(l.id) ?? seeThroughMaskBits.get(l.id)
   if (!bits) return
   destOutFilledMask(ctx, bits, ctx.canvas.width, ctx.canvas.height)
 }
@@ -3335,7 +3389,7 @@ function renderPunchSilhouette(
     return
   }
   if (!visible(item)) return
-  if (!item.punchThrough && !item.punchMask) return
+  if (!item.punchThrough && !item.punchMask && !hasPunchCoverage(item.id)) return
 
   const cw = ctx.canvas.width
   const ch = ctx.canvas.height
@@ -5305,11 +5359,27 @@ export function IconPaintEditor({
       } else {
         renderObjectTree(t, l, linesRef.current, vis)
       }
-      if (vis(l) && !l.punchThrough && (
-        l.punchMask ||
-        (!l.punchEnclosedHole && (punchMaskCanvases.has(l.id) || punchMaskBits.has(l.id)))
-      )) {
-        destOutLocalPunch(t, l)
+      if (vis(l)) {
+        // Always dest-out see-through masks — even when punchThrough also cuts below.
+        if (
+          hasSeeThroughCoverage(l.id) ||
+          (!l.punchThrough &&
+            l.punchMask) ||
+          (!l.punchThrough &&
+            !l.punchEnclosedHole &&
+            (seeThroughMaskCanvases.has(l.id) || seeThroughMaskBits.has(l.id)))
+        ) {
+          destOutLocalPunch(t, l, 'see-through')
+        }
+        // Free punchMask stamps / non-enclosed local see-through still on punch maps (legacy).
+        if (
+          !l.punchThrough &&
+          !hasSeeThroughCoverage(l.id) &&
+          (l.punchMask ||
+            (!l.punchEnclosedHole && (punchMaskCanvases.has(l.id) || punchMaskBits.has(l.id))))
+        ) {
+          destOutLocalPunch(t, l, 'punch')
+        }
       }
     }
 
@@ -5374,11 +5444,14 @@ export function IconPaintEditor({
       (l) =>
         vectorLayerOf(l) === id &&
         vis(l) &&
-        !l.punchThrough &&
-        (!!l.punchMask ||
-          !!l.punchEnclosedHole ||
-          punchMaskCanvases.has(l.id) ||
-          punchMaskBits.has(l.id))
+        (hasSeeThroughCoverage(l.id) ||
+          (!l.punchThrough &&
+            (!!l.punchMask ||
+              !!l.punchEnclosedHole ||
+              punchMaskCanvases.has(l.id) ||
+              punchMaskBits.has(l.id) ||
+              seeThroughMaskCanvases.has(l.id) ||
+              seeThroughMaskBits.has(l.id))))
     )
     if (isolateSeeThrough || useSlotCache) {
       const tmp = useSlotCache ? ensureCanvas(cacheSlot, W, H) : takeCanvas(W, H)
@@ -5446,8 +5519,10 @@ export function IconPaintEditor({
     const p = py * W + px
     for (const l of linesRef.current) {
       if (vectorLayerOf(l) !== id) continue
-      const bits = punchMaskBits.get(l.id)
-      if (bits && bits.length === W * H && bits[p]) return true
+      const punchBits = punchMaskBits.get(l.id)
+      if (punchBits && punchBits.length === W * H && punchBits[p]) return true
+      const stBits = seeThroughMaskBits.get(l.id)
+      if (stBits && stBits.length === W * H && stBits[p]) return true
       if (!l.punchMask || l.pts.length < 2) continue
       const a = l.pts[0], b = l.pts[1]
       const x0 = Math.min(a.x, b.x), y0 = Math.min(a.y, b.y)
@@ -5495,8 +5570,9 @@ export function IconPaintEditor({
    * Transparent Fill on a letter counter: flood only that empty pocket and bind
    * it as punch/see-through — never wipe the whole glyph or Outer under it.
    */
-  const fillEnclosedCounterAtPoint = (item: LineObj, canvasPoint: Pt, _punch: boolean): boolean => {
+  const fillEnclosedCounterAtPoint = (item: LineObj, canvasPoint: Pt, punch: boolean): boolean => {
     if (!pointInObjectEnclosedCounter(item, canvasPoint.x, canvasPoint.y)) return false
+    const mode: HoleFillMode = punch ? 'punch' : 'see-through'
     const px = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
     const py = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
     const probe = takeCanvas(W, H)
@@ -5521,8 +5597,10 @@ export function IconPaintEditor({
       // Keep the full counter flood — eroding inset leaves Outer peeking as a
       // coloured ring between the stem and the punched hole after Save.
       const holeBits = region
-      // Replace prior full-glyph silhouette so counters stay local.
-      const prevBits = punchMaskBits.get(item.id)
+      // Replace prior full-glyph silhouette for the mode being written only.
+      const bitsMap = mode === 'punch' ? punchMaskBits : seeThroughMaskBits
+      const canvasMap = mode === 'punch' ? punchMaskCanvases : seeThroughMaskCanvases
+      const prevBits = bitsMap.get(item.id)
       if (prevBits && prevBits.length === W * H) {
         let glyph = 0
         let overlap = 0
@@ -5531,11 +5609,11 @@ export function IconPaintEditor({
           if (prevBits[p] && gd[p * 4 + 3] >= 80) overlap++
         }
         if (glyph > 0 && overlap >= glyph * 0.45) {
-          punchMaskCanvases.delete(item.id)
-          punchMaskBits.delete(item.id)
+          canvasMap.delete(item.id)
+          bitsMap.delete(item.id)
         }
       }
-      setLocalPunchFromFilled(item, holeBits, W, H)
+      setLocalPunchFromFilled(item, holeBits, W, H, { mode })
       return true
     } finally {
       releaseCanvas(probe)
@@ -5665,7 +5743,9 @@ export function IconPaintEditor({
     const bct = baseCanvas('content').getContext('2d')
     if (!cc || !ct || !bcc || !bct) return null
     for (const l of linesRef.current) {
-      if (punchMaskCanvases.has(l.id)) rewritePunchBitsFromLocal(l, W, H)
+      if (punchMaskCanvases.has(l.id) || seeThroughMaskCanvases.has(l.id)) {
+        rewritePunchBitsFromLocal(l, W, H)
+      }
     }
     return {
       container: cc.getImageData(0, 0, W, H),
@@ -5735,7 +5815,8 @@ export function IconPaintEditor({
     ])
     for (const id of bitIds) {
       if (punchBitsEqual(before.punchBits?.[id], after.punchBits?.[id])) continue
-      tags.add(`object:${id}`)
+      const objectId = id.startsWith('st:') ? id.slice(3) : id
+      tags.add(`object:${objectId}`)
     }
     return [...tags]
   }
@@ -6026,15 +6107,27 @@ export function IconPaintEditor({
     setLines(restored)
     for (const id of ids) {
       const bits = snap.punchBits?.[id]
+      const stBits = snap.punchBits?.[`st:${id}`]
+      punchMaskBits.delete(id)
+      punchMaskCanvases.delete(id)
+      seeThroughMaskBits.delete(id)
+      seeThroughMaskCanvases.delete(id)
+      const line = restored.find((l) => l.id === id)
       if (bits && bits.length) {
         punchMaskBits.set(id, bits.slice())
-        punchMaskCanvases.delete(id)
-        const line = restored.find((l) => l.id === id)
-        if (line) setLocalPunchFromFilled(line, bits, W, H)
-      } else {
-        punchMaskBits.delete(id)
-        punchMaskCanvases.delete(id)
+        if (line) setLocalPunchFromFilled(line, bits, W, H, { mode: 'punch', replace: true, skipOtherSubtract: true })
       }
+      if (stBits && stBits.length) {
+        seeThroughMaskBits.set(id, stBits.slice())
+        if (line) {
+          setLocalPunchFromFilled(line, stBits, W, H, {
+            mode: 'see-through',
+            replace: true,
+            skipOtherSubtract: true
+          })
+        }
+      }
+      if (line) syncHoleFlags(line as HoleItem)
     }
     const restoredIds = new Set(restored.map((l) => l.id))
     setSelectedLayerIds((prev) => new Set([...prev].filter((id) => restoredIds.has(id))))
@@ -8643,14 +8736,25 @@ export function IconPaintEditor({
       type DecorStep = { kind: 'object'; l: LineObj }
       const paintObjectStep = (t: CanvasRenderingContext2D, l: LineObj) => {
         renderObjectTree(t, l, linesRef.current, show)
-        // See-through enclosed counters usually punch while drawing; free punchMask
-        // stamps and any leftover local masks still need an explicit dest-out.
-        if (
-          show(l) &&
-          !l.punchThrough &&
-          (l.punchMask || (!l.punchEnclosedHole && (punchMaskCanvases.has(l.id) || punchMaskBits.has(l.id))))
-        ) {
-          destOutLocalPunch(t, l)
+        // Always dest-out see-through masks — even when punchThrough also cuts below.
+        if (show(l)) {
+          if (
+            hasSeeThroughCoverage(l.id) ||
+            (!l.punchThrough && l.punchMask) ||
+            (!l.punchThrough &&
+              !l.punchEnclosedHole &&
+              (seeThroughMaskCanvases.has(l.id) || seeThroughMaskBits.has(l.id)))
+          ) {
+            destOutLocalPunch(t, l, 'see-through')
+          }
+          if (
+            !l.punchThrough &&
+            !hasSeeThroughCoverage(l.id) &&
+            (l.punchMask ||
+              (!l.punchEnclosedHole && (punchMaskCanvases.has(l.id) || punchMaskBits.has(l.id))))
+          ) {
+            destOutLocalPunch(t, l, 'punch')
+          }
         }
       }
       const allSteps = (items: LineObj[]): DecorStep[] => items.map((l) => ({ kind: 'object' as const, l }))
@@ -8888,121 +8992,100 @@ export function IconPaintEditor({
       const nearlyWhole = wallHits === 0 && opaque > 0 && flooded >= opaque * 0.98
 
       if (transparent && punch) {
-        // Already in a hole — do not merge/grow the mask.
         const clickP = Math.max(0, Math.min(W * H - 1, Math.floor(canvasPoint.y) * W + Math.floor(canvasPoint.x)))
-        const bits = punchMaskBits.get(item.id)
-        if (bits && bits.length === W * H && bits[clickP]) {
-          return { ...item, punchThrough: true, punchEnclosedHole: !!item.punchEnclosedHole }
+        const px = clickP % W
+        const py = (clickP / W) | 0
+        const punchBits = punchMaskBits.get(item.id)
+        const stBits = seeThroughMaskBits.get(item.id)
+        // Already punch under click — do not merge/grow.
+        if (punchBits && punchBits.length === W * H && punchBits[clickP]) {
+          syncHoleFlags(item as HoleItem)
+          return {
+            ...item,
+            punchThrough: hasPunchCoverage(item.id),
+            punchEnclosedHole: !!item.punchEnclosedHole
+          }
         }
-        // Punch hole: silhouette cuts layers below.
-        setLocalPunchFromFilled(item, region, W, H)
+        // Click on existing see-through hole → move that connected region to punch.
+        if (stBits && stBits.length === W * H && stBits[clickP]) {
+          const holeRegion = floodFillConnected(W, H, px, py, (byteI) => !!stBits[(byteI / 4) | 0])
+          moveConnectedRegionToMode(item as HoleItem, holeRegion, 'punch', W, H, holeGeom)
+          return {
+            ...item,
+            punchThrough: hasPunchCoverage(item.id),
+            punchEnclosedHole: !!item.punchEnclosedHole || hasSeeThroughCoverage(item.id)
+          }
+        }
+        setLocalPunchFromFilled(item, region, W, H, { mode: 'punch' })
         if (nearlyWhole) {
           return {
             ...item,
-            // Keep solid colour — transparent colour hides the whole object.
-            punchThrough: true,
+            punchThrough: hasPunchCoverage(item.id),
             punchEnclosedHole: false,
             ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {}),
             ...(item.type === 'text' || item.type === 'stamp' ? {} : { borderColor: item.borderColor })
           }
         }
-        return { ...item, punchThrough: true, punchEnclosedHole: false }
+        return {
+          ...item,
+          punchThrough: hasPunchCoverage(item.id),
+          punchEnclosedHole: false
+        }
       }
 
       if (transparent && !punch) {
-        // See-through: hide ink only — never stack-cut (punchThrough).
-        if (item.type === 'text') {
-          const clickP = Math.floor(canvasPoint.y) * W + Math.floor(canvasPoint.x)
-          const bits = punchMaskBits.get(item.id)
-          // Already a hole under the click — flip to see-through; do not grow the mask.
-          if (bits && bits.length === W * H && bits[Math.max(0, Math.min(bits.length - 1, clickP))]) {
-            return {
-              ...item,
-              punchThrough: false,
-              punchEnclosedHole: true
-            }
-          }
-          if (nearlyWhole) {
-          // Whole-glyph see-through via local silhouette — keep live colour.
-          // Skip when the object already has punch pockets (would wipe them).
-          if (punchMaskBits.has(item.id) || punchMaskCanvases.has(item.id)) {
-            setLocalPunchFromFilled(item, region, W, H)
-            return {
-              ...item,
-              punchThrough: false,
-              punchEnclosedHole: !!item.punchEnclosedHole
-            }
-          }
-          setLocalPunchFromFilled(item, region, W, H)
+        const clickP = Math.max(0, Math.min(W * H - 1, Math.floor(canvasPoint.y) * W + Math.floor(canvasPoint.x)))
+        const px = clickP % W
+        const py = (clickP / W) | 0
+        const punchBits = punchMaskBits.get(item.id)
+        const stBits = seeThroughMaskBits.get(item.id)
+        // Click on existing punch hole → move that connected region to see-through.
+        if (punchBits && punchBits.length === W * H && punchBits[clickP]) {
+          const holeRegion = floodFillConnected(W, H, px, py, (byteI) => !!punchBits[(byteI / 4) | 0])
+          moveConnectedRegionToMode(item as HoleItem, holeRegion, 'see-through', W, H, holeGeom)
           return {
             ...item,
-            punchThrough: false,
-            punchEnclosedHole: false
+            punchThrough: hasPunchCoverage(item.id),
+            punchEnclosedHole: true,
+            ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {})
           }
         }
-          setLocalPunchFromFilled(item, region, W, H)
+        // Already see-through under click — do not grow.
+        if (stBits && stBits.length === W * H && stBits[clickP]) {
+          syncHoleFlags(item as HoleItem)
           return {
             ...item,
-            punchThrough: false,
-            punchEnclosedHole: false
+            punchThrough: hasPunchCoverage(item.id),
+            punchEnclosedHole: true,
+            ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {})
           }
         }
-        {
-          const clickP = Math.floor(canvasPoint.y) * W + Math.floor(canvasPoint.x)
-          const bits = punchMaskBits.get(item.id)
-          if (bits && bits.length === W * H && bits[Math.max(0, Math.min(bits.length - 1, clickP))]) {
-            return {
-              ...item,
-              punchThrough: false,
-              punchEnclosedHole: true,
-              ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {})
-            }
-          }
-        }
-        if (nearlyWhole) {
-          if (item.type === 'stamp') {
-            setLocalPunchFromFilled(item, region, W, H)
-          } else if (punchMaskBits.has(item.id) || punchMaskCanvases.has(item.id)) {
-            // Keep existing pockets — only add this section as see-through.
-            setLocalPunchFromFilled(item, region, W, H)
-            return {
-              ...item,
-              punchThrough: false,
-              punchEnclosedHole: true,
-              ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {})
-            }
-          } else {
-            punchMaskCanvases.delete(item.id)
-            punchMaskBits.delete(item.id)
-          }
+        setLocalPunchFromFilled(item, region, W, H, { mode: 'see-through' })
+        if (nearlyWhole && item.type !== 'stamp' && !hasPunchCoverage(item.id)) {
+          // Whole-glyph see-through: keep live colour; flags from coverage.
           return {
             ...item,
-            color: item.type === 'stamp' ? item.color : fill,
             punchThrough: false,
             punchEnclosedHole: false,
-            ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {}),
-            ...(item.type === 'stamp' ? {} : { borderColor: fill })
+            ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {})
           }
         }
-        if (item.type === 'stamp') {
-          setLocalPunchFromFilled(item, region, W, H)
-          return { ...item, punchThrough: false, punchEnclosedHole: false }
-        }
-        setLocalPunchFromFilled(item, region, W, H)
         return {
           ...item,
-          punchThrough: false,
-          punchEnclosedHole: false,
+          punchThrough: hasPunchCoverage(item.id),
+          punchEnclosedHole: !!item.punchEnclosedHole || hasSeeThroughCoverage(item.id),
           ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {}),
-          borderColor: item.borderColor
+          ...(item.type === 'stamp' || item.type === 'text' ? {} : { borderColor: item.borderColor })
         }
       }
 
       let keepPunch = false
       if (!transparent) {
-        const stillPunched =
-          (item.punchThrough || punchMaskBits.has(item.id) || punchMaskCanvases.has(item.id)) &&
-          subtractLocalPunchRegion(item, region, W, H)
+        const hadHole =
+          item.punchThrough ||
+          hasPunchCoverage(item.id) ||
+          hasSeeThroughCoverage(item.id)
+        const stillPunched = hadHole && subtractLocalPunchRegion(item, region, W, H)
         keepPunch = punch || stillPunched
         // Vector text must stay vector — raster bake of white glyphs leaves AA
         // fringe lines that survive later see-through / colour clears.
@@ -9010,7 +9093,7 @@ export function IconPaintEditor({
           return {
             ...item,
             color: firstSolidColor(color),
-            punchThrough: keepPunch,
+            punchThrough: hasPunchCoverage(item.id),
             punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false
           }
         }
@@ -9023,7 +9106,7 @@ export function IconPaintEditor({
             ...item,
             color: firstSolidColor(color),
             fill: true,
-            punchThrough: keepPunch,
+            punchThrough: hasPunchCoverage(item.id),
             punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false
           }
         }
@@ -9065,10 +9148,26 @@ export function IconPaintEditor({
           punchThrough: keepPunch,
           punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false
         }
-        if (bakeXform && punchMaskCanvases.has(item.id)) {
-          const bits = punchMaskBits.get(item.id)
+        if (bakeXform && (punchMaskCanvases.has(item.id) || seeThroughMaskCanvases.has(item.id))) {
+          rewritePunchBitsFromLocal(item, W, H)
+          const punchBits = punchMaskBits.get(item.id)
+          const stBits = seeThroughMaskBits.get(item.id)
           punchMaskCanvases.delete(item.id)
-          if (bits) setLocalPunchFromFilled(converted, bits, W, H)
+          seeThroughMaskCanvases.delete(item.id)
+          if (punchBits) {
+            setLocalPunchFromFilled(converted, punchBits, W, H, {
+              mode: 'punch',
+              replace: true,
+              skipOtherSubtract: true
+            })
+          }
+          if (stBits) {
+            setLocalPunchFromFilled(converted, stBits, W, H, {
+              mode: 'see-through',
+              replace: true,
+              skipOtherSubtract: true
+            })
+          }
         }
         return converted
       } finally {
@@ -9082,23 +9181,25 @@ export function IconPaintEditor({
 
   /** Click lands inside this object's punch / see-through hole mask. */
   const objectPunchHoleAt = (item: LineObj, canvasPoint: Pt): boolean => {
-    const bits = punchMaskBits.get(item.id)
-    if (!bits || bits.length !== W * H) return false
-    const px = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
-    const py = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
-    if (bits[py * W + px]) return true
-    for (let r = 1; r <= 3; r++) {
-      for (let dy = -r; dy <= r; dy++) {
-        for (let dx = -r; dx <= r; dx++) {
-          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue
-          const nx = px + dx
-          const ny = py + dy
-          if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
-          if (bits[ny * W + nx]) return true
+    const checkBits = (bits: Uint8Array | undefined): boolean => {
+      if (!bits || bits.length !== W * H) return false
+      const px = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
+      const py = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
+      if (bits[py * W + px]) return true
+      for (let r = 1; r <= 3; r++) {
+        for (let dy = -r; dy <= r; dy++) {
+          for (let dx = -r; dx <= r; dx++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue
+            const nx = px + dx
+            const ny = py + dy
+            if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
+            if (bits[ny * W + nx]) return true
+          }
         }
       }
+      return false
     }
-    return false
+    return checkBits(punchMaskBits.get(item.id)) || checkBits(seeThroughMaskBits.get(item.id))
   }
 
   /** True when this object (or a group child) actually has fillable ink at the point. */
@@ -9220,19 +9321,38 @@ export function IconPaintEditor({
         transparent &&
         (item.type === 'stamp' || item.type === 'text' || item.type === 'shape' || item.type === 'poly')
       ) {
-        // Already punched: Punch Fill must not enlarge; See-through demotes.
+        // Already punched: Punch Fill must not enlarge; See-through moves that pocket.
         // Check before counter flood — flood would merge/grow the existing hole.
         if (punch && inPunchHole) {
-          changed = true
-          if (item.type === 'text') textFillKind = 'glyph'
-          return item
-        }
-        if (!punch && inPunchHole) {
+          const stBits = seeThroughMaskBits.get(item.id)
+          const px = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
+          const py = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
+          // Click on see-through → promote that connected region to punch.
+          if (stBits && stBits.length === W * H && stBits[py * W + px]) {
+            const holeRegion = floodFillConnected(W, H, px, py, (byteI) => !!stBits[(byteI / 4) | 0])
+            moveConnectedRegionToMode(item as HoleItem, holeRegion, 'punch', W, H, holeGeom)
+          }
           changed = true
           if (item.type === 'text') textFillKind = 'glyph'
           return {
             ...item,
-            punchThrough: false,
+            punchThrough: hasPunchCoverage(item.id),
+            punchEnclosedHole: !!item.punchEnclosedHole || hasSeeThroughCoverage(item.id)
+          }
+        }
+        if (!punch && inPunchHole) {
+          const punchBits = punchMaskBits.get(item.id)
+          const px = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
+          const py = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
+          if (punchBits && punchBits.length === W * H && punchBits[py * W + px]) {
+            const holeRegion = floodFillConnected(W, H, px, py, (byteI) => !!punchBits[(byteI / 4) | 0])
+            moveConnectedRegionToMode(item as HoleItem, holeRegion, 'see-through', W, H, holeGeom)
+          }
+          changed = true
+          if (item.type === 'text') textFillKind = 'glyph'
+          return {
+            ...item,
+            punchThrough: hasPunchCoverage(item.id),
             punchEnclosedHole: true,
             ...(item.type === 'shape' || item.type === 'poly' ? { fill: true } : {})
           }
@@ -9244,7 +9364,7 @@ export function IconPaintEditor({
           if (item.type === 'text') textFillKind = 'glyph'
           return {
             ...item,
-            punchThrough: punch,
+            punchThrough: hasPunchCoverage(item.id),
             punchEnclosedHole: true
           }
         }
@@ -9263,8 +9383,8 @@ export function IconPaintEditor({
             color: isTransparentPaintColor(sectional.color ?? '')
               ? item.color
               : sectional.color,
-            punchThrough: punch,
-            punchEnclosedHole: false
+            punchThrough: hasPunchCoverage(item.id),
+            punchEnclosedHole: !!sectional.punchEnclosedHole
           }
         }
         // Text with no sectional hit (e.g. counter) — do not whole-object punch.
@@ -9273,8 +9393,8 @@ export function IconPaintEditor({
         // click into whole-shape transparent (common on punched characters).
         if (
           objectHasFillHole(item) ||
-          punchMaskBits.has(item.id) ||
-          punchMaskCanvases.has(item.id) ||
+          hasPunchCoverage(item.id) ||
+          hasSeeThroughCoverage(item.id) ||
           !!item.punchEnclosedHole
         ) {
           return item
@@ -9285,15 +9405,23 @@ export function IconPaintEditor({
         return { ...item, ...patch }
       }
 
-      // Solid Fill into an existing punch hole: close that hole and restore/recolour ink.
+      // Solid Fill into an existing punch / see-through hole: close that hole and restore/recolour ink.
       if (inPunchHole && !transparent) {
-        const bits = punchMaskBits.get(item.id)
+        const punchBits = punchMaskBits.get(item.id)
+        const stBits = seeThroughMaskBits.get(item.id)
+        const px = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
+        const py = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
+        const p = py * W + px
+        const sourceBits =
+          punchBits && punchBits.length === W * H && punchBits[p]
+            ? punchBits
+            : stBits && stBits.length === W * H && stBits[p]
+              ? stBits
+              : punchBits ?? stBits
         // Clear the punched pocket (+ rim) before refill — leftover dilated bits
         // stay as thick punch rings around the new colour.
-        if (bits && bits.length === W * H) {
-          const px = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
-          const py = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
-          const holeRegion = floodFillConnected(W, H, px, py, (byteI) => !!bits[(byteI / 4) | 0])
+        if (sourceBits && sourceBits.length === W * H) {
+          const holeRegion = floodFillConnected(W, H, px, py, (byteI) => !!sourceBits[(byteI / 4) | 0])
           const rim = dilateBitMask(holeRegion, W, H, 2)
           subtractLocalPunchRegion(item, rim, W, H)
         }
@@ -9302,25 +9430,21 @@ export function IconPaintEditor({
           if (sectionalAtClick.imageDataUrl) imageUrls.push(sectionalAtClick.imageDataUrl)
           changed = true
           if (item.type === 'text') textFillKind = 'glyph'
-          const still =
-            punchMaskBits.has(item.id) ||
-            punchMaskCanvases.has(item.id)
+          const still = hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
           return {
             ...sectionalAtClick,
-            punchThrough: still ? sectionalAtClick.punchThrough : false,
+            punchThrough: still ? hasPunchCoverage(item.id) : false,
             punchEnclosedHole: still ? sectionalAtClick.punchEnclosedHole : false
           }
         }
-        if (bits && bits.length === W * H) {
-          const still =
-            punchMaskBits.has(item.id) ||
-            punchMaskCanvases.has(item.id)
+        if (sourceBits && sourceBits.length === W * H) {
+          const still = hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
           changed = true
           if (item.type === 'text') textFillKind = 'glyph'
           return {
             ...item,
             color: firstSolidColor(fillColor),
-            punchThrough: still,
+            punchThrough: hasPunchCoverage(item.id),
             punchEnclosedHole: still ? item.punchEnclosedHole : false,
             ...(item.type === 'shape' || item.type === 'poly' ? { fill: true } : {})
           }
@@ -9335,31 +9459,31 @@ export function IconPaintEditor({
         if (!filled) return item
         if (filled.imageDataUrl) imageUrls.push(filled.imageDataUrl)
         changed = true
-        return { ...filled, punchThrough: punch || !!filled.punchThrough }
+        return { ...filled, punchThrough: hasPunchCoverage(item.id) }
       }
       if (item.type === 'text') {
         const sectional = fillObjectRespectingCuts(item, canvasPoint)
         if (sectional) {
           if (sectional.imageDataUrl) imageUrls.push(sectional.imageDataUrl)
           changed = true
-          return { ...sectional, punchThrough: punch || !!sectional.punchThrough }
+          return { ...sectional, punchThrough: hasPunchCoverage(item.id) }
         }
         if (hit !== 'fill') return item
         textFillKind = 'glyph'
         changed = true
-        return { ...item, color: fillColor, punchThrough: punch || !!item.punchThrough }
+        return { ...item, color: fillColor, punchThrough: hasPunchCoverage(item.id) }
       }
       if (item.type === 'shape' || item.type === 'poly') {
         const filled = fillObjectRespectingCuts(item, canvasPoint)
         if (filled) {
           if (filled.imageDataUrl) imageUrls.push(filled.imageDataUrl)
           changed = true
-          return { ...filled, punchThrough: punch || !!filled.punchThrough }
+          return { ...filled, punchThrough: hasPunchCoverage(item.id) }
         }
         changed = true
-        return { ...item, color: fillColor, fill: true, punchThrough: punch }
+        return { ...item, color: fillColor, fill: true, punchThrough: hasPunchCoverage(item.id) }
       }
-      return { ...item, color: fillColor, borderColor: fillColor, punchThrough: punch }
+      return { ...item, color: fillColor, borderColor: fillColor, punchThrough: hasPunchCoverage(item.id) }
     })
 
     if (!changed) return false
@@ -9415,9 +9539,11 @@ export function IconPaintEditor({
     }
     let changed = false
     const next = linesRef.current.map((l) => {
-      if (!l.punchThrough && !l.punchEnclosedHole) return l
-      const bits = punchMaskBits.get(l.id)
-      let hit = holeAt(bits, px, py)
+      if (!l.punchThrough && !l.punchEnclosedHole && !hasPunchCoverage(l.id) && !hasSeeThroughCoverage(l.id)) {
+        return l
+      }
+      const punchBits = punchMaskBits.get(l.id)
+      let hit = holeAt(punchBits, px, py)
       // Free punch-mask stamps are entirely hole operators.
       if (!hit && l.punchMask && l.pts.length >= 2) {
         const a = l.pts[0], b = l.pts[1]
@@ -9427,22 +9553,27 @@ export function IconPaintEditor({
       }
       if (!hit) return l
       changed = true
-      // Ensure a local hole mask exists so see-through stays visible after demote
-      // (punchThrough path may have relied on silhouette-only stack cutting).
-      // Never invent a full-glyph silhouette for enclosed counters — that draws
-      // a horizontal wipe / white fringe through the letter.
-      if (
+      if (punchBits && punchBits.length === W * H) {
+        const holeRegion = floodFillConnected(W, H, px, py, (byteI) => !!punchBits[(byteI / 4) | 0])
+        if (holeRegion.some((v) => v)) {
+          moveConnectedRegionToMode(l as HoleItem, holeRegion, 'see-through', W, H, holeGeom)
+        }
+      } else if (
         !l.punchMask &&
         !l.punchEnclosedHole &&
-        !punchMaskBits.has(l.id) &&
-        !punchMaskCanvases.has(l.id)
+        !hasPunchCoverage(l.id) &&
+        !hasSeeThroughCoverage(l.id)
       ) {
         ensureObjectPunchSilhouette(l)
+        const bits = punchMaskBits.get(l.id)
+        if (bits) {
+          moveConnectedRegionToMode(l as HoleItem, bits, 'see-through', W, H, holeGeom)
+        }
       }
       return {
         ...l,
-        punchThrough: false,
-        punchEnclosedHole: l.punchEnclosedHole || punchMaskBits.has(l.id),
+        punchThrough: hasPunchCoverage(l.id),
+        punchEnclosedHole: true,
         ...(l.type === 'shape' || l.type === 'poly' ? { fill: true as const } : {})
       }
     })
@@ -9509,15 +9640,18 @@ export function IconPaintEditor({
         filled[p] = 1
         n++
       }
-      if (n > 0) setLocalPunchFromFilled(item, filled, W, H)
+      if (n > 0) {
+        const mode: HoleFillMode =
+          transparentFillModeRef.current === 'punch' || item.punchThrough ? 'punch' : 'see-through'
+        setLocalPunchFromFilled(item, filled, W, H, { mode })
+      }
     } finally {
       releaseCanvas(probe)
     }
   }
 
   const clearObjectPunchMasks = (item: LineObj) => {
-    punchMaskCanvases.delete(item.id)
-    punchMaskBits.delete(item.id)
+    clearObjectHoles(item as HoleItem)
   }
 
   /**
@@ -9581,8 +9715,8 @@ export function IconPaintEditor({
     const objColor = pixelColor(target.color || color)
     const hasHole =
       !!target.punchThrough ||
-      punchMaskBits.has(target.id) ||
-      punchMaskCanvases.has(target.id) ||
+      hasPunchCoverage(target.id) ||
+      hasSeeThroughCoverage(target.id) ||
       isTransparentPaintColor(objColor)
     if (!isTransparentPaintColor(color) && !hasHole) return
     const nextColor = isTransparentPaintColor(color) ? pixelColor(color) : withZeroAlpha(objColor)
@@ -9621,7 +9755,16 @@ export function IconPaintEditor({
         continue
       }
 
-      const bits = punchMaskBits.get(l.id)
+      const punchBits = punchMaskBits.get(l.id)
+      const stBits = seeThroughMaskBits.get(l.id)
+      const bits =
+        punchBits && stBits && punchBits.length === stBits.length
+          ? (() => {
+              const u = punchBits.slice()
+              for (let i = 0; i < u.length; i++) if (stBits[i]) u[i] = 1
+              return u
+            })()
+          : punchBits ?? stBits
       let overlap = 0
       let stampN = 0
       if (bits && bits.length === filled.length) {
@@ -9648,8 +9791,8 @@ export function IconPaintEditor({
       const isHoleOp =
         !!l.punchMask ||
         !!l.punchThrough ||
-        punchMaskCanvases.has(l.id) ||
-        punchMaskBits.has(l.id)
+        hasPunchCoverage(l.id) ||
+        hasSeeThroughCoverage(l.id)
 
       if (!isHoleOp || !overlapsFill) {
         next.push(l)
@@ -9657,11 +9800,19 @@ export function IconPaintEditor({
       }
 
       changed = true
-      punchMaskCanvases.delete(l.id)
-      punchMaskBits.delete(l.id)
+      // Subtract overlapping region from both modes when possible; else clear all.
+      if (opts?.clearAllOnLayer || !bits) {
+        clearObjectHoles(l as HoleItem)
+      } else {
+        subtractLocalPunchRegion(l, filled, W, H)
+      }
       // Dedicated punch-mask stamps go away entirely.
       if (l.punchMask) continue
-      next.push({ ...l, punchThrough: false, punchEnclosedHole: false })
+      next.push({
+        ...l,
+        punchThrough: hasPunchCoverage(l.id),
+        punchEnclosedHole: hasPunchCoverage(l.id) || hasSeeThroughCoverage(l.id) ? l.punchEnclosedHole : false
+      })
     }
     if (!changed) return
     linesRef.current = next
@@ -9674,14 +9825,13 @@ export function IconPaintEditor({
     let any = false
     for (const l of linesRef.current) {
       if (vectorLayerOf(l) !== layerId) continue
-      const bits = punchMaskBits.get(l.id)
-      if (bits && bits.length === W * H) {
+      for (const bits of [punchMaskBits.get(l.id), seeThroughMaskBits.get(l.id)]) {
+        if (!bits || bits.length !== W * H) continue
         for (let p = 0; p < bits.length; p++) {
           if (!bits[p]) continue
           cover[p] = 1
           any = true
         }
-        continue
       }
       if (!l.punchMask || l.pts.length < 2) continue
       const a = l.pts[0], b = l.pts[1]
@@ -9788,7 +9938,10 @@ export function IconPaintEditor({
     // Enclosed counter fill must not keep a prior whole-glyph silhouette
     // (transparent Punch on the whole letter) — that makes every hole look like
     // a full see-through wipe after Save.
-    const prevBits = punchMaskBits.get(owner.id)
+    const mode: HoleFillMode = punchThrough ? 'punch' : 'see-through'
+    const bitsMap = mode === 'punch' ? punchMaskBits : seeThroughMaskBits
+    const canvasMap = mode === 'punch' ? punchMaskCanvases : seeThroughMaskCanvases
+    const prevBits = bitsMap.get(owner.id)
     if (prevBits && prevBits.length === W * H) {
       const probe = takeCanvas(W, H)
       try {
@@ -9808,19 +9961,22 @@ export function IconPaintEditor({
         }
         const looksLikeFullGlyph = glyph > 0 && overlap >= glyph * 0.45
         if (looksLikeFullGlyph) {
-          punchMaskCanvases.delete(owner.id)
-          punchMaskBits.delete(owner.id)
+          canvasMap.delete(owner.id)
+          bitsMap.delete(owner.id)
         }
       } finally {
         releaseCanvas(probe)
       }
     }
 
-    setLocalPunchFromFilled(owner, holeBits, W, H)
+    setLocalPunchFromFilled(owner, holeBits, W, H, { mode })
     const next = linesRef.current.map((l) =>
       l.id === owner!.id
-        // Honour toolbar mode: See-through must clear a prior punchThrough.
-        ? { ...l, punchThrough, punchEnclosedHole: true }
+        ? {
+            ...l,
+            punchThrough: hasPunchCoverage(owner!.id),
+            punchEnclosedHole: true
+          }
         : l
     )
     linesRef.current = next
@@ -10100,9 +10256,13 @@ export function IconPaintEditor({
       for (const l of linesRef.current) {
         if (l.parentId || l.marqueeItem) continue
         if (vectorLayerOf(l) !== layerId) continue
-        if (!l.punchThrough && !punchMaskBits.has(l.id) && !punchMaskCanvases.has(l.id)) continue
+        if (!l.punchThrough && !hasPunchCoverage(l.id) && !hasSeeThroughCoverage(l.id)) continue
         if (l.punchMask) continue
-        punchObjectFromComposite(sampleCtx, l, linesRef.current, isVectorVisible)
+        if (l.punchThrough || hasPunchCoverage(l.id)) {
+          punchObjectFromComposite(sampleCtx, l, linesRef.current, isVectorVisible)
+        } else {
+          destOutLocalPunch(sampleCtx, l, 'see-through')
+        }
       }
     }
     const under = sampleCtx.getImageData(0, 0, W, H).data
@@ -10127,9 +10287,13 @@ export function IconPaintEditor({
     for (const l of linesRef.current) {
       if (l.parentId || l.marqueeItem) continue
       if (layerId && vectorLayerOf(l) !== layerId) continue
-      if (!l.punchThrough && !punchMaskBits.has(l.id) && !punchMaskCanvases.has(l.id)) continue
+      if (!l.punchThrough && !hasPunchCoverage(l.id) && !hasSeeThroughCoverage(l.id)) continue
       if (l.punchMask) continue
-      punchObjectFromComposite(wallCtx, l, linesRef.current, isVectorVisible)
+      if (l.punchThrough || hasPunchCoverage(l.id)) {
+        punchObjectFromComposite(wallCtx, l, linesRef.current, isVectorVisible)
+      } else {
+        destOutLocalPunch(wallCtx, l, 'see-through')
+      }
     }
     const wall = wallCtx.getImageData(0, 0, W, H).data
     const holeCoverEarly = layerId ? punchCoverageOnLayer(layerId) : null
@@ -12997,6 +13161,13 @@ export function IconPaintEditor({
     }
     // Bake see-through holes into stamp pixels and detach modified live-Inner
     // proxies so Save/re-open cannot restore the original unpunched colour.
+    // Rewrite local canvases → display bits before bake / punchMasks export.
+    for (const l of linesRef.current) {
+      if (punchMaskCanvases.has(l.id) || seeThroughMaskCanvases.has(l.id)) {
+        rewritePunchBitsFromLocal(l, W, H)
+      }
+      syncHoleFlags(l as HoleItem)
+    }
     let preparedHadSeeThrough = false
     const preparedLines = linesRef.current.map((item): LineObj => {
       if (item.punchMask || item.type === 'group' || item.marqueeItem) return item
@@ -13005,16 +13176,19 @@ export function IconPaintEditor({
         !!item.contentBound &&
         (seeThrough ||
           !!item.punchThrough ||
+          hasPunchCoverage(item.id) ||
           !!item.paintStrokes?.length ||
           reshapeIsApplied(item.reshapeQuad, item.reshapeSrc) ||
           isTransparentPaintColor(item.color ?? ''))
       if (seeThrough) {
         preparedHadSeeThrough = true
         // Keep linkedOutsideText so outside letter edits can re-apply holes.
+        // Mixed punch+see-through: still bake appearance so ST holes survive,
+        // while punchMasks (exported later) keep Outer cuts from punch bits.
         if (item.linkedOutsideText) return item
         return bakeObjectAppearanceToStamp(item, W, H)
       }
-      if (modifiedProxy && item.punchThrough) {
+      if (modifiedProxy && item.punchThrough && !seeThrough) {
         // Detach contentBound proxy only — never drop linkedOutsideText.
         const { contentBound: _c, ...rest } = item
         return { ...rest, contentBound: undefined }
@@ -13067,40 +13241,65 @@ export function IconPaintEditor({
     const persistVectors = stripContentProxyVectors(vectors).map((v) => {
       const line = linesRef.current.find((l) => l.id === v.id)
       if (!line) return v
-      if (!line.punchThrough && !line.punchEnclosedHole && !punchMaskBits.has(line.id)) {
+      const hasPunch = hasPunchCoverage(line.id)
+      const hasSt = hasSeeThroughCoverage(line.id)
+      if (!hasPunch && !hasSt && !line.punchEnclosedHole && !line.punchThrough) {
         return v
       }
-      const png = serializeHoleMaskPng(line, W, H)
-      if (!png) return v
+      if (punchMaskCanvases.has(line.id) || seeThroughMaskCanvases.has(line.id)) {
+        rewritePunchBitsFromLocal(line, W, H)
+      }
+      const holeMaskPng = hasPunch ? serializeHoleMaskPng(line, W, H) : undefined
+      const seeThroughHoleMaskPng = hasSt ? serializeSeeThroughMaskPng(line, W, H) : undefined
+      syncHoleFlags(line as HoleItem)
       return {
         ...v,
-        holeMaskPng: png,
-        holeMaskMode: line.punchThrough ? ('punch' as const) : ('see-through' as const),
+        holeMaskPng,
+        seeThroughHoleMaskPng,
+        holeMaskMode: hasPunch ? ('punch' as const) : hasSt ? ('see-through' as const) : undefined,
         // Persist the real counter flag — do not invent enclosed for every see-through.
         punchEnclosedHole: !!line.punchEnclosedHole,
-        punchThrough: !!line.punchThrough
+        punchThrough: hasPunch
       }
     })
     const linked = vectors.filter((v) => v.type === 'text' && v.linkedOutsideText).pop()
     // See-through on Inner must be baked with the live base into decorations
     // (and live Inner skipped) — exporting them as punchMasks would cut Outer too.
+    // Detect ST even when punchThrough is also true (dual masks).
     const hasContentSeeThrough =
       preparedHadSeeThrough ||
       vectors.some((v) => {
         if ((v.layer ?? 'content') !== 'content') return false
-        if (v.punchThrough) return false
         if ((v.visible ?? v.editable ?? true) === false) return false
-        if (v.punchEnclosedHole) return true
+        if (v.seeThroughHoleMaskPng) return true
         if (v.holeMaskMode === 'see-through') return true
+        if (hasSeeThroughCoverage(v.id)) return true
+        if (v.punchThrough) return false
+        if (v.punchEnclosedHole) return true
         if (v.punchMask) return true
         return isTransparentPaintColor(v.color ?? '')
       })
+    // Punch enclosed counters on content: bake into decorations (paint space) so
+    // Inner holes align, while punchMasks still cut Outer from punch bits.
+    const hasContentPunchEnclosed = vectors.some((v) => {
+      if ((v.layer ?? 'content') !== 'content') return false
+      if ((v.visible ?? v.editable ?? true) === false) return false
+      if (!v.punchThrough && !hasPunchCoverage(v.id)) return false
+      return (
+        !!v.punchEnclosedHole ||
+        v.type === 'text' ||
+        v.type === 'shape' ||
+        v.type === 'poly' ||
+        v.type === 'stamp'
+      )
+    })
     // See-through must bake Inner (skip live) so Outer shows through holes without
     // destination-out cutting Outer. Punch-through keeps live letters + punchMasks
-    // so outside text changes can regenerate matching holes (TE→BO).
+    // so outside text changes can regenerate matching holes (TE→BO) — unless
+    // enclosed counters need bake for alignment, or dual ST is present.
     const bakeLinkedText = !!(
       linked &&
-      (Math.abs(linked.rot ?? 0) > 0.001 || hasContentSeeThrough)
+      (Math.abs(linked.rot ?? 0) > 0.001 || hasContentSeeThrough || hasContentPunchEnclosed)
     )
     const hasLiveInnerStandIn = vectors.some(
       (v) => !!v.contentBound || (v.type === 'text' && !!v.linkedOutsideText)
@@ -13119,18 +13318,20 @@ export function IconPaintEditor({
     // Warped Inner proxy is baked into decorations. Also skip live Inner when
     // the user removed the letters/lucide stand-in and left a library stamp —
     // otherwise the live glyph/stroke peeks around the stamp on the small logo.
-    // Punch-only linked letters stay live so outside edits re-punch cleanly.
+    // Punch-only linked letters stay live so outside edits re-punch cleanly,
+    // except enclosed counters / dual ST which need bake for alignment.
     const bakeContentProxy =
       vectors.some((v) => v.contentBound && reshapeIsApplied(v.reshapeQuad, v.reshapeSrc)) ||
       (!hasLiveInnerStandIn && hasReplacementContent) ||
-      hasContentSeeThrough
+      hasContentSeeThrough ||
+      (hasContentPunchEnclosed && !linked)
     const containerDecor = decorationsCanvas('container')
     const contentDecor = decorationsCanvas(
       'content',
       bakeLinkedText,
       bakeContentProxy,
       // Include live Inner base under see-through holes so Outer shows through.
-      hasContentSeeThrough
+      hasContentSeeThrough || (hasContentPunchEnclosed && bakeContentProxy)
     )
     // Overlays only — live Outer/Inner settings stay outside Paint.
     await onSave(
@@ -13159,8 +13360,11 @@ export function IconPaintEditor({
           if (id === 'content') {
             for (const l of linesRef.current) {
               if (l.type !== 'text' || vectorLayerOf(l) !== 'content') continue
-              if (!l.punchThrough && !l.punchEnclosedHole) continue
+              if (!hasPunchCoverage(l.id) && !l.punchThrough) continue
               if ((l.visible ?? l.editable ?? true) === false) continue
+              if (punchMaskCanvases.has(l.id) || seeThroughMaskCanvases.has(l.id)) {
+                rewritePunchBitsFromLocal(l, W, H)
+              }
               const existing = punchMaskBits.get(l.id)
               if (existing && existing.some((v) => v)) continue
               const probe = takeCanvas(W, H)
@@ -13176,7 +13380,7 @@ export function IconPaintEditor({
                   // Never invent every counter — partial holes need holeMaskPng /
                   // in-memory bits. Auto-detect would re-punch all B/O bowls.
                   continue
-                } else if (l.punchThrough) {
+                } else if (l.punchThrough || hasPunchCoverage(l.id)) {
                   punchMaskBits.set(l.id, ink)
                 }
               } finally {
@@ -13196,8 +13400,8 @@ export function IconPaintEditor({
               }
               return
             }
-            // Punch hole: cut through layers below (export for outside Paint).
-            if (item.punchThrough) {
+            // Punch hole only — never export see-through-only as punchMasks.
+            if (item.punchThrough || hasPunchCoverage(item.id)) {
               renderPunchSilhouette(x, item, exportLines, (v) => (v.visible ?? v.editable ?? true) !== false)
               return
             }
