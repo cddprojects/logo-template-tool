@@ -484,6 +484,13 @@ export interface PaintVector {
   punchEnclosedHole?: boolean
   /** Invisible flood-fill mask used only for punch-through compositing. */
   punchMask?: boolean
+  /**
+   * Serialized local / stack hole silhouette (PNG) so see-through and punch
+   * holes survive Save → re-enter Paint without depending on in-memory maps.
+   */
+  holeMaskPng?: string
+  /** How holeMaskPng is applied: stack punch vs local see-through. */
+  holeMaskMode?: 'punch' | 'see-through'
 }
 
 /** Outside (logo/favicon) letters settings passed into Paint for sync. */

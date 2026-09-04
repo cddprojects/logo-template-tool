@@ -1452,10 +1452,15 @@ export function buildPaintContentSync(opts: {
 
   if (linked) {
     const fs = linked.fontSize ?? Math.round(res * 0.52)
-    const ink = textInkCenter(linked)
-    if (ink) {
-      sync.offsetX = paintPxToDesign(ink.cx - res / 2, res)
-      sync.offsetY = paintPxToDesign(ink.cy - res / 2, res)
+    // Only push Inner offset when the user moved/rotated/scaled letters in Paint.
+    // Always rewriting offset from ink center drifts on every Save and fights
+    // outside text edits (growing misalignment / punch artifacts).
+    if (paintVectorHasDisplayTransform(linked)) {
+      const ink = textInkCenter(linked)
+      if (ink) {
+        sync.offsetX = paintPxToDesign(ink.cx - res / 2, res)
+        sync.offsetY = paintPxToDesign(ink.cy - res / 2, res)
+      }
     }
     sync.letters = {
       text: linked.text ?? '',

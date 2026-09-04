@@ -202,32 +202,44 @@ function rebuildLinkedLetterPaintEffects(
       nextLinked.some((v) => !v.punchThrough && linkedTextHasHoleIntent(v)))
   const hasPunch = nextLinked.some((v) => !!v.punchThrough)
 
-  // ── Content punchMasks: keep non-letter holes, replace letter contribution ──
+  // ── Content punchMasks: rebuild from current punch-through vectors only.
+  // Never patch the previous PNG — leftover TE holes accumulate into white
+  // columns when letters change.
   const punchCanvas = document.createElement('canvas')
   punchCanvas.width = res
   punchCanvas.height = res
   const punchCtx = punchCanvas.getContext('2d')!
-  const existingContentPunch = session.punchMasks?.find((m) => m.layer === 'content')?.png
-  const existingImg = loadDataUrlImageSync(existingContentPunch)
-  if (existingImg) punchCtx.drawImage(existingImg, 0, 0)
 
-  // Clear previous linked-letter punch contribution.
-  for (const v of prevLinked) {
-    if (!linkedTextHasHoleIntent(v) || !v.punchThrough) continue
-    const { punch } = linkedLetterEffectBits(v, res, res)
-    if (punch) destOutBits(punchCtx, punch, res, res)
-  }
-  // Also clear a dilated glyph footprint so leftover TE holes do not linger.
-  for (const v of prevLinked) {
-    if (!v.linkedOutsideText) continue
-    const ink = linkedLetterInkBits(v, res, res)
-    destOutBits(punchCtx, ink, res, res)
-  }
-
-  for (const v of nextLinked) {
-    if (!v.punchThrough) continue
-    const { punch } = linkedLetterEffectBits(v, res, res)
-    if (punch) stampBitsOntoPunchCanvas(punchCtx, punch, res, res)
+  for (const v of nextVectors) {
+    if ((v.layer ?? 'content') !== 'content') continue
+    if ((v.visible ?? v.editable ?? true) === false) continue
+    if (!v.punchThrough && v.holeMaskMode !== 'punch') continue
+    if (v.holeMaskPng && (v.punchThrough || v.holeMaskMode === 'punch')) {
+      const img = loadDataUrlImageSync(v.holeMaskPng)
+      if (img) {
+        punchCtx.drawImage(img, 0, 0)
+        continue
+      }
+    }
+    if (v.type === 'text' && (v.linkedOutsideText || v.punchEnclosedHole || v.punchThrough)) {
+      const { punch } = linkedLetterEffectBits(v, res, res)
+      if (punch) stampBitsOntoPunchCanvas(punchCtx, punch, res, res)
+      continue
+    }
+    // Free punchMask stamps keep their silhouette image.
+    if (v.punchMask && v.type === 'stamp' && v.imageDataUrl && v.pts.length >= 2) {
+      const img = loadDataUrlImageSync(v.imageDataUrl)
+      if (!img) continue
+      const a = v.pts[0]
+      const b = v.pts[1]
+      punchCtx.drawImage(
+        img,
+        Math.min(a.x, b.x),
+        Math.min(a.y, b.y),
+        Math.max(1, Math.abs(b.x - a.x)),
+        Math.max(1, Math.abs(b.y - a.y))
+      )
+    }
   }
 
   const punchData = punchCtx.getImageData(0, 0, res, res).data
@@ -249,19 +261,13 @@ function rebuildLinkedLetterPaintEffects(
     decor.width = res
     decor.height = res
     const dctx = decor.getContext('2d')!
-    const overlay =
-      loadDataUrlImageSync(session.contentPng) ||
-      loadDataUrlImageSync(session.contentDecorationsPng)
+    const overlay = loadDataUrlImageSync(session.contentPng)
     if (overlay) dctx.drawImage(overlay, 0, 0)
-    // Remove old baked linked glyphs before redrawing.
-    for (const v of prevLinked) {
-      if (!v.linkedOutsideText) continue
-      destOutBits(dctx, linkedLetterInkBits(v, res, res), res, res)
-    }
     for (const v of nextLinked) {
       const fillColor = isTransparentPaintColor(v.color ?? '')
         ? letters.textColor || '#ffffff'
         : v.color || letters.textColor || '#ffffff'
+      // Draw solid glyphs then cut local see-through holes (not stack punch).
       renderPaintTextVector(dctx, {
         ...v,
         color: fillColor,
@@ -269,7 +275,21 @@ function rebuildLinkedLetterPaintEffects(
         punchThrough: false,
         punchMask: false
       })
-      const { seeThrough } = linkedLetterEffectBits(v, res, res)
+      if (v.holeMaskPng && v.holeMaskMode === 'see-through') {
+        const img = loadDataUrlImageSync(v.holeMaskPng)
+        if (img) {
+          dctx.save()
+          dctx.globalCompositeOperation = 'destination-out'
+          dctx.drawImage(img, 0, 0)
+          dctx.restore()
+          continue
+        }
+      }
+      const { seeThrough } = linkedLetterEffectBits(
+        { ...v, punchThrough: false, punchEnclosedHole: true },
+        res,
+        res
+      )
       if (seeThrough) destOutBits(dctx, seeThrough, res, res)
     }
     return {
@@ -283,8 +303,7 @@ function rebuildLinkedLetterPaintEffects(
     }
   }
 
-  // Punch-only (or clearing see-through): live letters + regenerated masks.
-  // Drop baked content decorations so they cannot double with live TE/BO.
+  // Punch-only: live letters + regenerated masks (no baked content decorations).
   return {
     ...session,
     vectors: nextVectors,
@@ -336,7 +355,8 @@ export function syncOutsideLettersIntoPaintSession(
       bold: w >= 700,
       italic: !!letters.fontItalic,
       letterSpacing,
-      // Preserve punch / see-through intent — rebuild applies it to new glyphs.
+      // Glyph-shaped hole PNGs are stale after text/font changes — rebuild below.
+      holeMaskPng: undefined,
       ...(anchor ? { pts: [{ x: anchor.x, y: anchor.y }] } : {}),
       ...shadow
     }
