@@ -737,7 +737,30 @@ function ensureStampImage(dataUrl: string, onReady?: () => void): HTMLImageEleme
   stampImgCache.set(dataUrl, img)
   if (onReady) img.onload = () => onReady()
   img.src = dataUrl
+  // Canvas/data-URL stamps often decode synchronously — return them so Save
+  // decorations do not rasterize an empty Inner on the first export.
+  if (img.complete && img.naturalWidth > 0) return img
   return null
+}
+
+/** Wait until a stamp data URL is drawable (needed before Save decorations). */
+async function ensureStampImageDecoded(dataUrl: string): Promise<HTMLImageElement | null> {
+  const ready = ensureStampImage(dataUrl)
+  if (ready) return ready
+  const cached = stampImgCache.get(dataUrl)
+  if (!cached) return null
+  try {
+    if (typeof cached.decode === 'function') await cached.decode()
+    else {
+      await new Promise<void>((resolve, reject) => {
+        cached.addEventListener('load', () => resolve(), { once: true })
+        cached.addEventListener('error', () => reject(new Error('stamp decode')), { once: true })
+      })
+    }
+  } catch {
+    return null
+  }
+  return cached.complete && cached.naturalWidth > 0 ? cached : null
 }
 
 /** Live Inner letters / contentBound proxy — fillable material, not session walls. */
@@ -3078,8 +3101,8 @@ function objectHasSeeThroughHole(l: LineObj): boolean {
   if (hasSeeThroughCoverage(l.id) || l.seeThroughHoleMaskPng) return true
   if (l.punchMask && !l.punchThrough) return true
   if (isTransparentPaintColor(l.color ?? '')) return true
-  // Legacy: see-through stored only as holeMaskMode / enclosed without punchThrough.
-  if (!l.punchThrough && (l.holeMaskMode === 'see-through' || l.punchEnclosedHole)) {
+  // Legacy: see-through stored only as holeMaskMode without punchThrough.
+  if (!l.punchThrough && l.holeMaskMode === 'see-through') {
     return punchMaskCanvases.has(l.id) || punchMaskBits.has(l.id) || !!l.holeMaskPng
   }
   return false
@@ -3102,6 +3125,17 @@ function bakeObjectAppearanceToStamp(item: LineObj, W: number, H: number): LineO
       item.punchThrough = wasPunch
     }
     const bounds = alphaBoundsFromCanvas(canvas) ?? boundsFromLineFallback(item)
+    if (!bounds) {
+      clearObjectHoles(item as HoleItem)
+      return {
+        ...item,
+        punchThrough: false,
+        punchEnclosedHole: false,
+        holeMaskPng: undefined,
+        seeThroughHoleMaskPng: undefined,
+        holeMaskMode: undefined
+      }
+    }
     const cw = Math.max(1, Math.round(bounds.w))
     const ch = Math.max(1, Math.round(bounds.h))
     const cropped = takeCanvas(cw, ch)
@@ -3147,6 +3181,149 @@ function bakeObjectAppearanceToStamp(item: LineObj, W: number, H: number): LineO
   } finally {
     releaseCanvas(canvas)
   }
+}
+
+/**
+ * Paint solid colour into a cleared punch/see-through region and bake remaining
+ * holes into stamp pixels — used when Fill cannot flood ink at an empty hole.
+ */
+function refillHoleRegionToStamp(
+  item: LineObj,
+  holeRegion: Uint8Array,
+  fillColor: string,
+  W: number,
+  H: number
+): LineObj {
+  const canvas = takeCanvas(W, H)
+  try {
+    const ctx = canvas.getContext('2d')!
+    const wasPunch = item.punchThrough
+    item.punchThrough = false
+    try {
+      // Remaining holes still cut; cleared pocket is empty until we paint it.
+      renderLine(ctx, { ...item, punchThrough: false, shadow: !!item.shadow })
+    } finally {
+      item.punchThrough = wasPunch
+    }
+    const img = ctx.getImageData(0, 0, W, H)
+    const d = img.data
+    const fill = pixelColor(fillColor)
+    const fr = parseInt(fill.slice(1, 3), 16)
+    const fg = parseInt(fill.slice(3, 5), 16)
+    const fb = parseInt(fill.slice(5, 7), 16)
+    const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
+    for (let p = 0; p < holeRegion.length; p++) {
+      if (!holeRegion[p]) continue
+      const i = p * 4
+      d[i] = fr
+      d[i + 1] = fg
+      d[i + 2] = fb
+      d[i + 3] = fa
+    }
+    ctx.putImageData(img, 0, 0)
+    const bounds = alphaBoundsFromCanvas(canvas) ?? boundsFromLineFallback(item)
+    if (!bounds) {
+      seeThroughMaskCanvases.delete(item.id)
+      seeThroughMaskBits.delete(item.id)
+      syncHoleFlags(item as HoleItem)
+      return { ...item, color: firstSolidColor(fillColor), punchThrough: hasPunchCoverage(item.id) }
+    }
+    const cw = Math.max(1, Math.round(bounds.w))
+    const ch = Math.max(1, Math.round(bounds.h))
+    const cropped = takeCanvas(cw, ch)
+    try {
+      cropped.getContext('2d')!.drawImage(
+        canvas,
+        bounds.x,
+        bounds.y,
+        bounds.w,
+        bounds.h,
+        0,
+        0,
+        cw,
+        ch
+      )
+      const imageDataUrl = cropped.toDataURL('image/png')
+      ensureStampImage(imageDataUrl)
+      // See-through is baked into stamp pixels. Keep remaining punch maps so
+      // Save can still cut Outer; clearing them left Outer solid under holes.
+      seeThroughMaskCanvases.delete(item.id)
+      seeThroughMaskBits.delete(item.id)
+      item.seeThroughHoleMaskPng = undefined
+      syncHoleFlags(item as HoleItem)
+      const { contentBound: _cb, linkedOutsideText: _lt, ...rest } = item
+      return {
+        ...rest,
+        type: 'stamp',
+        pts: [
+          { x: bounds.x, y: bounds.y },
+          { x: bounds.x + bounds.w, y: bounds.y + bounds.h }
+        ],
+        rot: 0,
+        scaleX: 1,
+        scaleY: 1,
+        imageDataUrl,
+        stampSource: item.stampSource ?? 'image',
+        paintStrokes: undefined,
+        sourceSvgMarkup: undefined,
+        sourceStampSize: undefined,
+        keepStrokeOnResize: undefined,
+        contentBound: undefined,
+        linkedOutsideText: undefined,
+        color: '#ffffffff',
+        punchThrough: hasPunchCoverage(item.id),
+        punchEnclosedHole: hasPunchCoverage(item.id),
+        punchMask: false,
+        holeMaskPng: undefined,
+        seeThroughHoleMaskPng: undefined,
+        holeMaskMode: hasPunchCoverage(item.id) ? ('punch' as const) : undefined
+      }
+    } finally {
+      releaseCanvas(cropped)
+    }
+  } finally {
+    releaseCanvas(canvas)
+  }
+}
+
+/** Recolor / set opacity on stamp ink pixels; leave hole (near-zero alpha) pixels alone. */
+function applyStampColorKeepHoles(item: LineObj, nextColor: string): Partial<LineObj> {
+  if (item.type !== 'stamp' || !item.imageDataUrl || item.pts.length < 2) {
+    return { color: nextColor }
+  }
+  const a = item.pts[0]
+  const b = item.pts[1]
+  const w = Math.max(1, Math.round(Math.abs(b.x - a.x)))
+  const h = Math.max(1, Math.round(Math.abs(b.y - a.y)))
+  const src = ensureStampImage(item.imageDataUrl)
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')!
+  if (src) {
+    ctx.drawImage(src, 0, 0, w, h)
+  } else {
+    // Decode pending — fall back to vector-style colour only.
+    return { color: nextColor }
+  }
+  const img = ctx.getImageData(0, 0, w, h)
+  const d = img.data
+  const fill = pixelColor(nextColor)
+  const fr = parseInt(fill.slice(1, 3), 16)
+  const fg = parseInt(fill.slice(3, 5), 16)
+  const fb = parseInt(fill.slice(5, 7), 16)
+  const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] <= 8) continue
+    d[i] = fr
+    d[i + 1] = fg
+    d[i + 2] = fb
+    d[i + 3] = fa
+  }
+  ctx.putImageData(img, 0, 0)
+  const imageDataUrl = canvas.toDataURL('image/png')
+  ensureStampImage(imageDataUrl)
+  return { imageDataUrl, color: '#ffffffff' }
 }
 
 function destOutObjectPunch(ctx: CanvasRenderingContext2D, l: LineObj): void {
@@ -9406,24 +9583,42 @@ export function IconPaintEditor({
       }
 
       // Solid Fill into an existing punch / see-through hole: close that hole and restore/recolour ink.
+      // Never fall through to Outer flood — that recolors background under the hole.
       if (inPunchHole && !transparent) {
         const punchBits = punchMaskBits.get(item.id)
         const stBits = seeThroughMaskBits.get(item.id)
-        const px = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
-        const py = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
-        const p = py * W + px
+        const seed = findFillSeed(W, H, canvasPoint.x, canvasPoint.y, (x, y) => {
+          const p = y * W + x
+          return !!(punchBits?.[p] || stBits?.[p])
+        })
+        const sx = seed?.x ?? Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
+        const sy = seed?.y ?? Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
+        const sp = sy * W + sx
         const sourceBits =
-          punchBits && punchBits.length === W * H && punchBits[p]
+          punchBits && punchBits.length === W * H && punchBits[sp]
             ? punchBits
-            : stBits && stBits.length === W * H && stBits[p]
+            : stBits && stBits.length === W * H && stBits[sp]
               ? stBits
               : punchBits ?? stBits
-        // Clear the punched pocket (+ rim) before refill — leftover dilated bits
-        // stay as thick punch rings around the new colour.
+        let holeRegion: Uint8Array | null = null
         if (sourceBits && sourceBits.length === W * H) {
-          const holeRegion = floodFillConnected(W, H, px, py, (byteI) => !!sourceBits[(byteI / 4) | 0])
+          holeRegion = floodFillConnected(W, H, sx, sy, (byteI) => !!sourceBits[(byteI / 4) | 0])
+          if (!holeRegion.some((v) => v)) holeRegion = null
+        }
+        if (holeRegion) {
+          // Clear the punched pocket (+ rim) before refill — leftover dilated bits
+          // stay as thick punch rings around the new colour.
           const rim = dilateBitMask(holeRegion, W, H, 2)
           subtractLocalPunchRegion(item, rim, W, H)
+        }
+        // Prefer painting into the cleared pocket — fillObjectRespectingCuts needs
+        // ink at the click, but hole clicks sit on empty pixels.
+        if (holeRegion) {
+          const refilled = refillHoleRegionToStamp(item, holeRegion, fillColor, W, H)
+          if (refilled.imageDataUrl) imageUrls.push(refilled.imageDataUrl)
+          changed = true
+          if (item.type === 'text') textFillKind = 'glyph'
+          return refilled
         }
         const sectionalAtClick = fillObjectRespectingCuts(item, canvasPoint)
         if (sectionalAtClick) {
@@ -9437,17 +9632,15 @@ export function IconPaintEditor({
             punchEnclosedHole: still ? sectionalAtClick.punchEnclosedHole : false
           }
         }
-        if (sourceBits && sourceBits.length === W * H) {
-          const still = hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
-          changed = true
-          if (item.type === 'text') textFillKind = 'glyph'
-          return {
-            ...item,
-            color: firstSolidColor(fillColor),
-            punchThrough: hasPunchCoverage(item.id),
-            punchEnclosedHole: still ? item.punchEnclosedHole : false,
-            ...(item.type === 'shape' || item.type === 'poly' ? { fill: true } : {})
-          }
+        changed = true
+        if (item.type === 'text') textFillKind = 'glyph'
+        const still = hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
+        return {
+          ...item,
+          color: firstSolidColor(fillColor),
+          punchThrough: hasPunchCoverage(item.id),
+          punchEnclosedHole: still ? item.punchEnclosedHole : false,
+          ...(item.type === 'shape' || item.type === 'poly' ? { fill: true } : {})
         }
       }
 
@@ -9655,6 +9848,28 @@ export function IconPaintEditor({
   }
 
   /**
+   * Apply colour / opacity to a selected object while keeping punch & see-through
+   * pockets empty. Transparent (0%) still uses transparentObjectPatch (hole mode).
+   */
+  const applySelectedObjectColor = (item: LineObj, nextColor: string): Partial<LineObj> => {
+    if (isTransparentPaintColor(nextColor)) {
+      return transparentObjectPatch(item, nextColor)
+    }
+    if (item.type === 'stamp' && item.imageDataUrl) {
+      return applyStampColorKeepHoles(item, nextColor)
+    }
+    return {
+      color: nextColor,
+      ...(item.type === 'poly' || item.type === 'shape' ? {} : { borderColor: nextColor }),
+      punchThrough: hasPunchCoverage(item.id),
+      punchEnclosedHole:
+        hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
+          ? item.punchEnclosedHole
+          : false
+    }
+  }
+
+  /**
    * Patch for select-object colour / Fill-on-object when alpha is 0.
    * See-through: transparent colour (vectors) or local silhouette hole (stamps).
    * Punch: transparent + punchThrough + silhouette for every object type.
@@ -9666,14 +9881,8 @@ export function IconPaintEditor({
     const transparent = isTransparentPaintColor(nextColor)
     const punch = transparent && transparentFillModeRef.current === 'punch'
     if (!transparent) {
-      clearObjectPunchMasks(item)
-      return {
-        color: nextColor,
-        ...(item.type === 'poly' || item.type === 'shape'
-          ? {}
-          : { borderColor: nextColor }),
-        punchThrough: false
-      }
+      // Non-transparent: keep existing hole masks (opacity / recolour).
+      return applySelectedObjectColor(item, nextColor)
     }
     // Stamps are rasters — transparent colour alone does not hide them. Always
     // build a silhouette hole; See-through keeps it local, Punch cuts below.
@@ -13194,12 +13403,18 @@ export function IconPaintEditor({
         return { ...rest, contentBound: undefined }
       }
       if (modifiedProxy) {
-        preparedHadSeeThrough = true
+        // Proxy bake is not see-through — do not force skip-live Inner.
         return bakeObjectAppearanceToStamp(item, W, H)
       }
       return item
     })
     linesRef.current = preparedLines
+    // Decode baked stamps before decorationsCanvas (first Save must not be empty).
+    for (const l of preparedLines) {
+      if (l.type === 'stamp' && l.imageDataUrl) {
+        await ensureStampImageDecoded(l.imageDataUrl)
+      }
+    }
     const vectors = normalizeLinkedTextVectors(
       cloneLines(preparedLines) as unknown as PaintVector[],
       selectedIdRef.current
@@ -13274,9 +13489,9 @@ export function IconPaintEditor({
         if (v.seeThroughHoleMaskPng) return true
         if (v.holeMaskMode === 'see-through') return true
         if (hasSeeThroughCoverage(v.id)) return true
-        if (v.punchThrough) return false
-        if (v.punchEnclosedHole) return true
-        if (v.punchMask) return true
+        // punchEnclosedHole alone is punch/counter — not see-through.
+        if (v.punchThrough || hasPunchCoverage(v.id)) return false
+        if (v.punchMask && !v.punchThrough) return true
         return isTransparentPaintColor(v.color ?? '')
       })
     // Punch enclosed counters on content: bake into decorations (paint space) so
@@ -13326,13 +13541,33 @@ export function IconPaintEditor({
       hasContentSeeThrough ||
       (hasContentPunchEnclosed && !linked)
     const containerDecor = decorationsCanvas('container')
-    const contentDecor = decorationsCanvas(
+    let contentBake = bakeContentProxy
+    let linkedBake = bakeLinkedText
+    let contentDecor = decorationsCanvas(
       'content',
-      bakeLinkedText,
-      bakeContentProxy,
+      linkedBake,
+      contentBake,
       // Include live Inner base under see-through holes so Outer shows through.
-      hasContentSeeThrough || (hasContentPunchEnclosed && bakeContentProxy)
+      hasContentSeeThrough || (hasContentPunchEnclosed && contentBake)
     )
+    // Never ship skip-live Inner with an empty decorations plane (async stamp miss).
+    if (contentBake) {
+      const d = contentDecor.getContext('2d')?.getImageData(0, 0, W, H).data
+      let any = false
+      if (d) {
+        for (let i = 3; i < d.length; i += 16) {
+          if (d[i] > 8) {
+            any = true
+            break
+          }
+        }
+      }
+      if (!any) {
+        contentBake = false
+        linkedBake = false
+        contentDecor = decorationsCanvas('content', false, false, false)
+      }
+    }
     // Overlays only — live Outer/Inner settings stay outside Paint.
     await onSave(
       {
@@ -13345,12 +13580,12 @@ export function IconPaintEditor({
         resolution: W,
         hasContainer: !!(hasContainer || containerUsable),
         layerOrder: [...layerOrderRef.current],
-        decorationsPng: decorationsCanvas(undefined, bakeLinkedText, bakeContentProxy).toDataURL('image/png'),
+        decorationsPng: decorationsCanvas(undefined, linkedBake, contentBake).toDataURL('image/png'),
         containerDecorationsPng: containerDecor.toDataURL('image/png'),
         contentDecorationsPng: contentDecor.toDataURL('image/png'),
         contentSync,
-        linkedTextInDecorations: bakeLinkedText,
-        contentBakedInDecorations: bakeContentProxy,
+        linkedTextInDecorations: linkedBake,
+        contentBakedInDecorations: contentBake,
         paintShapeSize: Math.round(paintOuterSize ?? innerDraw),
         paintContentDrawSize: Math.round(innerDraw),
         paintContentSizeRatio: outsideContent?.sizeRatio,
@@ -14376,7 +14611,7 @@ export function IconPaintEditor({
                 if (n) {
                   setColor(n)
                   if (selectedIdRef.current) {
-                    updateSelectedLive((l) => transparentObjectPatch(l, n))
+                    updateSelectedLive((l) => applySelectedObjectColor(l, n))
                   }
                 }
               }}
@@ -14393,7 +14628,7 @@ export function IconPaintEditor({
                 setColor(c)
                 if (!isGradientColor(c)) setHexText(c)
                 if (selectedIdRef.current) {
-                  updateSelectedLive((l) => transparentObjectPatch(l, c))
+                  updateSelectedLive((l) => applySelectedObjectColor(l, c))
                 }
               }}
               onClose={() => {
@@ -14415,7 +14650,7 @@ export function IconPaintEditor({
                 setColor(c)
                 setHexText(c)
                 if (selectedIdRef.current) {
-                  updateSelectedLive((l) => transparentObjectPatch(l, c))
+                  updateSelectedLive((l) => applySelectedObjectColor(l, c))
                 }
               }}
               onMouseUp={() => { if (selectedIdRef.current) pushHistory() }}
