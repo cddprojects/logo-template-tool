@@ -221,7 +221,9 @@ function rebuildLinkedLetterPaintEffects(
         continue
       }
     }
-    if (v.type === 'text' && (v.linkedOutsideText || v.punchEnclosedHole || v.punchThrough)) {
+    // Never invent every letter counter when a partial enclosed hole lost its PNG.
+    if (v.punchEnclosedHole) continue
+    if (v.type === 'text' && (v.linkedOutsideText || v.punchThrough)) {
       const { punch } = linkedLetterEffectBits(v, res, res)
       if (punch) stampBitsOntoPunchCanvas(punchCtx, punch, res, res)
       continue
@@ -275,22 +277,18 @@ function rebuildLinkedLetterPaintEffects(
         punchThrough: false,
         punchMask: false
       })
-      if (v.holeMaskPng && v.holeMaskMode === 'see-through') {
+      if (v.holeMaskPng && (v.holeMaskMode === 'see-through' || !v.punchThrough)) {
         const img = loadDataUrlImageSync(v.holeMaskPng)
         if (img) {
           dctx.save()
           dctx.globalCompositeOperation = 'destination-out'
           dctx.drawImage(img, 0, 0)
           dctx.restore()
-          continue
         }
+        // Prefer persisted mask only — never invent every counter as a fallback.
+        continue
       }
-      const { seeThrough } = linkedLetterEffectBits(
-        { ...v, punchThrough: false, punchEnclosedHole: true },
-        res,
-        res
-      )
-      if (seeThrough) destOutBits(dctx, seeThrough, res, res)
+      // No holeMaskPng: leave solid glyphs (user re-applies see-through in Paint).
     }
     return {
       ...session,
@@ -344,6 +342,11 @@ export function syncOutsideLettersIntoPaintSession(
       ? v.pts?.[0]
       : outsideTextAnchorPt(letters, res, drawArea)
     const keepTransparent = isTransparentPaintColor(v.color ?? '')
+    const textChanged =
+      (v.text ?? '') !== (letters.text ?? '') ||
+      (v.fontFamily || '') !== (letters.fontFamily || '') ||
+      Math.abs((v.fontSize ?? 0) - fontSize) > 0.5 ||
+      Math.abs((v.letterSpacing ?? 0) - letterSpacing) > 0.5
     return {
       ...v,
       text: letters.text ?? '',
@@ -355,8 +358,16 @@ export function syncOutsideLettersIntoPaintSession(
       bold: w >= 700,
       italic: !!letters.fontItalic,
       letterSpacing,
-      // Glyph-shaped hole PNGs are stale after text/font changes — rebuild below.
-      holeMaskPng: undefined,
+      // Glyph-shaped holes cannot follow a different string without inventing
+      // every B/O counter — clear them so live letters stay clean.
+      ...(textChanged
+        ? {
+            punchThrough: false,
+            punchEnclosedHole: false,
+            holeMaskPng: undefined,
+            holeMaskMode: undefined
+          }
+        : {}),
       ...(anchor ? { pts: [{ x: anchor.x, y: anchor.y }] } : {}),
       ...shadow
     }
@@ -367,6 +378,30 @@ export function syncOutsideLettersIntoPaintSession(
     !!session.contentBakedInDecorations ||
     !!session.punchMasks?.some((m) => m.layer === 'content') ||
     vectors.some(linkedTextHasHoleIntent)
+
+  const textOrFontChanged = prevLinked.some((prev) => {
+    const next = vectors.find((v) => v.id === prev.id)
+    if (!next) return true
+    return (
+      (prev.text ?? '') !== (next.text ?? '') ||
+      (prev.fontFamily || '') !== (next.fontFamily || '') ||
+      Math.abs((prev.fontSize ?? 0) - (next.fontSize ?? 0)) > 0.5
+    )
+  })
+
+  // Text/font change: drop content punches / baked holes (stale TE shapes).
+  if (textOrFontChanged && hadHoleIntent) {
+    return {
+      ...session,
+      vectors,
+      linkedTextInDecorations: false,
+      contentBakedInDecorations: false,
+      contentDecorationsPng: undefined,
+      decorationsPng: undefined,
+      contentPng: session.contentPng,
+      punchMasks: session.punchMasks?.filter((m) => m.layer !== 'content')
+    }
+  }
 
   if (!hadHoleIntent) {
     // No holes — drop legacy baked-text decorations so live colour/font update.
