@@ -10,8 +10,8 @@
  *    first, or use the local canvas path.
  * 4. Enclosed counters: prefer the user's saved hole bits over auto-detecting
  *    every counter (partial punch / see-through must survive redraw).
- * 5. Text / font changes: rebuild enclosed counters in the same punch vs
- *    see-through mode (clearing alone makes Outer show in bowls = fake see-through).
+ * 5. Text / font / shape-kind changes drop holes (do not invent new counters).
+ *    Move / rotate / uniform scale keep holes via syncHolesAfterGeomChange.
  * 6. Session `punchMasks` are export cache for stack punch only. Content
  *    see-through bakes into decorations; never put Inner see-through there.
  */
@@ -128,47 +128,32 @@ export function clearAllHoles(): void {
 }
 
 /**
- * After text/font changes: drop stale masks, then rebuild enclosed counters in
- * the same punch vs see-through mode. Clearing alone leaves Outer visible in
- * letter bowls (looks like see-through).
- *
- * `inkBits` = hard glyph silhouette (alpha≥threshold → 1), same size as W×H.
+ * After text content / font changes, drop hole masks. Do not invent new counters
+ * for the new string (that turned a single punched bowl into every B/O hole).
  */
+export function clearHolesOnTextEdit(item: HoleItem): void {
+  if (item.type !== 'text') return
+  if (
+    !item.punchThrough &&
+    !item.punchEnclosedHole &&
+    !punchMaskBits.has(item.id) &&
+    !punchMaskCanvases.has(item.id) &&
+    !item.holeMaskPng
+  ) {
+    return
+  }
+  clearObjectHoles(item)
+}
+
+/** @deprecated Use clearHolesOnTextEdit — holes are dropped, not rebuilt. */
 export function refreshHolesAfterTextChange(
   item: HoleItem,
-  inkBits: Uint8Array,
-  W: number,
-  H: number,
-  geom: HoleGeom
+  _inkBits: Uint8Array,
+  _W: number,
+  _H: number,
+  _geom: HoleGeom
 ): void {
-  if (item.type !== 'text') return
-  const wasPunch = !!item.punchThrough || item.holeMaskMode === 'punch'
-  const hadAny =
-    wasPunch ||
-    !!item.punchEnclosedHole ||
-    item.holeMaskMode === 'see-through' ||
-    punchMaskCanvases.has(item.id) ||
-    punchMaskBits.has(item.id) ||
-    !!item.holeMaskPng
-  if (!hadAny) return
-
-  clearObjectHoles(item)
-
-  if (inkBits.length !== W * H) return
-  const outside = floodOutsideEmptyBits(inkBits, W, H)
-  const hole = new Uint8Array(W * H)
-  let n = 0
-  for (let p = 0; p < hole.length; p++) {
-    if (inkBits[p] || outside[p]) continue
-    hole[p] = 1
-    n++
-  }
-  // No counters (e.g. "T" / "L") — leave solid, flags cleared.
-  if (n < 8) return
-  attachFromFlood(item, hole, W, H, geom, { replace: true })
-  item.punchEnclosedHole = true
-  item.punchThrough = wasPunch
-  item.holeMaskMode = wasPunch ? 'punch' : 'see-through'
+  clearHolesOnTextEdit(item)
 }
 
 /** Empty pixels reachable from the canvas border (not enclosed holes). */
@@ -241,20 +226,6 @@ export function pruneTinyHoleComponents(bits: Uint8Array, w: number, h: number, 
     }
   }
   return out
-}
-
-/** @deprecated Prefer refreshHolesAfterTextChange so punch mode is preserved. */
-export function clearHolesOnTextEdit(item: HoleItem): void {
-  if (item.type !== 'text') return
-  if (
-    !item.punchThrough &&
-    !item.punchEnclosedHole &&
-    !punchMaskBits.has(item.id) &&
-    !punchMaskCanvases.has(item.id)
-  ) {
-    return
-  }
-  clearObjectHoles(item)
 }
 
 /**

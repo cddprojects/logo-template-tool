@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react'
-import { Sparkles, Loader } from 'lucide-react'
+import { Sparkles, Loader, Info } from 'lucide-react'
 import { generateAIImage, removeImageBackground } from '../utils/iconUtils'
 import {
   AI_VISUAL_STYLES,
@@ -181,6 +181,19 @@ export function TransparentFillToggle({
           Punch hole
         </button>
       </div>
+      <span className="relative group/punchinfo inline-flex items-center shrink-0">
+        <Info
+          size={13}
+          className="text-muted/80 group-hover/punchinfo:text-text cursor-help"
+          aria-label="Punch hole notes"
+        />
+        <span
+          role="tooltip"
+          className="pointer-events-none absolute left-1/2 bottom-full z-50 mb-1.5 w-56 -translate-x-1/2 rounded-md border border-border bg-surface px-2.5 py-2 text-[10px] leading-snug text-text opacity-0 shadow-lg transition-opacity group-hover/punchinfo:opacity-100"
+        >
+          Punch holes are cleared if you change the text or shape. Moving, rotating, or scaling the same object keeps them.
+        </span>
+      </span>
     </div>
   )
 }

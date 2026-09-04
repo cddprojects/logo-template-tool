@@ -546,8 +546,8 @@ export async function applyPaintPunchMask(
 }
 
 /**
- * Draw a punch PNG with hard alpha (no dilate). Dilating over-cut edges and left
- * black fringe / refill gaps; soft AA is hardened to binary instead.
+ * Draw a punch PNG with hard alpha. Do not dilate — Paint counters are flush;
+ * growing the mask outside Paint misaligned letter bowls and shape holes.
  */
 async function drawScaledPunchPng(
   ctx: CanvasRenderingContext2D,
@@ -585,30 +585,6 @@ async function drawScaledPunchPng(
         d[i + 2] = 0
         d[i + 3] = 0
       }
-    }
-    // 1px hard dilate — matches Paint export so white AA columns of the original
-    // fill colour do not survive scaled punch outside Paint.
-    const grow = new Uint8Array(sw * sh)
-    for (let y = 0; y < sh; y++) {
-      for (let x = 0; x < sw; x++) {
-        if (d[(y * sw + x) * 4 + 3] < 128) continue
-        for (let dy = -1; dy <= 1; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const nx = x + dx
-            const ny = y + dy
-            if (nx < 0 || ny < 0 || nx >= sw || ny >= sh) continue
-            grow[ny * sw + nx] = 1
-          }
-        }
-      }
-    }
-    for (let p = 0; p < grow.length; p++) {
-      if (!grow[p]) continue
-      const i = p * 4
-      d[i] = 0
-      d[i + 1] = 0
-      d[i + 2] = 0
-      d[i + 3] = 255
     }
     sctx.putImageData(image, 0, 0)
     ctx.imageSmoothingEnabled = false
