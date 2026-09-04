@@ -377,7 +377,8 @@ function renderPaintTextUnwarped(
   renderPaintText(ctx, v, decor, sessionRes)
 }
 
-function renderPaintTextVector(
+/** Draw a paint text vector (used by outside letter sync to rebuild holes). */
+export function renderPaintTextVector(
   ctx: CanvasRenderingContext2D,
   v: PaintVector,
   decor?: InnerContentDecor,

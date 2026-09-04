@@ -12862,11 +12862,14 @@ export function IconPaintEditor({
           isTransparentPaintColor(item.color ?? ''))
       if (seeThrough) {
         preparedHadSeeThrough = true
+        // Keep linkedOutsideText so outside letter edits can re-apply holes.
+        if (item.linkedOutsideText) return item
         return bakeObjectAppearanceToStamp(item, W, H)
       }
       if (modifiedProxy && item.punchThrough) {
-        const { contentBound: _c, linkedOutsideText: _l, ...rest } = item
-        return { ...rest, contentBound: undefined, linkedOutsideText: undefined }
+        // Detach contentBound proxy only — never drop linkedOutsideText.
+        const { contentBound: _c, ...rest } = item
+        return { ...rest, contentBound: undefined }
       }
       if (modifiedProxy) {
         preparedHadSeeThrough = true
@@ -12915,12 +12918,6 @@ export function IconPaintEditor({
     // so outside live Inner settings never double with a leftover raster stamp.
     const persistVectors = stripContentProxyVectors(vectors)
     const linked = vectors.filter((v) => v.type === 'text' && v.linkedOutsideText).pop()
-    const hasContentPunch = vectors.some(
-      (v) =>
-        (v.layer ?? 'content') === 'content' &&
-        (v.visible ?? v.editable ?? true) !== false &&
-        !!v.punchThrough
-    )
     // See-through on Inner must be baked with the live base into decorations
     // (and live Inner skipped) — exporting them as punchMasks would cut Outer too.
     const hasContentSeeThrough =
@@ -12932,13 +12929,12 @@ export function IconPaintEditor({
         if (v.punchMask) return true
         return isTransparentPaintColor(v.color ?? '')
       })
-    // Any Inner hole edit (punch or see-through) must bake live letters/icons into
-    // decorations and skip live Inner outside — otherwise the original glyphs
-    // still draw underneath and show as “artifacts” (especially after TE→BO etc.).
-    const hasContentHoleEdits = hasContentPunch || hasContentSeeThrough
+    // See-through must bake Inner (skip live) so Outer shows through holes without
+    // destination-out cutting Outer. Punch-through keeps live letters + punchMasks
+    // so outside text changes can regenerate matching holes (TE→BO).
     const bakeLinkedText = !!(
       linked &&
-      (Math.abs(linked.rot ?? 0) > 0.001 || hasContentHoleEdits)
+      (Math.abs(linked.rot ?? 0) > 0.001 || hasContentSeeThrough)
     )
     const hasLiveInnerStandIn = vectors.some(
       (v) => !!v.contentBound || (v.type === 'text' && !!v.linkedOutsideText)
@@ -12957,18 +12953,18 @@ export function IconPaintEditor({
     // Warped Inner proxy is baked into decorations. Also skip live Inner when
     // the user removed the letters/lucide stand-in and left a library stamp —
     // otherwise the live glyph/stroke peeks around the stamp on the small logo.
+    // Punch-only linked letters stay live so outside edits re-punch cleanly.
     const bakeContentProxy =
       vectors.some((v) => v.contentBound && reshapeIsApplied(v.reshapeQuad, v.reshapeSrc)) ||
       (!hasLiveInnerStandIn && hasReplacementContent) ||
-      hasContentHoleEdits
+      hasContentSeeThrough
     const containerDecor = decorationsCanvas('container')
     const contentDecor = decorationsCanvas(
       'content',
       bakeLinkedText,
       bakeContentProxy,
-      // Include live Inner base under holes so see-through reveals Outer, and so
-      // punched letters are fully rasterized (no live TE/BO peeking through).
-      hasContentHoleEdits
+      // Include live Inner base under see-through holes so Outer shows through.
+      hasContentSeeThrough
     )
     // Overlays only — live Outer/Inner settings stay outside Paint.
     await onSave(
@@ -12992,30 +12988,67 @@ export function IconPaintEditor({
         paintContentDrawSize: Math.round(innerDraw),
         paintContentSizeRatio: outsideContent?.sizeRatio,
         punchMasks: (['container', 'content'] as PaintLayerId[]).flatMap((id) => {
+          // Ensure text punch silhouettes exist (enclosed counters / full glyph)
+          // before export — missing in-memory bits would save an empty mask.
+          if (id === 'content') {
+            for (const l of linesRef.current) {
+              if (l.type !== 'text' || vectorLayerOf(l) !== 'content') continue
+              if (!l.punchThrough && !l.punchEnclosedHole) continue
+              if ((l.visible ?? l.editable ?? true) === false) continue
+              const existing = punchMaskBits.get(l.id)
+              if (existing && existing.some((v) => v)) continue
+              const probe = takeCanvas(W, H)
+              try {
+                const pctx = probe.getContext('2d')!
+                renderText(pctx, { ...l, color: '#000000', shadow: false, punchThrough: false })
+                const data = pctx.getImageData(0, 0, W, H).data
+                const ink = new Uint8Array(W * H)
+                for (let p = 0; p < ink.length; p++) {
+                  if (data[p * 4 + 3] >= 24) ink[p] = 1
+                }
+                if (l.punchEnclosedHole) {
+                  const outside = floodOutsideEmpty(ink, W, H)
+                  const hole = new Uint8Array(W * H)
+                  let n = 0
+                  for (let p = 0; p < hole.length; p++) {
+                    if (ink[p] || outside[p]) continue
+                    hole[p] = 1
+                    n++
+                  }
+                  if (n > 0) punchMaskBits.set(l.id, hole)
+                } else if (l.punchThrough) {
+                  punchMaskBits.set(l.id, ink)
+                }
+              } finally {
+                releaseCanvas(probe)
+              }
+            }
+          }
           const c = document.createElement('canvas')
           c.width = W
           c.height = H
           const x = c.getContext('2d')!
+          const exportLines = linesRef.current
           const exportPunch = (item: LineObj) => {
             if (item.type === 'group') {
-              for (const child of vectors) {
+              for (const child of exportLines) {
                 if (child.parentId === item.id) exportPunch(child)
               }
               return
             }
             // Punch hole: cut through layers below (export for outside Paint).
             if (item.punchThrough) {
-              renderPunchSilhouette(x, item, vectors, (v) => (v.visible ?? v.editable ?? true) !== false)
+              renderPunchSilhouette(x, item, exportLines, (v) => (v.visible ?? v.editable ?? true) !== false)
               return
             }
             // See-through on Outer only: applied before Inner, so Inner still shows.
             // See-through on Inner must NOT become a destination-out mask outside —
             // that punches Outer through to the page (looks like Punch hole).
             if (id === 'container' && item.punchMask) {
-              renderPunchSilhouette(x, item, vectors, (v) => (v.visible ?? v.editable ?? true) !== false)
+              renderPunchSilhouette(x, item, exportLines, (v) => (v.visible ?? v.editable ?? true) !== false)
             }
           }
-          for (const l of vectors) {
+          for (const l of exportLines) {
             if (l.parentId || vectorLayerOf(l) !== id) continue
             exportPunch(l)
           }

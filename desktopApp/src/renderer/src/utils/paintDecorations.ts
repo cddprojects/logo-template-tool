@@ -6,11 +6,368 @@ import {
   contentVectorsForLiveRender,
   linkedTextHasPaintTransform,
   renderPaintContentVectors,
+  renderPaintTextVector,
   type InnerContentDecor
 } from './paintVectorRender'
 import { takeCanvas, releaseCanvas } from './canvasPool'
 
 export type { InnerContentDecor }
+
+function isTransparentPaintColor(color: string): boolean {
+  if (!color || color === 'transparent' || color === 'none') return true
+  if (color.startsWith('linear-gradient') || color.startsWith('radial-gradient')) return false
+  if (/^#[0-9a-fA-F]{8}$/.test(color) && color.slice(7, 9).toLowerCase() === '00') return true
+  return false
+}
+
+/** Decode a data-URL image synchronously when the engine already has it ready. */
+function loadDataUrlImageSync(src: string | undefined): HTMLImageElement | null {
+  if (!src) return null
+  const img = new Image()
+  img.src = src
+  if (img.complete && img.naturalWidth > 0) return img
+  return null
+}
+
+function floodOutsideEmpty(ink: Uint8Array, w: number, h: number): Uint8Array {
+  const outside = new Uint8Array(w * h)
+  const stack: number[] = []
+  const tryPush = (x: number, y: number) => {
+    if (x < 0 || y < 0 || x >= w || y >= h) return
+    const p = y * w + x
+    if (outside[p] || ink[p]) return
+    outside[p] = 1
+    stack.push(p)
+  }
+  for (let x = 0; x < w; x++) {
+    tryPush(x, 0)
+    tryPush(x, h - 1)
+  }
+  for (let y = 0; y < h; y++) {
+    tryPush(0, y)
+    tryPush(w - 1, y)
+  }
+  while (stack.length) {
+    const p = stack.pop()!
+    const x = p % w
+    const y = (p / w) | 0
+    tryPush(x - 1, y)
+    tryPush(x + 1, y)
+    tryPush(x, y - 1)
+    tryPush(x, y + 1)
+  }
+  return outside
+}
+
+function linkedLetterInkBits(v: PaintVector, w: number, h: number): Uint8Array {
+  const c = takeCanvas(w, h)
+  try {
+    const ctx = c.getContext('2d')!
+    renderPaintTextVector(ctx, {
+      ...v,
+      color: '#000000',
+      shadow: false,
+      punchThrough: false,
+      punchMask: false
+    })
+    const data = ctx.getImageData(0, 0, w, h).data
+    const ink = new Uint8Array(w * h)
+    for (let p = 0; p < ink.length; p++) {
+      if (data[p * 4 + 3] >= 24) ink[p] = 1
+    }
+    return ink
+  } finally {
+    releaseCanvas(c)
+  }
+}
+
+function enclosedCounterBits(ink: Uint8Array, w: number, h: number): Uint8Array {
+  const outside = floodOutsideEmpty(ink, w, h)
+  const hole = new Uint8Array(w * h)
+  for (let p = 0; p < hole.length; p++) {
+    if (ink[p] || outside[p]) continue
+    hole[p] = 1
+  }
+  return hole
+}
+
+/** Hole bits for punchMasks (cuts Outer) vs see-through (local only). */
+function linkedLetterEffectBits(
+  v: PaintVector,
+  w: number,
+  h: number
+): { punch: Uint8Array | null; seeThrough: Uint8Array | null } {
+  const punchMode = !!v.punchThrough
+  const enclosed = !!v.punchEnclosedHole || (!!v.punchMask && !punchMode)
+  const wholeSeeThrough = !punchMode && isTransparentPaintColor(v.color ?? '')
+  if (!punchMode && !enclosed && !wholeSeeThrough) {
+    return { punch: null, seeThrough: null }
+  }
+  const ink = linkedLetterInkBits(v, w, h)
+  if (enclosed) {
+    const counters = enclosedCounterBits(ink, w, h)
+    if (!counters.some((b) => b)) {
+      return punchMode ? { punch: ink, seeThrough: null } : { punch: null, seeThrough: null }
+    }
+    return punchMode
+      ? { punch: counters, seeThrough: null }
+      : { punch: null, seeThrough: counters }
+  }
+  if (punchMode) return { punch: ink, seeThrough: null }
+  // Whole-glyph see-through: hide letter body in decorations.
+  return { punch: null, seeThrough: ink }
+}
+
+function stampBitsOntoPunchCanvas(
+  ctx: CanvasRenderingContext2D,
+  bits: Uint8Array,
+  w: number,
+  h: number
+): void {
+  const img = ctx.getImageData(0, 0, w, h)
+  const d = img.data
+  for (let p = 0; p < bits.length; p++) {
+    if (!bits[p]) continue
+    const i = p * 4
+    d[i] = 0
+    d[i + 1] = 0
+    d[i + 2] = 0
+    d[i + 3] = 255
+  }
+  ctx.putImageData(img, 0, 0)
+}
+
+function destOutBits(
+  ctx: CanvasRenderingContext2D,
+  bits: Uint8Array,
+  w: number,
+  h: number
+): void {
+  const img = ctx.getImageData(0, 0, w, h)
+  const d = img.data
+  for (let p = 0; p < bits.length; p++) {
+    if (!bits[p]) continue
+    d[p * 4 + 3] = 0
+  }
+  ctx.putImageData(img, 0, 0)
+}
+
+function linkedTextHasHoleIntent(v: PaintVector): boolean {
+  if (v.type !== 'text' || !v.linkedOutsideText) return false
+  return (
+    !!v.punchThrough ||
+    !!v.punchEnclosedHole ||
+    !!v.punchMask ||
+    isTransparentPaintColor(v.color ?? '')
+  )
+}
+
+/**
+ * Rebuild content punchMasks / see-through decorations so Fill / punch /
+ * see-through stay correct after outside letter edits (e.g. TE→BO).
+ */
+function rebuildLinkedLetterPaintEffects(
+  session: PaintSession,
+  prevLinked: PaintVector[],
+  nextVectors: PaintVector[],
+  letters: OutsideTextSettings
+): PaintSession {
+  const res = Math.max(1, session.resolution || 512)
+  const nextLinked = nextVectors.filter(
+    (v) => v.type === 'text' && v.linkedOutsideText && linkedTextHasHoleIntent(v)
+  )
+  const anyHole =
+    nextLinked.length > 0 ||
+    prevLinked.some(linkedTextHasHoleIntent) ||
+    !!session.contentBakedInDecorations ||
+    !!session.punchMasks?.some((m) => m.layer === 'content')
+
+  if (!anyHole) {
+    return {
+      ...session,
+      vectors: nextVectors,
+      linkedTextInDecorations: false
+    }
+  }
+
+  const hasSeeThrough =
+    nextLinked.some(
+      (v) =>
+        (!v.punchThrough && !!v.punchEnclosedHole) ||
+        (!v.punchThrough && !!v.punchMask) ||
+        (!v.punchThrough && isTransparentPaintColor(v.color ?? ''))
+    ) ||
+    // Prior save baked see-through; keep rebaking when flags survived.
+    (!!session.contentBakedInDecorations &&
+      nextLinked.some((v) => !v.punchThrough && linkedTextHasHoleIntent(v)))
+  const hasPunch = nextLinked.some((v) => !!v.punchThrough)
+
+  // ── Content punchMasks: keep non-letter holes, replace letter contribution ──
+  const punchCanvas = document.createElement('canvas')
+  punchCanvas.width = res
+  punchCanvas.height = res
+  const punchCtx = punchCanvas.getContext('2d')!
+  const existingContentPunch = session.punchMasks?.find((m) => m.layer === 'content')?.png
+  const existingImg = loadDataUrlImageSync(existingContentPunch)
+  if (existingImg) punchCtx.drawImage(existingImg, 0, 0)
+
+  // Clear previous linked-letter punch contribution.
+  for (const v of prevLinked) {
+    if (!linkedTextHasHoleIntent(v) || !v.punchThrough) continue
+    const { punch } = linkedLetterEffectBits(v, res, res)
+    if (punch) destOutBits(punchCtx, punch, res, res)
+  }
+  // Also clear a dilated glyph footprint so leftover TE holes do not linger.
+  for (const v of prevLinked) {
+    if (!v.linkedOutsideText) continue
+    const ink = linkedLetterInkBits(v, res, res)
+    destOutBits(punchCtx, ink, res, res)
+  }
+
+  for (const v of nextLinked) {
+    if (!v.punchThrough) continue
+    const { punch } = linkedLetterEffectBits(v, res, res)
+    if (punch) stampBitsOntoPunchCanvas(punchCtx, punch, res, res)
+  }
+
+  const punchData = punchCtx.getImageData(0, 0, res, res).data
+  let anyPunch = false
+  for (let i = 3; i < punchData.length; i += 4) {
+    if (punchData[i] > 32) {
+      anyPunch = true
+      break
+    }
+  }
+  const containerPunches = (session.punchMasks ?? []).filter((m) => m.layer !== 'content')
+  const punchMasks = anyPunch
+    ? [...containerPunches, { layer: 'content' as const, png: punchCanvas.toDataURL('image/png') }]
+    : containerPunches
+
+  // ── See-through: bake new letters with local holes; skip live Inner ──
+  if (hasSeeThrough) {
+    const decor = document.createElement('canvas')
+    decor.width = res
+    decor.height = res
+    const dctx = decor.getContext('2d')!
+    const overlay =
+      loadDataUrlImageSync(session.contentPng) ||
+      loadDataUrlImageSync(session.contentDecorationsPng)
+    if (overlay) dctx.drawImage(overlay, 0, 0)
+    // Remove old baked linked glyphs before redrawing.
+    for (const v of prevLinked) {
+      if (!v.linkedOutsideText) continue
+      destOutBits(dctx, linkedLetterInkBits(v, res, res), res, res)
+    }
+    for (const v of nextLinked) {
+      const fillColor = isTransparentPaintColor(v.color ?? '')
+        ? letters.textColor || '#ffffff'
+        : v.color || letters.textColor || '#ffffff'
+      renderPaintTextVector(dctx, {
+        ...v,
+        color: fillColor,
+        shadow: !!v.shadow,
+        punchThrough: false,
+        punchMask: false
+      })
+      const { seeThrough } = linkedLetterEffectBits(v, res, res)
+      if (seeThrough) destOutBits(dctx, seeThrough, res, res)
+    }
+    return {
+      ...session,
+      vectors: nextVectors,
+      linkedTextInDecorations: true,
+      contentBakedInDecorations: true,
+      contentDecorationsPng: decor.toDataURL('image/png'),
+      decorationsPng: undefined,
+      punchMasks
+    }
+  }
+
+  // Punch-only (or clearing see-through): live letters + regenerated masks.
+  // Drop baked content decorations so they cannot double with live TE/BO.
+  return {
+    ...session,
+    vectors: nextVectors,
+    linkedTextInDecorations: false,
+    contentBakedInDecorations: false,
+    contentDecorationsPng: hasPunch ? undefined : session.contentDecorationsPng,
+    decorationsPng: hasPunch ? undefined : session.decorationsPng,
+    punchMasks
+  }
+}
+
+/**
+ * When outside Inner letters settings change, keep the paint session's linked
+ * text vector in sync and re-apply Fill / see-through / punch holes to the new
+ * glyphs (e.g. TE→BO keeps counters punched).
+ */
+export function syncOutsideLettersIntoPaintSession(
+  session: PaintSession | null | undefined,
+  letters: OutsideTextSettings,
+  innerDrawSize?: number
+): PaintSession | null | undefined {
+  if (!session || session.version !== 1) return session
+  const res = Math.max(1, session.resolution || 512)
+  const drawArea = Math.max(1, innerDrawSize ?? res)
+  const weight = parseInt(String(letters.fontWeight ?? '700'), 10)
+  const w = Number.isFinite(weight) ? Math.max(100, Math.min(900, weight)) : 700
+  const fontSize = Math.max(4, Math.round(drawArea * (letters.fontSizeRatio ?? 0.52)))
+  const letterSpacing = (letters.letterSpacing ?? 0) * (drawArea / 256)
+
+  const prevLinked = (session.vectors ?? []).filter(
+    (v) => v.type === 'text' && !!v.linkedOutsideText
+  )
+
+  const vectors: PaintVector[] = (session.vectors ?? []).map((v) => {
+    if (v.type !== 'text' || !v.linkedOutsideText) return v
+    const shadow = outsideShadowToPaintVector(letters, res, drawArea)
+    const anchor = linkedTextHasPaintTransform(v)
+      ? v.pts?.[0]
+      : outsideTextAnchorPt(letters, res, drawArea)
+    const keepTransparent = isTransparentPaintColor(v.color ?? '')
+    return {
+      ...v,
+      text: letters.text ?? '',
+      // Keep transparent paint colour (whole-glyph see-through); otherwise sync fill.
+      color: keepTransparent ? v.color : letters.textColor || v.color || '#ffffff',
+      fontFamily: letters.fontFamily || v.fontFamily || 'Inter',
+      fontSize,
+      weight: w,
+      bold: w >= 700,
+      italic: !!letters.fontItalic,
+      letterSpacing,
+      // Preserve punch / see-through intent — rebuild applies it to new glyphs.
+      ...(anchor ? { pts: [{ x: anchor.x, y: anchor.y }] } : {}),
+      ...shadow
+    }
+  })
+
+  const hadHoleIntent =
+    prevLinked.some(linkedTextHasHoleIntent) ||
+    !!session.contentBakedInDecorations ||
+    !!session.punchMasks?.some((m) => m.layer === 'content') ||
+    vectors.some(linkedTextHasHoleIntent)
+
+  if (!hadHoleIntent) {
+    // No holes — drop legacy baked-text decorations so live colour/font update.
+    const hadLinkedInDecor = !!session.linkedTextInDecorations
+    return {
+      ...session,
+      vectors,
+      linkedTextInDecorations: false,
+      decorationsPng: hadLinkedInDecor ? undefined : session.decorationsPng,
+      containerDecorationsPng: hadLinkedInDecor ? undefined : session.containerDecorationsPng,
+      contentDecorationsPng: hadLinkedInDecor ? undefined : session.contentDecorationsPng
+    }
+  }
+
+  try {
+    return rebuildLinkedLetterPaintEffects(session, prevLinked, vectors, letters)
+  } catch {
+    // Canvas unavailable — keep props synced, leave masks as-is.
+    return { ...session, vectors }
+  }
+}
 
 /** True when a session still carries an ephemeral Inner content proxy. */
 export function sessionHasContentProxy(
@@ -91,69 +448,6 @@ function shouldRenderContentVectorsLive(session: PaintSession): boolean {
   // here would cover Inner overlay Fill / brush cuts.
   if (!shouldSkipLiveLettersForPaintSession(session)) return false
   return contentVectorsForLiveRender(session.vectors).length > 0
-}
-
-/**
- * When outside Inner letters settings change, keep the paint session's linked
- * text vector in sync and drop stale content punches / baked glyphs so live
- * letters (e.g. TE→BO) are not covered by holes shaped for the old text.
- */
-export function syncOutsideLettersIntoPaintSession(
-  session: PaintSession | null | undefined,
-  letters: OutsideTextSettings,
-  innerDrawSize?: number
-): PaintSession | null | undefined {
-  if (!session || session.version !== 1) return session
-  const res = Math.max(1, session.resolution || 512)
-  const drawArea = Math.max(1, innerDrawSize ?? res)
-  const weight = parseInt(String(letters.fontWeight ?? '700'), 10)
-  const w = Number.isFinite(weight) ? Math.max(100, Math.min(900, weight)) : 700
-  const fontSize = Math.max(4, Math.round(drawArea * (letters.fontSizeRatio ?? 0.52)))
-  const letterSpacing = (letters.letterSpacing ?? 0) * (drawArea / 256)
-
-  const vectors: PaintVector[] = (session.vectors ?? []).map((v) => {
-    if (v.type !== 'text' || !v.linkedOutsideText) return v
-    const shadow = outsideShadowToPaintVector(letters, res, drawArea)
-    const anchor = linkedTextHasPaintTransform(v)
-      ? v.pts?.[0]
-      : outsideTextAnchorPt(letters, res, drawArea)
-    return {
-      ...v,
-      text: letters.text ?? '',
-      color: letters.textColor || v.color || '#ffffff',
-      fontFamily: letters.fontFamily || v.fontFamily || 'Inter',
-      fontSize,
-      weight: w,
-      bold: w >= 700,
-      italic: !!letters.fontItalic,
-      letterSpacing,
-      // Old punch/see-through holes were for previous glyphs — clear them.
-      punchThrough: false,
-      punchEnclosedHole: false,
-      punchMask: undefined,
-      ...(anchor ? { pts: [{ x: anchor.x, y: anchor.y }] } : {}),
-      ...shadow
-    }
-  })
-
-  const hadLinkedInDecor = !!session.linkedTextInDecorations
-  const hadBakedContent = !!session.contentBakedInDecorations
-  const hadContentPunch = !!session.punchMasks?.some((m) => m.layer === 'content')
-  const dropStaleContentDecor = hadLinkedInDecor || hadBakedContent || hadContentPunch
-  return {
-    ...session,
-    vectors,
-    linkedTextInDecorations: false,
-    contentBakedInDecorations: dropStaleContentDecor ? false : session.contentBakedInDecorations,
-    // Drop content decorations / punches shaped for the previous letters.
-    decorationsPng: dropStaleContentDecor ? undefined : session.decorationsPng,
-    containerDecorationsPng: session.containerDecorationsPng,
-    contentDecorationsPng: dropStaleContentDecor ? undefined : session.contentDecorationsPng,
-    contentPng: dropStaleContentDecor ? undefined : session.contentPng,
-    punchMasks: dropStaleContentDecor
-      ? session.punchMasks?.filter((m) => m.layer !== 'content')
-      : session.punchMasks
-  }
 }
 
 /** Centered outer-shape square on the paint PNG (inset when shadow was fitted). */
