@@ -3193,7 +3193,8 @@ function bakeObjectAppearanceToStamp(item: LineObj, W: number, H: number): LineO
  * Restore as editable text using the stamp centre + stored glyph fields.
  */
 function letterBakeStampToEditableText(l: LineObj, W: number, H: number): LineObj {
-  if (l.type !== 'stamp' || !l.linkedOutsideText) return l
+  if (l.type !== 'stamp') return l
+  if (!l.linkedOutsideText && !(l.text?.trim())) return l
   const color = isTransparentPaintColor(l.color ?? '')
     ? (l.color as string)
     : firstSolidColor(l.color ?? '#ffffffff')
@@ -3260,20 +3261,6 @@ function refillHolePocket(
       ...item,
       color: fill,
       ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {}),
-      punchThrough: hasPunchCoverage(item.id),
-      punchEnclosedHole:
-        hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
-          ? item.punchEnclosedHole
-          : false
-    }
-  }
-
-  // Text must stay type:'text' so Paint can edit glyphs after Fill/Save.
-  // Hole maps are already scrubbed by the caller — mono-colour vector is enough.
-  if (item.type === 'text') {
-    return {
-      ...item,
-      color: fill,
       punchThrough: hasPunchCoverage(item.id),
       punchEnclosedHole:
         hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
@@ -6269,13 +6256,10 @@ export function IconPaintEditor({
             stripContentProxyVectors(initialVectors),
             null
           ) as unknown as LineObj[]
-        ).map((l) => {
-          const next = letterBakeStampToEditableText(l, W, H)
-          return {
-            ...next,
-            visible: next.visible ?? next.editable ?? true
-          }
-        })
+        ).map((l) => ({
+          ...l,
+          visible: l.visible ?? l.editable ?? true
+        }))
       } else if (outside && outsideAll?.kind !== 'proxy') {
         const seeded = lineFromOutsideText(outside, W, innerDraw)
         restored = [seeded]
@@ -7848,7 +7832,18 @@ export function IconPaintEditor({
   }
 
   const startTextEdit = (id: string) => {
-    const l = linesRef.current.find((x) => x.id === id)
+    let l = linesRef.current.find((x) => x.id === id)
+    // Sectional letter Fill bakes a stamp — convert back so the string is editable
+    // (multi-colour sections become the vector's single colour).
+    if (l && l.type === 'stamp' && (l.linkedOutsideText || !!(l.text?.trim()))) {
+      const converted = letterBakeStampToEditableText(l, W, H)
+      if (converted.type === 'text') {
+        const next = linesRef.current.map((item) => (item.id === id ? converted : item))
+        commitLines(next)
+        l = converted
+        pushHistory()
+      }
+    }
     if (!l || l.type !== 'text') return
     textEditIdRef.current = id
     setTextEditId(id)
@@ -9233,7 +9228,10 @@ export function IconPaintEditor({
       const clickX = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
       const clickY = Math.max(0, Math.min(H - 1, Math.floor(canvasPoint.y)))
       const clickI = (clickY * W + clickX) * 4
+      // Soft fringe may receive the click, but flood must use a solid-ink
+      // threshold so AA does not bridge separated islands (i-dot vs stem).
       const inkHitT = item.type === 'text' ? 28 : 80
+      const inkT = item.type === 'text' ? 140 : 80
       // Counters (empty space inside "b") are not glyph ink. Do not spiral onto
       // the letter and punch the character instead of the hole.
       if (interior[clickI + 3] < inkHitT && od[clickI + 3] < inkHitT) return null
@@ -9251,7 +9249,6 @@ export function IconPaintEditor({
         if (ia > 2 && fa > 2 && rgbCut(i)) return true
         return false
       }
-      const inkT = item.type === 'text' ? 28 : 80
       const seed = findFillSeed(W, H, canvasPoint.x, canvasPoint.y, (x, y) => {
         const i = (y * W + x) * 4
         return interior[i + 3] >= inkT && !isCut(i)
@@ -9259,9 +9256,9 @@ export function IconPaintEditor({
       if (!seed) return null
       const seedI = (seed.y * W + seed.x) * 4
       const tr = interior[seedI], tg = interior[seedI + 1], tb = interior[seedI + 2]
-      // Text: connect by alpha only so soft AA does not split one glyph into
-      // two islands (RGB fringe from prior fills). Separate letters stay apart
-      // because they are not 4-connected. Other types keep colour matching.
+      // Text: solid-ink islands only (threshold above). Soft AA fringe is added
+      // in the growth pass so it cannot bridge the gap under an "i" tittle.
+      // Other types keep colour matching.
       const region = floodFillConnected(W, H, seed.x, seed.y, (i) => {
         if (interior[i + 3] < inkT) return false
         if (isCut(i)) return false
@@ -9269,10 +9266,12 @@ export function IconPaintEditor({
         return Math.abs(interior[i] - tr) + Math.abs(interior[i + 1] - tg) + Math.abs(interior[i + 2] - tb) <= 48
       })
       // Solid recolour on text: grow into soft AA so fringe does not remain.
+      // One ring only — never iterative — so growth cannot bridge island gaps.
       // Shapes/poly/stamps must NOT grow — that expands the silhouette.
       // Transparent punch/see-through: never grow (enlarges holes / fringe lines).
       if (!isTransparentPaintColor(color) && item.type === 'text') {
         const dirs4: [number, number][] = [[-1, 0], [1, 0], [0, -1], [0, 1]]
+        const grow = new Uint8Array(region.length)
         for (let y = 0; y < H; y++) {
           for (let x = 0; x < W; x++) {
             const p = y * W + x
@@ -9287,8 +9286,11 @@ export function IconPaintEditor({
               if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue
               if (region[ny * W + nx]) { adj = true; break }
             }
-            if (adj) region[p] = 1
+            if (adj) grow[p] = 1
           }
+        }
+        for (let p = 0; p < grow.length; p++) {
+          if (grow[p]) region[p] = 1
         }
       }
       // Text solid fill: harden AA to full cover so recolour does not leave
@@ -9301,11 +9303,20 @@ export function IconPaintEditor({
       let flooded = 0
       let opaque = 0
       let wallHits = 0
+      let uncoveredSolid = 0
       for (let p = 0; p < W * H; p++) {
         const i = p * 4
         if (interior[i + 3] > 2) {
           opaque++
           if (isCut(i)) wallHits++
+        }
+        if (
+          item.type === 'text' &&
+          interior[i + 3] >= inkT &&
+          !isCut(i) &&
+          !region[p]
+        ) {
+          uncoveredSolid++
         }
         if (!region[p]) continue
         od[i] = fr
@@ -9424,20 +9435,23 @@ export function IconPaintEditor({
           hasSeeThroughCoverage(item.id)
         const stillPunched = hadHole && subtractLocalPunchRegion(item, region, W, H)
         keepPunch = punch || stillPunched
-        // Vector text must stay vector — baking to stamp blocks in-paint text edit
-        // and leaves AA fringe that survives later see-through / colour clears.
-        // Holes (wallHits > 0) stay as masks; do not rasterize the glyph.
+        // Whole remaining solid ink → keep editable vector (one colour).
+        // Any other solid island left (i-dot vs stem, or another letter) → bake
+        // so only the flooded section changes colour.
         if (item.type === 'text') {
-          return {
-            ...item,
-            color: firstSolidColor(color),
-            punchThrough: hasPunchCoverage(item.id),
-            punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false
+          const wholeGlyph = uncoveredSolid === 0
+          if (wholeGlyph) {
+            return {
+              ...item,
+              color: firstSolidColor(color),
+              punchThrough: hasPunchCoverage(item.id),
+              punchEnclosedHole: keepPunch ? item.punchEnclosedHole : false
+            }
           }
-        }
-        // Shapes/polys stay vector on solid Fill — baking expands and blurs edges
-        // on every repeat, and re-rasterises untouched ST sections.
-        if ((item.type === 'shape' || item.type === 'poly') && !item.paintStrokes?.length) {
+          // Fall through to sectional stamp bake below.
+        } else if ((item.type === 'shape' || item.type === 'poly') && !item.paintStrokes?.length) {
+          // Shapes/polys stay vector on solid Fill — baking expands and blurs edges
+          // on every repeat, and re-rasterises untouched ST sections.
           return {
             ...item,
             color: firstSolidColor(color),
@@ -9487,7 +9501,9 @@ export function IconPaintEditor({
           sourceSvgMarkup: undefined,
           sourceStampSize: undefined,
           keepStrokeOnResize: undefined,
-          linkedOutsideText: undefined,
+          // Keep link + glyph string so double-click can restore editable text.
+          linkedOutsideText: item.linkedOutsideText,
+          text: item.text,
           // Baked pixels own colour/alpha (including see-through holes).
           color: transparent ? fill : firstSolidColor(color),
           punchThrough: keepPunch,
@@ -13586,10 +13602,6 @@ export function IconPaintEditor({
         }
         return [item]
       }
-      // Letter-bake stamps block text edit — persist as editable text vectors.
-      if (item.type === 'stamp' && item.linkedOutsideText) {
-        return [letterBakeStampToEditableText(item, W, H)]
-      }
       if (item.type === 'group' || item.marqueeItem) return [item]
       const seeThrough = objectHasSeeThroughHole(item)
       const modifiedProxy =
@@ -15745,7 +15757,10 @@ export function IconPaintEditor({
               if (tool !== 'pointer') return
               const pt = toCanvas(e)
               const hit = topmostPaintHit((l) => {
-                if (l.type !== 'text' || !isPaintHitVisible(l)) return false
+                const canEditText =
+                  l.type === 'text' ||
+                  (l.type === 'stamp' && !!(l.linkedOutsideText || l.text?.trim()))
+                if (!canEditText || !isPaintHitVisible(l)) return false
                 const q = unmapObjDisplayPt(pt, l)
                 return pointInPoly(flattenLine(l), q)
               })
