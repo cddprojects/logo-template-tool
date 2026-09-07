@@ -3148,7 +3148,7 @@ function bakeObjectAppearanceToStamp(item: LineObj, W: number, H: number): LineO
       const imageDataUrl = cropped.toDataURL('image/png')
       ensureStampImage(imageDataUrl)
       clearObjectHoles(item as HoleItem)
-      const { contentBound: _cb, linkedOutsideText: _lt, ...rest } = item
+      const { contentBound: _cb, ...rest } = item
       return {
         ...rest,
         type: 'stamp',
@@ -3166,7 +3166,9 @@ function bakeObjectAppearanceToStamp(item: LineObj, W: number, H: number): LineO
         sourceStampSize: undefined,
         keepStrokeOnResize: undefined,
         contentBound: undefined,
-        linkedOutsideText: undefined,
+        // Keep link + glyph string so outside TE→BO can drop this bake.
+        linkedOutsideText: item.linkedOutsideText,
+        text: item.linkedOutsideText ? item.text : undefined,
         // Keep opaque object colour — never force white (looks like Outer went white).
         color: isTransparentPaintColor(item.color ?? '')
           ? '#ffffffff'
@@ -3302,7 +3304,7 @@ function refillHolePocket(
       scrubPocket(punchMaskBits.get(item.id), punchMaskBits, punchMaskCanvases)
       scrubPocket(seeThroughMaskBits.get(item.id), seeThroughMaskBits, seeThroughMaskCanvases)
       syncHoleFlags(item as HoleItem)
-      const { contentBound: _cb, linkedOutsideText: _lt, ...rest } = item
+      const { contentBound: _cb, ...rest } = item
       return {
         ...rest,
         type: 'stamp',
@@ -3320,7 +3322,9 @@ function refillHolePocket(
         sourceStampSize: undefined,
         keepStrokeOnResize: undefined,
         contentBound: undefined,
-        linkedOutsideText: undefined,
+        // Keep link + glyph string so outside TE→BO can drop this bake.
+        linkedOutsideText: item.linkedOutsideText,
+        text: item.linkedOutsideText ? item.text : undefined,
         // Keep the real fill colour — never force white (stamps may tint / fallback).
         color: fill,
         punchThrough: hasPunchCoverage(item.id),

@@ -304,6 +304,9 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
         'contentShadowEnabled', 'contentShadowInset', 'contentShadowColor',
         'contentShadowBlur', 'contentShadowSpread', 'contentShadowOffsetX', 'contentShadowOffsetY'
       ].some((k) => k in patch)
+      const textOrFontKeyTouched = [
+        'text', 'fontFamily', 'fontWeight', 'fontItalic', 'fontSizeRatio', 'letterSpacing'
+      ].some((k) => k in patch)
       if (
         letterKeyTouched &&
         next.sourceType === 'letters' &&
@@ -328,7 +331,9 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             contentShadowSpread: next.contentShadowSpread ?? 0,
             contentShadowOffsetX: next.contentShadowOffsetX ?? 0,
             contentShadowOffsetY: next.contentShadowOffsetY ?? 3
-          }, logoPaintContentDrawSize(next, 512)) ?? null
+          }, logoPaintContentDrawSize(next, 512), {
+            textOrFontChanged: textOrFontKeyTouched
+          }) ?? null
         }
       }
       updateConfig({

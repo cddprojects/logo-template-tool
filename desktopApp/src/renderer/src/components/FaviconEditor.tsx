@@ -206,6 +206,9 @@ export function FaviconEditor({
         'contentShadowEnabled', 'contentShadowInset', 'contentShadowColor',
         'contentShadowBlur', 'contentShadowSpread', 'contentShadowOffsetX', 'contentShadowOffsetY'
       ].some((k) => k in patch)
+      const textOrFontKeyTouched = [
+        'text', 'fontFamily', 'fontWeight', 'fontItalic', 'fontSizeRatio', 'letterSpacing'
+      ].some((k) => k in patch)
       // Live letters draw outside — migrate legacy baked-text decorations so
       // Text / font / color changes show immediately without re-opening Paint.
       if (
@@ -230,7 +233,9 @@ export function FaviconEditor({
           contentShadowSpread: nextContent.contentShadowSpread ?? 0,
           contentShadowOffsetX: nextContent.contentShadowOffsetX ?? 0,
           contentShadowOffsetY: nextContent.contentShadowOffsetY ?? 3
-        }, faviconInnerDrawSize(config, 512))
+        }, faviconInnerDrawSize(config, 512), {
+          textOrFontChanged: textOrFontKeyTouched
+        })
         updateConfig({ content: nextContent, paintSession: nextSession ?? null })
         return
       }

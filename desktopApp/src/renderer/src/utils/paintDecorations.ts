@@ -153,7 +153,10 @@ function destOutBits(
 }
 
 function linkedTextHasHoleIntent(v: PaintVector): boolean {
-  if (v.type !== 'text' || !v.linkedOutsideText) return false
+  if (!v.linkedOutsideText) return false
+  // Letter-bake stamps (after PH→ST→Fill) still count — outside TE→BO must
+  // invalidate their decorations even though type is no longer 'text'.
+  if (v.type !== 'text' && v.type !== 'stamp') return false
   return (
     !!v.punchThrough ||
     !!v.punchEnclosedHole ||
@@ -162,7 +165,9 @@ function linkedTextHasHoleIntent(v: PaintVector): boolean {
     !!v.seeThroughHoleMaskPng ||
     v.holeMaskMode === 'punch' ||
     v.holeMaskMode === 'see-through' ||
-    isTransparentPaintColor(v.color ?? '')
+    isTransparentPaintColor(v.color ?? '') ||
+    // Filled letter stamp with no holes left — still a letter bake to drop on text change.
+    (v.type === 'stamp' && !!v.linkedOutsideText)
   )
 }
 
@@ -314,14 +319,25 @@ function rebuildLinkedLetterPaintEffects(
   }
 
   // Punch-only: live letters + regenerated masks (no baked content decorations).
+  if (hasPunch) {
+    return {
+      ...session,
+      vectors: nextVectors,
+      linkedTextInDecorations: false,
+      contentBakedInDecorations: false,
+      contentDecorationsPng: undefined,
+      decorationsPng: undefined,
+      punchMasks
+    }
+  }
+
+  // No punch / see-through left to rebuild (e.g. letter Fill bake stamp). Keep
+  // the existing bake — do not clear contentDecorationsPng or live Inner will
+  // double with the old raster (white BO under red TE).
   return {
     ...session,
     vectors: nextVectors,
-    linkedTextInDecorations: false,
-    contentBakedInDecorations: false,
-    contentDecorationsPng: hasPunch ? undefined : session.contentDecorationsPng,
-    decorationsPng: hasPunch ? undefined : session.decorationsPng,
-    punchMasks
+    punchMasks: anyPunch ? punchMasks : session.punchMasks?.filter((m) => m.layer !== 'content')
   }
 }
 
@@ -329,11 +345,15 @@ function rebuildLinkedLetterPaintEffects(
  * When outside Inner letters settings change, keep the paint session's linked
  * text vector in sync and re-apply Fill / see-through / punch holes to the new
  * glyphs (e.g. TE→BO keeps counters punched).
+ *
+ * `opts.textOrFontChanged` — set when the caller patched text/font keys. Needed
+ * for older Saves where letter Fill baked a stamp without linkedOutsideText.
  */
 export function syncOutsideLettersIntoPaintSession(
   session: PaintSession | null | undefined,
   letters: OutsideTextSettings,
-  innerDrawSize?: number
+  innerDrawSize?: number,
+  opts?: { textOrFontChanged?: boolean }
 ): PaintSession | null | undefined {
   if (!session || session.version !== 1) return session
   const res = Math.max(1, session.resolution || 512)
@@ -343,23 +363,48 @@ export function syncOutsideLettersIntoPaintSession(
   const fontSize = Math.max(4, Math.round(drawArea * (letters.fontSizeRatio ?? 0.52)))
   const letterSpacing = (letters.letterSpacing ?? 0) * (drawArea / 256)
 
-  const prevLinked = (session.vectors ?? []).filter(
-    (v) => v.type === 'text' && !!v.linkedOutsideText
-  )
+  const prevLinked = (session.vectors ?? []).filter((v) => !!v.linkedOutsideText)
 
-  const vectors: PaintVector[] = (session.vectors ?? []).map((v) => {
-    if (v.type !== 'text' || !v.linkedOutsideText) return v
+  const letterTextOrFontChanged = (v: PaintVector): boolean =>
+    (v.text ?? '') !== (letters.text ?? '') ||
+    (v.fontFamily || '') !== (letters.fontFamily || '') ||
+    Math.abs((v.fontSize ?? 0) - fontSize) > 0.5 ||
+    Math.abs((v.letterSpacing ?? 0) - letterSpacing) > 0.5
+
+  const isOrphanLetterBakeStamp = (v: PaintVector): boolean =>
+    v.type === 'stamp' &&
+    !v.punchMask &&
+    !v.contentBound &&
+    !v.linkedOutsideText &&
+    (v.layer ?? 'content') === 'content'
+
+  const vectors: PaintVector[] = []
+  for (const v of session.vectors ?? []) {
+    if (!v.linkedOutsideText) {
+      // Old Saves: letter Fill stamped without linkedOutsideText — drop on text/font edit.
+      if (opts?.textOrFontChanged && session.contentBakedInDecorations && isOrphanLetterBakeStamp(v)) {
+        continue
+      }
+      vectors.push(v)
+      continue
+    }
+    // Letter-bake stamp (PH→ST→Fill): raster cannot follow TE→BO — drop it so
+    // live letters show alone without a stale red TE over white BO.
+    if (v.type === 'stamp') {
+      if (!letterTextOrFontChanged(v)) vectors.push(v)
+      continue
+    }
+    if (v.type !== 'text') {
+      vectors.push(v)
+      continue
+    }
     const shadow = outsideShadowToPaintVector(letters, res, drawArea)
     const anchor = linkedTextHasPaintTransform(v)
       ? v.pts?.[0]
       : outsideTextAnchorPt(letters, res, drawArea)
     const keepTransparent = isTransparentPaintColor(v.color ?? '')
-    const textChanged =
-      (v.text ?? '') !== (letters.text ?? '') ||
-      (v.fontFamily || '') !== (letters.fontFamily || '') ||
-      Math.abs((v.fontSize ?? 0) - fontSize) > 0.5 ||
-      Math.abs((v.letterSpacing ?? 0) - letterSpacing) > 0.5
-    return {
+    const textChanged = letterTextOrFontChanged(v)
+    vectors.push({
       ...v,
       text: letters.text ?? '',
       // Keep transparent paint colour (whole-glyph see-through); otherwise sync fill.
@@ -383,8 +428,8 @@ export function syncOutsideLettersIntoPaintSession(
         : {}),
       ...(anchor ? { pts: [{ x: anchor.x, y: anchor.y }] } : {}),
       ...shadow
-    }
-  })
+    })
+  }
 
   const hadHoleIntent =
     prevLinked.some(linkedTextHasHoleIntent) ||
@@ -392,17 +437,13 @@ export function syncOutsideLettersIntoPaintSession(
     !!session.punchMasks?.some((m) => m.layer === 'content') ||
     vectors.some(linkedTextHasHoleIntent)
 
-  const textOrFontChanged = prevLinked.some((prev) => {
-    const next = vectors.find((v) => v.id === prev.id)
-    if (!next) return true
-    return (
-      (prev.text ?? '') !== (next.text ?? '') ||
-      (prev.fontFamily || '') !== (next.fontFamily || '') ||
-      Math.abs((prev.fontSize ?? 0) - (next.fontSize ?? 0)) > 0.5
-    )
-  })
+  const textOrFontChanged =
+    prevLinked.some((prev) => letterTextOrFontChanged(prev)) ||
+    // Orphan letter bake (no linked metadata): caller says text/font was edited.
+    !!(opts?.textOrFontChanged && session.contentBakedInDecorations && prevLinked.length === 0)
 
-  // Text/font change: drop content punches / baked holes (stale TE shapes).
+  // Text/font change: drop content punches / baked holes (stale TE shapes) and
+  // any letter-bake stamps already removed above.
   if (textOrFontChanged && hadHoleIntent) {
     return {
       ...session,
@@ -444,11 +485,11 @@ export function sessionHasContentProxy(
   return !!session?.vectors?.some(isContentProxyVector)
 }
 
-/** True when Paint saved a linked Inner letters vector. */
+/** True when Paint saved a linked Inner letters vector (or letter-bake stamp). */
 export function sessionHasLinkedOutsideText(
   session: PaintSession | null | undefined
 ): boolean {
-  return !!session?.vectors?.some((v) => v.type === 'text' && v.linkedOutsideText)
+  return !!session?.vectors?.some((v) => !!v.linkedOutsideText)
 }
 
 /** True when session has per-layer decoration planes (Outer under Inner). */
