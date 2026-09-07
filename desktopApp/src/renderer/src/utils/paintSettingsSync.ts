@@ -1880,7 +1880,13 @@ export function switchFaviconContentType(
       // Keep Outer paint under Inner — never drop the Outer plane here.
       containerDecorationsPng:
         session.containerDecorationsPng ?? session.containerPng ?? undefined,
-      contentDecorationsPng: nextContentPng
+      contentDecorationsPng: nextContentPng,
+      // Previous type may have baked Inner (e.g. letters PH/ST). That flag must
+      // not survive onto geo/lucide/image or live Inner is skipped and vanishes.
+      contentBakedInDecorations: false,
+      linkedTextInDecorations: false,
+      // Letter/shape holes from the previous type must not punch the new Inner.
+      punchMasks: (session.punchMasks ?? []).filter((m) => m.layer !== 'content')
     }
   }
 
@@ -1925,7 +1931,12 @@ export function switchIconSourceType(
       decorationsPng: undefined,
       containerDecorationsPng:
         session.containerDecorationsPng ?? session.containerPng ?? undefined,
-      contentDecorationsPng: nextContentPng
+      contentDecorationsPng: nextContentPng,
+      // Previous type may have baked Inner (e.g. letters PH/ST). That flag must
+      // not survive onto geo/lucide/image or live Inner is skipped and vanishes.
+      contentBakedInDecorations: false,
+      linkedTextInDecorations: false,
+      punchMasks: (session.punchMasks ?? []).filter((m) => m.layer !== 'content')
     }
   }
 

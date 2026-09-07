@@ -548,7 +548,18 @@ export function shouldSkipLiveLettersForPaintSession(
 export function shouldSkipLiveInnerForPaintSession(
   session: PaintSession | null | undefined
 ): boolean {
-  return !!session?.contentBakedInDecorations
+  if (!session?.contentBakedInDecorations) return false
+  // After an Inner type switch, contentDecorationsPng was wrongly set to the
+  // overlay PNG while contentBakedInDecorations stayed true — live geo/lucide
+  // Inner was skipped and disappeared (especially under an Outer shape).
+  if (
+    session.contentDecorationsPng &&
+    session.contentPng &&
+    session.contentDecorationsPng === session.contentPng
+  ) {
+    return false
+  }
+  return true
 }
 
 function shouldRenderContentVectorsLive(session: PaintSession): boolean {
@@ -857,18 +868,32 @@ export function sanitizePaintSessionProxies(
   session: PaintSession | null | undefined
 ): PaintSession | null | undefined {
   if (!session || session.version !== 1) return session
-  if (!sessionHasContentProxy(session)) return session
+  let next: PaintSession = session
+  // Stale bake flag after Inner type switch (decorations plane === overlay only).
+  if (
+    next.contentBakedInDecorations &&
+    next.contentDecorationsPng &&
+    next.contentPng &&
+    next.contentDecorationsPng === next.contentPng
+  ) {
+    next = {
+      ...next,
+      contentBakedInDecorations: false,
+      linkedTextInDecorations: false
+    }
+  }
+  if (!sessionHasContentProxy(next)) return next
   return {
-    ...session,
-    vectors: stripContentProxyVectors(session.vectors),
+    ...next,
+    vectors: stripContentProxyVectors(next.vectors),
     // Keep baked decorations when Inner was rasterized (see-through / punch edits).
-    decorationsPng: session.contentBakedInDecorations ? session.decorationsPng : undefined,
-    containerDecorationsPng: session.contentBakedInDecorations
-      ? session.containerDecorationsPng
+    decorationsPng: next.contentBakedInDecorations ? next.decorationsPng : undefined,
+    containerDecorationsPng: next.contentBakedInDecorations
+      ? next.containerDecorationsPng
       : undefined,
-    contentDecorationsPng: session.contentBakedInDecorations
-      ? session.contentDecorationsPng
+    contentDecorationsPng: next.contentBakedInDecorations
+      ? next.contentDecorationsPng
       : undefined,
-    punchMasks: session.punchMasks
+    punchMasks: next.punchMasks
   }
 }
