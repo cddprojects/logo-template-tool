@@ -1264,6 +1264,18 @@ function alphaBoundsFromCanvas(canvas: HTMLCanvasElement | null): { x: number; y
     : { x: left, y: top, w: right - left + 1, h: bottom - top + 1 }
 }
 
+/**
+ * Crop bounds after rendering an object to a full canvas (Fill bake / hole refill).
+ * Never use punchLocalBox here — that UV AABB is unrotated and clips rotated
+ * text/shapes (e.g. 45° square → octagon).
+ */
+function bakeCropBoundsFromCanvas(
+  item: LineObj,
+  canvas: HTMLCanvasElement
+): { x: number; y: number; w: number; h: number } | null {
+  return alphaBoundsFromCanvas(canvas) ?? boundsFromLineFallback(item)
+}
+
 function removeLineSubtree(allLines: LineObj[], rootId: string): LineObj[] {
   const drop = new Set<string>()
   const walk = (id: string) => {
@@ -3124,7 +3136,7 @@ function bakeObjectAppearanceToStamp(item: LineObj, W: number, H: number): LineO
     } finally {
       item.punchThrough = wasPunch
     }
-    const bounds = alphaBoundsFromCanvas(canvas) ?? boundsFromLineFallback(item)
+    const bounds = bakeCropBoundsFromCanvas(item, canvas)
     if (!bounds) {
       clearObjectHoles(item as HoleItem)
       return {
@@ -3293,10 +3305,7 @@ function refillHolePocket(
     }
     ctx.putImageData(img, 0, 0)
 
-    const bounds =
-      punchLocalBox(item) ??
-      boundsFromLineFallback(item) ??
-      alphaBoundsFromCanvas(canvas)
+    const bounds = bakeCropBoundsFromCanvas(item, canvas)
     if (!bounds) {
       return {
         ...item,
@@ -9463,9 +9472,7 @@ export function IconPaintEditor({
       }
 
       ctx.putImageData(obj, 0, 0)
-      const bounds = lineNeedsDisplayTransform(item)
-        ? (alphaBoundsFromCanvas(canvas) ?? boundsFromLineFallback(item))
-        : (punchLocalBox(item) ?? boundsFromLineFallback(item))
+      const bounds = bakeCropBoundsFromCanvas(item, canvas)
       if (!bounds) {
         return {
           ...item,
