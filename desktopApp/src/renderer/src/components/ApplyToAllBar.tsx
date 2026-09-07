@@ -9,23 +9,39 @@ interface ApplyToAllBarProps {
   /** Brief success flash label. */
   applied?: boolean
   title?: string
+  /** Show Favicon target checkbox (default true). */
+  showFavicon?: boolean
+  /** Show Logo target checkbox (default true). */
+  showLogo?: boolean
 }
 
 /**
  * Checkbox-driven “apply active variant to all” control.
- * What: shape/settings and/or colour. Layer: Inner and/or Outer.
+ * Content: shape/settings and/or colour. Layer: Inner and/or Outer.
+ * App: Favicon and/or Logo.
  */
 export function ApplyToAllBar({
   onApply,
   applied = false,
-  title = 'Copy selected parts of this variant onto every other variant'
+  title = 'Copy selected parts of this variant onto every other variant',
+  showFavicon = true,
+  showLogo = true
 }: ApplyToAllBarProps) {
   const [shape, setShape] = useState(true)
   const [color, setColor] = useState(false)
   const [inner, setInner] = useState(true)
   const [outer, setOuter] = useState(false)
+  const [favicon, setFavicon] = useState(showFavicon)
+  const [logo, setLogo] = useState(showLogo)
 
-  const opts: ApplyToAllOptions = { shape, color, inner, outer }
+  const opts: ApplyToAllOptions = {
+    shape,
+    color,
+    inner,
+    outer,
+    favicon: showFavicon ? favicon : false,
+    logo: showLogo ? logo : false
+  }
   const canApply = applyToAllOptionsActive(opts)
 
   return (
@@ -34,7 +50,7 @@ export function ApplyToAllBar({
       title={title}
     >
       <div className="flex items-center gap-2 px-2 py-1 rounded-lg border border-border bg-surface3 text-[10px] text-muted">
-        <span className="font-semibold text-text/80 whitespace-nowrap">What</span>
+        <span className="font-semibold text-text/80 whitespace-nowrap">Content</span>
         <label className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap">
           <input
             type="checkbox"
@@ -75,6 +91,33 @@ export function ApplyToAllBar({
           Outer
         </label>
       </div>
+      {(showFavicon || showLogo) && (
+        <div className="flex items-center gap-2 px-2 py-1 rounded-lg border border-border bg-surface3 text-[10px] text-muted">
+          <span className="font-semibold text-text/80 whitespace-nowrap">App</span>
+          {showFavicon && (
+            <label className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap">
+              <input
+                type="checkbox"
+                className="accent-accent"
+                checked={favicon}
+                onChange={(e) => setFavicon(e.target.checked)}
+              />
+              Favicon
+            </label>
+          )}
+          {showLogo && (
+            <label className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap">
+              <input
+                type="checkbox"
+                className="accent-accent"
+                checked={logo}
+                onChange={(e) => setLogo(e.target.checked)}
+              />
+              Logo
+            </label>
+          )}
+        </div>
+      )}
       <button
         type="button"
         disabled={!canApply}

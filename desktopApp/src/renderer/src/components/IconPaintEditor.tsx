@@ -13850,6 +13850,12 @@ export function IconPaintEditor({
       const ctx = cc.getContext('2d')
       if (ctx) ctx.clearRect(0, 0, W, H)
     }
+    // Solid Inner Fill → clear content overlay so live fillColor owns the colour
+    // (avoids a full-face contentPng that looks like Outer background on Apply).
+    if (contentSync.clearContentOverlay) {
+      const ctx = ct.getContext('2d')
+      if (ctx) ctx.clearRect(0, 0, W, H)
+    }
     // contentBound proxies are Paint-only: sync size/offset/shadow, then drop them
     // so outside live Inner settings never double with a leftover raster stamp.
     const persistVectors = stripContentProxyVectors(vectors).map((v) => {
@@ -13981,7 +13987,9 @@ export function IconPaintEditor({
         containerPng: contentSync.clearOuterOverlay
           ? emptyOverlayPng(W)
           : cc.toDataURL('image/png'),
-        contentPng: ct.toDataURL('image/png'),
+        contentPng: contentSync.clearContentOverlay
+          ? emptyOverlayPng(W)
+          : ct.toDataURL('image/png'),
         vectors: persistVectors,
         resolution: W,
         hasContainer: !!(hasContainer || containerUsable),

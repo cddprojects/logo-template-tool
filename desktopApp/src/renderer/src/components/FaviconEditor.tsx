@@ -21,6 +21,8 @@ import { recolorFieldsAfterImageChange } from '../utils/imageRecolor'
 import {
   applyPaintSaveToFavicon,
   applyFaviconToAllOptions,
+  applyIconToAllOptions,
+  applyLogoShellToAllOptions,
   clearFaviconUploadedImage,
   mapFaviconStashToIconStash,
   outsideContentFromFavicon,
@@ -609,13 +611,108 @@ export function FaviconEditor({
 
   /** Apply checkbox selection from the active favicon onto every other variant. */
   const applySelectedToAll = (opts: ApplyToAllOptions) => {
-    if (!config || !active || variants.length < 2) return
-    onChange(
-      variants.map((variant) => ({
-        ...variant,
-        config: applyFaviconToAllOptions(config, variant.config, opts)
-      }))
+    if (!config || !active) return
+    if (!opts.favicon && !opts.logo) return
+
+    const applyFavicons = !!opts.favicon && variants.length > 1
+    const applyLogos = !!opts.logo && !!onLogoChange && logoVariants.length > 1
+    if (!applyFavicons && !applyLogos) return
+
+    const sourceFavicon = config
+    const mergedByLabel = new Map(
+      variants.map((variant) => [
+        variant.label,
+        applyFaviconToAllOptions(sourceFavicon, variant.config, opts)
+      ])
     )
+
+    // Favicon-only: freeze linked logos so sync does not pull favicon updates.
+    if (applyFavicons && !applyLogos && onLogoChange) {
+      onLogoChange(
+        logoVariants.map((lv) => {
+          if (!(lv.config.iconLinked ?? true)) return lv
+          const frozen = lv.config.syncedIcon ?? lv.config.icon
+          return {
+            ...lv,
+            config: {
+              ...lv.config,
+              iconLinked: false,
+              iconSyncBroken: false,
+              syncedIconSnapshot: null,
+              syncedIcon: null,
+              icon: structuredClone(frozen)
+            }
+          }
+        })
+      )
+    }
+
+    if (applyFavicons) {
+      onChange(
+        variants.map((variant) => ({
+          ...variant,
+          config: mergedByLabel.get(variant.label) ?? variant.config
+        }))
+      )
+    }
+
+    if (applyLogos && onLogoChange) {
+      const sourceLogo =
+        matchingLogoVariant?.config ??
+        logoVariants.find((l) => l.label === active.label)?.config ??
+        logoVariants[0]?.config
+      const withShell = (config: LogoConfig): LogoConfig =>
+        sourceLogo ? applyLogoShellToAllOptions(sourceLogo, config, opts) : config
+
+      onLogoChange(
+        logoVariants.map((lv) => {
+          const mergedFav = mergedByLabel.get(lv.label)
+          const baseIcon = lv.config.syncedIcon ?? lv.config.icon
+          if (mergedFav && (lv.config.iconLinked ?? true) && applyFavicons) {
+            let syncedIcon = faviconContentToIconConfig(
+              mergedFav.content,
+              baseIcon,
+              mergedFav
+            )
+            if (!opts.outer) {
+              syncedIcon = {
+                ...syncedIcon,
+                containerColor: baseIcon.containerColor,
+                containerBorderColor: baseIcon.containerBorderColor,
+                shadowColor: baseIcon.shadowColor
+              }
+            }
+            return {
+              ...lv,
+              config: withShell({
+                ...lv.config,
+                iconLinked: true,
+                iconSyncBroken: false,
+                syncedIconSnapshot: null,
+                syncedIcon
+              })
+            }
+          }
+          // Logo-only, or unmatched label: apply onto the logo icon from the
+          // favicon twin (or active favicon mapped through content→icon).
+          const sourceForLogo = mergedFav
+            ? faviconContentToIconConfig(mergedFav.content, baseIcon, mergedFav)
+            : faviconContentToIconConfig(sourceFavicon.content, baseIcon, sourceFavicon)
+          return {
+            ...lv,
+            config: withShell({
+              ...lv.config,
+              iconLinked: false,
+              iconSyncBroken: false,
+              syncedIconSnapshot: null,
+              syncedIcon: null,
+              icon: applyIconToAllOptions(sourceForLogo, baseIcon, opts)
+            })
+          }
+        })
+      )
+    }
+
     setAppliedToAll(true)
     window.setTimeout(() => setAppliedToAll(false), 1600)
   }
@@ -844,7 +941,9 @@ export function FaviconEditor({
           <ApplyToAllBar
             applied={appliedToAll}
             onApply={applySelectedToAll}
-            title="Copy selected parts of this favicon onto every other favicon variant"
+            showFavicon
+            showLogo={logoVariants.length > 0}
+            title="Copy selected parts of this favicon to the chosen apps’ variants"
           />
         )}
       </div>

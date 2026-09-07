@@ -13,6 +13,7 @@ import {
   applyPaintSaveToIcon,
   applyFaviconToAllOptions,
   applyIconToAllOptions,
+  applyLogoShellToAllOptions,
   clearIconUploadedImage,
   iconConfigToFaviconConfig,
   mapFaviconStashToIconStash,
@@ -768,76 +769,143 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
 
   /** Apply checkbox selection from the active icon onto every other variant. */
   const applySelectedToAll = (opts: ApplyToAllOptions) => {
-    if (!safeConfig || !effectiveIcon || variants.length < 2) return
+    if (!safeConfig || !effectiveIcon) return
+    if (!opts.favicon && !opts.logo) return
 
-    if (isSyncedWithFavicon && matchingFaviconVariant) {
-      const sourceFavicon = matchingFaviconVariant.config
-      const mergedByLabel = new Map(
-        faviconVariants.map((variant) => [
-          variant.label,
-          applyFaviconToAllOptions(sourceFavicon, variant.config, opts)
-        ])
-      )
-      if (onFaviconChange) {
-        onFaviconChange(
-          faviconVariants.map((variant) => ({
-            ...variant,
-            config: mergedByLabel.get(variant.label) ?? variant.config
-          }))
-        )
-      }
+    const applyFavicons = !!opts.favicon && !!onFaviconChange && faviconVariants.length > 1
+    const applyLogos = !!opts.logo && variants.length > 1
+    if (!applyFavicons && !applyLogos) return
 
-      const sourceIcon = effectiveIcon
+    // Favicon-only: freeze linked logos at their current look so the sync effect
+    // does not pull the updated favicons into logo previews.
+    if (applyFavicons && !applyLogos) {
       onChange(
         variants.map((variant) => {
-          const mergedFav = mergedByLabel.get(variant.label)
-          if (mergedFav) {
-            const baseIcon =
-              variant.config.syncedIcon ??
-              variant.config.icon ??
-              safeConfig.icon
-            return {
-              ...variant,
-              config: {
-                ...variant.config,
-                iconLinked: true,
-                iconSyncBroken: false,
-                syncedIconSnapshot: null,
-                syncedIcon: faviconContentToIconConfig(
-                  mergedFav.content,
-                  baseIcon,
-                  mergedFav
-                )
-              }
-            }
-          }
+          if (!(variant.config.iconLinked ?? true)) return variant
+          const frozen = variant.config.syncedIcon ?? variant.config.icon
           return {
             ...variant,
             config: {
               ...variant.config,
-              icon: applyIconToAllOptions(sourceIcon, variant.config.icon, opts),
-              syncedIcon: null,
               iconLinked: false,
               iconSyncBroken: false,
-              syncedIconSnapshot: null
+              syncedIconSnapshot: null,
+              syncedIcon: null,
+              icon: structuredClone(frozen)
             }
           }
         })
       )
-    } else {
-      const sourceIcon = effectiveIcon ?? safeConfig.icon
-      onChange(
-        variants.map((variant) => ({
+    }
+
+    if (applyFavicons) {
+      const sourceFavicon =
+        (isSyncedWithFavicon && matchingFaviconVariant
+          ? matchingFaviconVariant.config
+          : null) ??
+        matchingFaviconVariant?.config ??
+        iconConfigToFaviconConfig(effectiveIcon)
+
+      onFaviconChange!(
+        faviconVariants.map((variant) => ({
           ...variant,
-          config: {
-            ...variant.config,
-            icon: applyIconToAllOptions(sourceIcon, variant.config.icon, opts),
-            iconLinked: false,
-            iconSyncBroken: false,
-            syncedIconSnapshot: null
-          }
+          config: applyFaviconToAllOptions(sourceFavicon, variant.config, opts)
         }))
       )
+    }
+
+    if (applyLogos) {
+      const sourceLogo = safeConfig
+      const withShell = (config: LogoConfig): LogoConfig =>
+        applyLogoShellToAllOptions(sourceLogo, config, opts)
+
+      if (isSyncedWithFavicon && matchingFaviconVariant && applyFavicons) {
+        const sourceFavicon = matchingFaviconVariant.config
+        const mergedByLabel = new Map(
+          faviconVariants.map((variant) => [
+            variant.label,
+            applyFaviconToAllOptions(sourceFavicon, variant.config, opts)
+          ])
+        )
+        const sourceIcon = effectiveIcon
+        onChange(
+          variants.map((variant) => {
+            const mergedFav = mergedByLabel.get(variant.label)
+            if (mergedFav) {
+              const baseIcon =
+                variant.config.syncedIcon ??
+                variant.config.icon ??
+                safeConfig.icon
+              let syncedIcon = faviconContentToIconConfig(
+                mergedFav.content,
+                baseIcon,
+                mergedFav
+              )
+              if (!opts.outer) {
+                syncedIcon = {
+                  ...syncedIcon,
+                  containerColor: baseIcon.containerColor,
+                  containerBorderColor: baseIcon.containerBorderColor,
+                  shadowColor: baseIcon.shadowColor
+                }
+              }
+              return {
+                ...variant,
+                config: withShell({
+                  ...variant.config,
+                  iconLinked: true,
+                  iconSyncBroken: false,
+                  syncedIconSnapshot: null,
+                  syncedIcon
+                })
+              }
+            }
+            return {
+              ...variant,
+              config: withShell({
+                ...variant.config,
+                icon: applyIconToAllOptions(sourceIcon, variant.config.icon, opts),
+                syncedIcon: null,
+                iconLinked: false,
+                iconSyncBroken: false,
+                syncedIconSnapshot: null
+              })
+            }
+          })
+        )
+      } else if (isSyncedWithFavicon && matchingFaviconVariant && !applyFavicons) {
+        const sourceIcon = effectiveIcon
+        onChange(
+          variants.map((variant) => {
+            const current = variant.config.syncedIcon ?? variant.config.icon
+            return {
+              ...variant,
+              config: withShell({
+                ...variant.config,
+                icon: applyIconToAllOptions(sourceIcon, current, opts),
+                syncedIcon: null,
+                iconLinked: false,
+                iconSyncBroken: false,
+                syncedIconSnapshot: null
+              })
+            }
+          })
+        )
+      } else {
+        const sourceIcon = effectiveIcon ?? safeConfig.icon
+        onChange(
+          variants.map((variant) => ({
+            ...variant,
+            config: withShell({
+              ...variant.config,
+              icon: applyIconToAllOptions(sourceIcon, variant.config.icon, opts),
+              iconLinked: false,
+              iconSyncBroken: false,
+              syncedIconSnapshot: null
+            })
+          }))
+        )
+      }
     }
 
     setAppliedToAll(true)
@@ -1066,10 +1134,12 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
           <ApplyToAllBar
             applied={appliedToAll}
             onApply={applySelectedToAll}
+            showFavicon={faviconVariants.length > 0}
+            showLogo
             title={
               isSyncedWithFavicon
-                ? 'Copy selected parts of this synced favicon/logo to every favicon and logo variant'
-                : 'Copy selected parts of this logo icon to every logo variant'
+                ? 'Copy selected parts of this synced favicon/logo to the chosen apps’ variants'
+                : 'Copy selected parts of this logo icon to the chosen apps’ variants'
             }
           />
         )}
@@ -1179,7 +1249,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
           style={{ width: panelWidth }}
         >
           <Section title="Text">
-            <TextRow label="Logo title" value={safeConfig.text} placeholder="MyApp" onChange={(v) => setTitleText(v)} />
+            <TextRow label="Site title" value={safeConfig.text} placeholder="MyApp" onChange={(v) => setTitleText(v)} />
             <ToggleRow label="Same text on all variants" value={safeConfig.textShared ?? false} onChange={toggleTitleShared} />
             <FontSelect label="Font" value={safeConfig.fontFamily} onChange={(v) => updateConfig({ fontFamily: v })} />
             <WeightSelect label="Weight" value={safeConfig.fontWeight} onChange={(v) => updateConfig({ fontWeight: v })} />

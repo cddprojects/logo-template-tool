@@ -597,6 +597,11 @@ export interface PaintSession {
    * draws on top.
    */
   punchMasks?: { layer: PaintLayerId; png: string }[]
+  /**
+   * Last Save sync hints (fill colours, offsets). Cleared/stripped when Apply
+   * copies Inner-only so Outer fill hints cannot leak onto other variants.
+   */
+  contentSync?: PaintContentSync
 }
 
 /**
@@ -647,6 +652,13 @@ export interface PaintContentSync {
    * border would redraw an outline Paint already filled away.
    */
   clearContentBorder?: boolean
+  /**
+   * True when Inner Fill was a solid recolour of live content — clear the
+   * content overlay so live fillColor / textColor owns the colour (same idea
+   * as clearOuterOverlay). Leaving a full-face contentPng makes Apply→Colour
+   * look like it recolored the Outer background.
+   */
+  clearContentOverlay?: boolean
 }
 
 /** Payload returned when saving from the paint editor. */

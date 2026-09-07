@@ -57,7 +57,7 @@ export function canvaImageReference(content: FaviconContent): CanvaImageReferenc
   return content.canvaImageReference ?? 'none'
 }
 
-/** Logo "Logo title" field — never the version name from the sidebar. */
+/** Logo "Site title" field — never the version name from the sidebar. */
 export function resolveCanvaAppName(
   logoVariants: { label?: string; config?: { text?: string | null } | null }[],
   activeFaviconLabel?: string

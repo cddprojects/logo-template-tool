@@ -6,6 +6,7 @@ import type {
   FaviconOuterShape,
   IconConfig,
   IconSourceType,
+  LogoConfig,
   OutsideContentSettings,
   OutsideTextSettings,
   PaintContentSync,
@@ -137,7 +138,7 @@ export function extractIconTypeFields(
   return pickKeys(icon as unknown as Record<string, unknown>, ICON_TYPE_KEYS[type] ?? SHARED_CONTENT_KEYS)
 }
 
-/** Inner color slots + “use original” flags kept per target variant when applying inner-only. */
+/** Inner colour slots kept / remapped per target when applying colour. */
 const FAVICON_CONTENT_COLOR_KEYS = [
   'textColor',
   'shapeColor',
@@ -156,8 +157,6 @@ const FAVICON_CONTENT_COLOR_KEYS = [
   'imageColor5',
   'canvaPrimaryColor',
   'canvaSecondaryColor',
-  'contentShadowEnabled',
-  'contentShadowInset',
   'contentShadowColor',
   'contentBorderColor'
 ] as const
@@ -177,10 +176,29 @@ const ICON_CONTENT_COLOR_KEYS = [
   'imageColor3',
   'imageColor4',
   'imageColor5',
-  'contentShadowEnabled',
-  'contentShadowInset',
   'contentShadowColor',
   'contentBorderColor'
+] as const
+
+/** Inner border / shadow settings (not colours) — Shape & settings. */
+const FAVICON_CONTENT_SHADOW_BORDER_SHAPE_KEYS = [
+  'contentShadowEnabled',
+  'contentShadowInset',
+  'contentShadowBlur',
+  'contentShadowSpread',
+  'contentShadowOffsetX',
+  'contentShadowOffsetY',
+  'contentBorderWidth'
+] as const
+
+const ICON_CONTENT_SHADOW_BORDER_SHAPE_KEYS = [
+  'contentShadowEnabled',
+  'contentShadowInset',
+  'contentShadowBlur',
+  'contentShadowSpread',
+  'contentShadowOffsetX',
+  'contentShadowOffsetY',
+  'contentBorderWidth'
 ] as const
 
 /** Icon outer / container fields that must stay on the target when applying inner-only. */
@@ -207,14 +225,14 @@ const ICON_OUTER_KEYS = [
   'transparentFillMode'
 ] as const
 
-/** Outer colour slots kept on the target for “settings keep colors”. */
+/** Outer colour slots (fill, border colour, shadow colour). */
 const ICON_OUTER_COLOR_KEYS = [
   'containerColor',
   'containerBorderColor',
   'shadowColor'
 ] as const
 
-/** Favicon outer colour slots kept on the target for “settings keep colors”. */
+/** Favicon outer colour slots (fill, border colour, shadow colour, SVG paints). */
 const FAVICON_OUTER_COLOR_KEYS = [
   'backgroundColor',
   'borderColor',
@@ -227,7 +245,7 @@ const FAVICON_OUTER_COLOR_KEYS = [
   'outerShapeSvgUseOriginalColors'
 ] as const
 
-/** Favicon outer geometry copied from source while colours stay on the target. */
+/** Favicon outer geometry / settings (border & shadow without colours). */
 const FAVICON_OUTER_GEOMETRY_KEYS = [
   'outerShape',
   'outerShapeImageDataUrl',
@@ -239,6 +257,7 @@ const FAVICON_OUTER_GEOMETRY_KEYS = [
   'borderRadius',
   'transparentBg',
   'shadowEnabled',
+  'shadowInset',
   'shadowBlur',
   'shadowSpread',
   'shadowOffsetX',
@@ -776,13 +795,118 @@ export type ApplyToAllOptions = {
   inner: boolean
   /** Outer / container layer. */
   outer: boolean
+  /** Apply onto favicon variants. */
+  favicon: boolean
+  /** Apply onto logo variants. */
+  logo: boolean
 }
 
 export function applyToAllOptionsActive(opts: ApplyToAllOptions): boolean {
-  return (opts.shape || opts.color) && (opts.inner || opts.outer)
+  return (
+    (opts.shape || opts.color) &&
+    (opts.inner || opts.outer) &&
+    (opts.favicon || opts.logo)
+  )
 }
 
-/** Outer geometry only (no colour slots) for logo icons. */
+/** Logo wordmark / layout — Shape & settings (no colour slots). */
+const LOGO_SHELL_SHAPE_KEYS = [
+  'text',
+  'fontFamily',
+  'fontSize',
+  'fontWeight',
+  'fontItalic',
+  'fontUnderline',
+  'letterSpacing',
+  'secondaryText',
+  'secondaryFontFamily',
+  'secondaryFontSize',
+  'secondaryFontWeight',
+  'secondaryFontItalic',
+  'secondaryFontUnderline',
+  'secondaryLetterSpacing',
+  'layout',
+  'gap',
+  'padding',
+  'titleSubtitleGap',
+  'textShadowEnabled',
+  'textShadowBlur',
+  'textShadowSpread',
+  'textShadowOffsetX',
+  'textShadowOffsetY',
+  'transparentBg'
+] as const
+
+/** Logo wordmark / canvas colour slots. */
+const LOGO_SHELL_COLOR_KEYS = [
+  'textColor',
+  'secondaryTextColor',
+  'textShadowColor',
+  'backgroundColor'
+] as const
+
+/**
+ * Apply Site title and related logo shell fields from `source` onto `target`
+ * when Shape & settings and/or Colour are selected (Logo app only).
+ */
+export function applyLogoShellToAllOptions(
+  source: LogoConfig,
+  target: LogoConfig,
+  opts: Pick<ApplyToAllOptions, 'shape' | 'color'>
+): LogoConfig {
+  if (!opts.shape && !opts.color) return target
+  let next = { ...target }
+  if (opts.shape) {
+    Object.assign(
+      next,
+      pickKeys(source as unknown as Record<string, unknown>, LOGO_SHELL_SHAPE_KEYS)
+    )
+  }
+  if (opts.color) {
+    Object.assign(
+      next,
+      pickKeys(source as unknown as Record<string, unknown>, LOGO_SHELL_COLOR_KEYS)
+    )
+  }
+  return next
+}
+
+/** Drop Outer fill hints from a paint session (Inner-only apply must not recolor Outer). */
+function stripOuterPaintSync(session: PaintSession | null | undefined): PaintSession | null {
+  if (!session) return null
+  if (!session.contentSync) return session
+  const {
+    outerFillColor: _f,
+    outerBorderColor: _b,
+    outerShadowColor: _s,
+    clearOuterOverlay: _c,
+    ...rest
+  } = session.contentSync
+  const nextSync = Object.keys(rest).length ? (rest as PaintContentSync) : undefined
+  return { ...session, contentSync: nextSync }
+}
+
+function preserveIconOuterColors(next: IconConfig, target: IconConfig): IconConfig {
+  return {
+    ...next,
+    ...(pickKeys(
+      target as unknown as Record<string, unknown>,
+      ICON_OUTER_COLOR_KEYS
+    ) as Partial<IconConfig>)
+  }
+}
+
+function preserveFaviconOuterColors(next: FaviconConfig, target: FaviconConfig): FaviconConfig {
+  return {
+    ...next,
+    ...(pickKeys(
+      target as unknown as Record<string, unknown>,
+      FAVICON_OUTER_COLOR_KEYS
+    ) as Partial<FaviconConfig>)
+  }
+}
+
+/** Outer geometry / settings only (border & shadow without colours) for logo icons. */
 const ICON_OUTER_GEOMETRY_KEYS = [
   'containerEnabled',
   'containerShape',
@@ -848,7 +972,11 @@ function mergePaintInnerFromSource(
     linkedTextInDecorations: sourceSession.linkedTextInDecorations,
     paintContentSizeRatio: sourceSession.paintContentSizeRatio,
     paintContentDrawSize: sourceSession.paintContentDrawSize,
-    contentSync: sourceSession.contentSync
+    // Never carry Outer fill sync when only Inner paint is merged.
+    contentSync: stripOuterPaintSync({
+      ...sourceSession,
+      contentSync: sourceSession.contentSync
+    })?.contentSync
   }
 }
 
@@ -905,7 +1033,7 @@ export function applyIconToAllOptions(
   target: IconConfig,
   opts: ApplyToAllOptions
 ): IconConfig {
-  if (!applyToAllOptionsActive(opts)) return target
+  if (!applyToAllOptionsActive({ ...opts, favicon: true, logo: true })) return target
 
   if (opts.shape && opts.color && opts.inner && opts.outer) {
     return structuredClone(source)
@@ -945,6 +1073,14 @@ export function applyIconToAllOptions(
         iconPrimaryFill(source),
         source.secondaryColor || ''
       ) as IconConfig['contentTypeStash']
+      // Colour must not rewrite border/shadow settings (width, blur, on/off…).
+      Object.assign(
+        next,
+        pickKeys(
+          target as unknown as Record<string, unknown>,
+          ICON_CONTENT_SHADOW_BORDER_SHAPE_KEYS
+        )
+      )
     }
   }
 
@@ -972,6 +1108,12 @@ export function applyIconToAllOptions(
     }
   }
 
+  // Belt-and-suspenders: Inner-only must never rewrite Outer colour slots.
+  if (!opts.outer) {
+    next = preserveIconOuterColors(next, target)
+    next.paintSession = stripOuterPaintSync(next.paintSession)
+  }
+
   return next
 }
 
@@ -983,7 +1125,7 @@ export function applyFaviconToAllOptions(
   target: FaviconConfig,
   opts: ApplyToAllOptions
 ): FaviconConfig {
-  if (!applyToAllOptionsActive(opts)) return target
+  if (!applyToAllOptionsActive({ ...opts, favicon: true, logo: true })) return target
 
   if (opts.shape && opts.color && opts.inner && opts.outer) {
     return structuredClone(source)
@@ -1014,7 +1156,13 @@ export function applyFaviconToAllOptions(
     } else if (!opts.shape && opts.color) {
       next = {
         ...next,
-        content: withFaviconTargetColors(next.content, source.content),
+        content: {
+          ...withFaviconTargetColors(next.content, source.content),
+          ...(pickKeys(
+            target.content as unknown as Record<string, unknown>,
+            FAVICON_CONTENT_SHADOW_BORDER_SHAPE_KEYS
+          ) as Partial<FaviconContent>)
+        },
         contentTypeStash: mergeTypeStashColors(
           source.contentTypeStash,
           next.contentTypeStash,
@@ -1051,6 +1199,11 @@ export function applyFaviconToAllOptions(
         pickKeys(source as unknown as Record<string, unknown>, FAVICON_OUTER_COLOR_KEYS)
       )
     }
+  }
+
+  if (!opts.outer) {
+    next = preserveFaviconOuterColors(next, target)
+    next.paintSession = stripOuterPaintSync(next.paintSession)
   }
 
   return next
@@ -1728,9 +1881,15 @@ export function buildPaintContentSync(opts: {
     }
     // Heavy Inner Fill often paints over a baked content border; clear the live
     // border so it does not reappear as an outline outside Paint.
+    // Also drop the content overlay when it largely covers the live Inner — hand
+    // the colour to live settings (same as Outer Fill → clearOuterOverlay) so
+    // Apply→Colour cannot paste a full-face contentPng that looks like Outer bg.
     if (opts.contentBase) {
       const cover = overlayCoverRatio(opts.contentBase, opts.contentOverlay)
-      if (cover >= 0.35) sync.clearContentBorder = true
+      if (cover >= 0.35) {
+        sync.clearContentBorder = true
+        sync.clearContentOverlay = true
+      }
     }
   }
 
