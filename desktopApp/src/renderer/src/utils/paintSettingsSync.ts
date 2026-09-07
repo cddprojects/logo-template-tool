@@ -1722,6 +1722,45 @@ function textInkCenter(v: PaintVector): { cx: number; cy: number } | null {
   return localInk
 }
 
+/**
+ * Top-left pts so the new text/font keeps the same ink center as `prev`.
+ * Needed when linked letters were rotated/flipped in Paint: transform pivots on
+ * ink center, so leaving pts[0] fixed while metrics change jumps the glyph.
+ */
+export function linkedTextPtsPreservingInkCenter(
+  prev: PaintVector,
+  next: {
+    text: string
+    fontFamily: string
+    fontSize: number
+    weight: number
+    bold: boolean
+    italic: boolean
+    letterSpacing: number
+    lineHeight?: number
+  }
+): { x: number; y: number } | null {
+  const p0 = prev.pts?.[0]
+  if (!p0) return null
+  const oldInk = textInkCenter(prev)
+  if (!oldInk) return { x: p0.x, y: p0.y }
+  const probe: PaintVector = {
+    ...prev,
+    text: next.text,
+    fontFamily: next.fontFamily,
+    fontSize: next.fontSize,
+    weight: next.weight,
+    bold: next.bold,
+    italic: next.italic,
+    letterSpacing: next.letterSpacing,
+    lineHeight: next.lineHeight ?? prev.lineHeight ?? 1.28,
+    pts: [{ x: 0, y: 0 }]
+  }
+  const local = textInkCenter(probe)
+  if (!local) return { x: p0.x, y: p0.y }
+  return { x: oldInk.cx - local.cx, y: oldInk.cy - local.cy }
+}
+
 /** Top-left anchor so glyph ink lands at outside offset (matches paint seeding). */
 export function outsideTextAnchorPt(
   settings: OutsideTextSettings,

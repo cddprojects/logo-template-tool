@@ -1,6 +1,6 @@
 import type { OutsideTextSettings, PaintLayerId, PaintSession, PaintVector } from '../types'
 import { loadCachedImage } from './iconUtils'
-import { outsideShadowToPaintVector, isContentProxyVector, outsideTextAnchorPt, stripContentProxyVectors } from './paintSettingsSync'
+import { outsideShadowToPaintVector, isContentProxyVector, outsideTextAnchorPt, linkedTextPtsPreservingInkCenter, stripContentProxyVectors } from './paintSettingsSync'
 import {
   compositeInnerContentDecor,
   contentVectorsForLiveRender,
@@ -9,6 +9,7 @@ import {
   renderPaintTextVector,
   type InnerContentDecor
 } from './paintVectorRender'
+import { reshapeIsApplied } from './paintReshape'
 import { takeCanvas, releaseCanvas } from './canvasPool'
 
 export type { InnerContentDecor }
@@ -399,22 +400,38 @@ export function syncOutsideLettersIntoPaintSession(
       continue
     }
     const shadow = outsideShadowToPaintVector(letters, res, drawArea)
-    const anchor = linkedTextHasPaintTransform(v)
-      ? v.pts?.[0]
-      : outsideTextAnchorPt(letters, res, drawArea)
     const keepTransparent = isTransparentPaintColor(v.color ?? '')
     const textChanged = letterTextOrFontChanged(v)
-    vectors.push({
-      ...v,
+    const nextText = {
       text: letters.text ?? '',
-      // Keep transparent paint colour (whole-glyph see-through); otherwise sync fill.
-      color: keepTransparent ? v.color : letters.textColor || v.color || '#ffffff',
       fontFamily: letters.fontFamily || v.fontFamily || 'Inter',
       fontSize,
       weight: w,
       bold: w >= 700,
       italic: !!letters.fontItalic,
       letterSpacing,
+      lineHeight: v.lineHeight ?? 1.28
+    }
+    // Rotated / flipped letters pivot on ink center. Re-anchor pts when text or
+    // font metrics change so the visual center does not jump. Reshape quads are
+    // absolute — leave pts alone there.
+    const reshaped = reshapeIsApplied(v.reshapeQuad, v.reshapeSrc)
+    const anchor = linkedTextHasPaintTransform(v)
+      ? reshaped || !textChanged
+        ? v.pts?.[0]
+        : linkedTextPtsPreservingInkCenter(v, nextText) ?? v.pts?.[0]
+      : outsideTextAnchorPt(letters, res, drawArea)
+    vectors.push({
+      ...v,
+      text: nextText.text,
+      // Keep transparent paint colour (whole-glyph see-through); otherwise sync fill.
+      color: keepTransparent ? v.color : letters.textColor || v.color || '#ffffff',
+      fontFamily: nextText.fontFamily,
+      fontSize: nextText.fontSize,
+      weight: nextText.weight,
+      bold: nextText.bold,
+      italic: nextText.italic,
+      letterSpacing: nextText.letterSpacing,
       // Glyph-shaped holes cannot follow a different string without inventing
       // every B/O counter — clear them so live letters stay clean.
       ...(textChanged
