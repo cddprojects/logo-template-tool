@@ -464,8 +464,15 @@ export interface PaintVector {
   linkedOutsideText?: boolean
   /**
    * Stamp/shape that stands in for live Inner content (position/size/color sync).
+   * Paint-ephemeral raster — converted to contentProxySlot on Save.
    */
   contentBound?: boolean
+  /**
+   * Hierarchy placeholder for live Inner after Save (no raster).
+   * Preserves z-order / parentId / layer across Paint sessions; rehydrated to
+   * contentBound on re-enter.
+   */
+  contentProxySlot?: boolean
   /** Tight unwarped source rect in canvas space (TL + size). */
   reshapeSrc?: { x: number; y: number; w: number; h: number }
   /** Destination quad in canvas space: TL, TR, BR, BL. */

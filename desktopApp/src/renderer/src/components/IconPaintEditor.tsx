@@ -25,7 +25,7 @@ import {
   emptyOverlayPng,
   normalizeLinkedTextVectors,
   proxyBoxFromSizeRatio,
-  stripContentProxyVectors
+  persistContentProxyVectors
 } from '../utils/paintSettingsSync'
 import { bakeCanvasDropShadow } from '../utils/paintVectorRender'
 import {
@@ -443,6 +443,8 @@ interface LineObj {
   /** Seeded from outside letters — save keeps content type as letters. */
   linkedOutsideText?: boolean
   contentBound?: boolean
+  /** Saved hierarchy placeholder for live Inner (no raster). */
+  contentProxySlot?: boolean
   /** Tight unwarped source rect in canvas space (TL + size). */
   reshapeSrc?: { x: number; y: number; w: number; h: number }
   /** Destination quad in canvas space: TL, TR, BR, BL. */
@@ -765,7 +767,7 @@ async function ensureStampImageDecoded(dataUrl: string): Promise<HTMLImageElemen
 
 /** Live Inner letters / contentBound proxy — fillable material, not session walls. */
 function isLiveInnerVector(l: LineObj): boolean {
-  return !!l.linkedOutsideText || !!l.contentBound
+  return !!l.linkedOutsideText || !!l.contentBound || !!l.contentProxySlot
 }
 
 type PaintSlotStep =
@@ -2439,8 +2441,9 @@ function applyOutsideContentToProxy(
       { x: cx + w / 2, y: cy + h / 2 }
     ],
     contentBound: true,
+    contentProxySlot: undefined,
     name: l.name || 'Inner content',
-    layer: 'content',
+    layer: l.layer ?? 'content',
     ...shadow
   }
 }
@@ -6358,11 +6361,16 @@ export function IconPaintEditor({
       }
 
       if (initialVectors && initialVectors.length) {
-        // Drop any persisted contentBound stamps — they must stay Paint-ephemeral
-        // so they cannot double with live Inner settings outside.
+        // Keep contentProxySlot placeholders so live Inner rehydrates in the same
+        // stack position. Drop any accidental contentBound rasters (sanitize should
+        // already have converted them).
         restored = cloneLines(
           normalizeLinkedTextVectors(
-            stripContentProxyVectors(initialVectors),
+            initialVectors.map((v) =>
+              v.contentBound
+                ? { ...v, contentBound: undefined, contentProxySlot: true, imageDataUrl: undefined }
+                : v
+            ),
             null
           ) as unknown as LineObj[]
         ).map((l) => ({
@@ -6381,13 +6389,14 @@ export function IconPaintEditor({
 
       // Non-letter Inner: lift centered bake into a movable/resizable contentBound stamp.
       // Skip only when Save baked Inner into decorations (see-through / punch / warp).
-      // User-added shapes/polys on the content layer must NOT block reseeding — otherwise
-      // Save → re-open drops the live geo/lucide stand-in while keeping the extra paint.
+      // Rehydrate contentProxySlot in place so z-order / nesting survive Save → re-open.
       if (outsideAll?.kind === 'proxy' && !initialContentBakedInDecorations) {
         const crop = cropOpaqueToDataUrl(baseCt.canvas)
         if (crop) {
           const existing = restored.find(
-            (l) => l.contentBound && (l.type === 'stamp' || l.type === 'shape')
+            (l) =>
+              (l.contentBound || l.contentProxySlot) &&
+              (l.type === 'stamp' || l.type === 'shape')
           )
           if (existing) {
             const next = applyOutsideContentToProxy(existing, outsideAll, W, crop, innerDraw)
@@ -6411,8 +6420,9 @@ export function IconPaintEditor({
           })
         }
       } else if (outsideAll?.kind === 'proxy' && initialContentBakedInDecorations) {
-        // Baked Inner owns the pixels — keep live base clear.
+        // Baked Inner owns the pixels — keep live base clear; drop leftover slots.
         baseCt.clearRect(0, 0, W, H)
+        restored = restored.filter((l) => !l.contentProxySlot && !l.contentBound)
       }
 
       // Never auto-select on paint open — user picks what to edit.
@@ -9182,7 +9192,7 @@ export function IconPaintEditor({
     c.width = W; c.height = H
     const x = c.getContext('2d')!
     const show = (l: LineObj) =>
-      (includeContentBound || !l.contentBound) &&
+      (includeContentBound || (!l.contentBound && !l.contentProxySlot)) &&
       // Letter-bake stamps keep linkedOutsideText for TE→BO sync, but they are
       // already rasterized paint results — always include them when baking content
       // (otherwise Save skips the stamp, empties decorations, and live white returns).
@@ -13859,9 +13869,9 @@ export function IconPaintEditor({
       const ctx = ct.getContext('2d')
       if (ctx) ctx.clearRect(0, 0, W, H)
     }
-    // contentBound proxies are Paint-only: sync size/offset/shadow, then drop them
-    // so outside live Inner settings never double with a leftover raster stamp.
-    const persistVectors = stripContentProxyVectors(vectors).map((v) => {
+    // contentBound rasters → hierarchy slots so z-order / nesting survive re-open
+    // without leaving a raster that would double with live Inner outside.
+    const persistVectors = persistContentProxyVectors(vectors).map((v) => {
       const line = linesRef.current.find((l) => l.id === v.id)
       if (!line) return v
       const hasPunch = hasPunchCoverage(line.id)
@@ -13928,11 +13938,15 @@ export function IconPaintEditor({
       (Math.abs(linked.rot ?? 0) > 0.001 || hasContentSeeThrough || hasContentPunchEnclosed)
     )
     const hasLiveInnerStandIn = vectors.some(
-      (v) => !!v.contentBound || (v.type === 'text' && !!v.linkedOutsideText)
+      (v) =>
+        !!v.contentBound ||
+        !!v.contentProxySlot ||
+        (v.type === 'text' && !!v.linkedOutsideText)
     )
     const hasReplacementContent = persistVectors.some((v) => {
       if ((v.layer ?? 'content') !== 'content') return false
       if ((v.visible ?? v.editable ?? true) === false) return false
+      if (v.contentProxySlot || v.contentBound) return false
       return (
         v.type === 'stamp' ||
         v.type === 'shape' ||

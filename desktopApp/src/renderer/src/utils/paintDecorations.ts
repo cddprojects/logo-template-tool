@@ -1,6 +1,6 @@
 import type { OutsideTextSettings, PaintLayerId, PaintSession, PaintVector } from '../types'
 import { loadCachedImage } from './iconUtils'
-import { outsideShadowToPaintVector, isContentProxyVector, outsideTextAnchorPt, linkedTextPtsPreservingInkCenter, stripContentProxyVectors } from './paintSettingsSync'
+import { outsideShadowToPaintVector, isContentProxyVector, outsideTextAnchorPt, linkedTextPtsPreservingInkCenter, persistContentProxyVectors } from './paintSettingsSync'
 import {
   compositeInnerContentDecor,
   contentVectorsForLiveRender,
@@ -376,6 +376,7 @@ export function syncOutsideLettersIntoPaintSession(
     v.type === 'stamp' &&
     !v.punchMask &&
     !v.contentBound &&
+    !v.contentProxySlot &&
     !v.linkedOutsideText &&
     (v.layer ?? 'content') === 'content'
 
@@ -495,7 +496,7 @@ export function syncOutsideLettersIntoPaintSession(
   }
 }
 
-/** True when a session still carries an ephemeral Inner content proxy. */
+/** True when a session still carries an ephemeral Inner content proxy raster. */
 export function sessionHasContentProxy(
   session: PaintSession | null | undefined
 ): boolean {
@@ -880,7 +881,7 @@ export async function applyPaintDecorations(
   await drawOverlayLayers(ctx, session, x, y, size, shapeFallback)
 }
 
-/** Remove persisted contentBound proxies from a session (safe to call on load/save). */
+/** Convert contentBound rasters to hierarchy slots (safe on load/save). */
 export function sanitizePaintSessionProxies(
   session: PaintSession | null | undefined
 ): PaintSession | null | undefined {
@@ -900,17 +901,9 @@ export function sanitizePaintSessionProxies(
     }
   }
   if (!sessionHasContentProxy(next)) return next
+  // Keep stack order: turn rasters into slots instead of dropping the stand-in.
   return {
     ...next,
-    vectors: stripContentProxyVectors(next.vectors),
-    // Keep baked decorations when Inner was rasterized (see-through / punch edits).
-    decorationsPng: next.contentBakedInDecorations ? next.decorationsPng : undefined,
-    containerDecorationsPng: next.contentBakedInDecorations
-      ? next.containerDecorationsPng
-      : undefined,
-    contentDecorationsPng: next.contentBakedInDecorations
-      ? next.contentDecorationsPng
-      : undefined,
-    punchMasks: next.punchMasks
+    vectors: persistContentProxyVectors(next.vectors)
   }
 }

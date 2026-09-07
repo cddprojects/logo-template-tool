@@ -539,8 +539,11 @@ function recolorContentVectors(
  */
 function isPaintInnerGeometryVector(v: PaintVector): boolean {
   if ((v.layer ?? 'content') !== 'content') return false
-  if (!isContentBoundVector(v)) return true
-  return paintVectorHasDisplayTransform(v)
+  // Live Inner stand-ins (raster or slot) only copy when Paint-warped.
+  if (v.contentBound || v.contentProxySlot || v.linkedOutsideText) {
+    return paintVectorHasDisplayTransform(v)
+  }
+  return true
 }
 
 function isPaintContainerLayerVector(v: PaintVector): boolean {
@@ -1210,12 +1213,17 @@ export function applyFaviconToAllOptions(
 }
 
 export function isContentBoundVector(v: PaintVector): boolean {
-  return !!(v.linkedOutsideText || v.contentBound)
+  return !!(v.linkedOutsideText || v.contentBound || v.contentProxySlot)
 }
 
-/** Raster/shape proxy for live Inner settings — must not persist outside Paint. */
+/** Active Paint raster proxy for live Inner — must not linger with pixels outside Paint. */
 export function isContentProxyVector(v: PaintVector): boolean {
   return !!v.contentBound
+}
+
+/** Hierarchy-only stand-in for live Inner after Save (no imageDataUrl). */
+export function isContentProxySlotVector(v: PaintVector): boolean {
+  return !!v.contentProxySlot
 }
 
 export function splitContentBoundVectors(vectors: PaintVector[]): {
@@ -1232,11 +1240,38 @@ export function splitContentBoundVectors(vectors: PaintVector[]): {
 }
 
 /**
- * Drop ephemeral Inner content proxies (contentBound stamps).
+ * Drop ephemeral Inner content proxies (contentBound stamps) and hierarchy slots.
  * Keep linkedOutsideText — letters stay editable as vectors across sessions.
  */
 export function stripContentProxyVectors(vectors: PaintVector[] | null | undefined): PaintVector[] {
-  return (vectors ?? []).filter((v) => !isContentProxyVector(v))
+  return (vectors ?? []).filter((v) => !isContentProxyVector(v) && !isContentProxySlotVector(v))
+}
+
+/**
+ * Convert contentBound rasters into hierarchy slots for Save.
+ * Keeps id / parentId / belowBase / layer / pose so Paint reopen restores stack order.
+ */
+export function persistContentProxyVectors(
+  vectors: PaintVector[] | null | undefined
+): PaintVector[] {
+  return (vectors ?? []).map((v) => {
+    if (isContentProxySlotVector(v) && !isContentProxyVector(v)) {
+      const { imageDataUrl: _img, paintStrokes: _ps, contentBound: _cb, ...rest } = v
+      return { ...rest, contentProxySlot: true, contentBound: undefined, imageDataUrl: undefined }
+    }
+    if (!isContentProxyVector(v)) return v
+    const { imageDataUrl: _img, paintStrokes: _ps, contentBound: _cb, ...rest } = v
+    return {
+      ...rest,
+      type: 'stamp',
+      stampSource: rest.stampSource ?? 'image',
+      contentProxySlot: true,
+      contentBound: undefined,
+      imageDataUrl: undefined,
+      name: rest.name || 'Inner content',
+      layer: rest.layer ?? 'content'
+    }
+  })
 }
 
 /**

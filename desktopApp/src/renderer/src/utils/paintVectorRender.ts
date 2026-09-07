@@ -427,7 +427,7 @@ function isVectorVisible(v: PaintVector): boolean {
 /** Paint vectors that must draw live on the content layer (outside preview). */
 export function contentVectorsForLiveRender(vectors: PaintVector[] | undefined): PaintVector[] {
   return (vectors ?? []).filter((v) => {
-    if (v.parentId || v.contentBound || !isVectorVisible(v)) return false
+    if (v.parentId || v.contentBound || v.contentProxySlot || !isVectorVisible(v)) return false
     if ((v.layer ?? 'content') !== 'content') return false
     // Unrotated linked letters stay as live Inner text (keeps content shadow).
     if (v.linkedOutsideText) return linkedTextHasPaintTransform(v)
