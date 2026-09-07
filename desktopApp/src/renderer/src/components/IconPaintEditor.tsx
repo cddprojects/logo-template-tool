@@ -1035,28 +1035,28 @@ function drawEnclosedHoleObjectFlat(
   }
 }
 
-function stampRenderDataUrl(l: LineObj, width: number, height: number): string {
-  if (!l.keepStrokeOnResize || !l.sourceSvgMarkup || !l.sourceStampSize) {
-    return l.imageDataUrl ?? ''
-  }
+/**
+ * Stroke-locked SVG markup for library stamps (fixed stroke px under resize).
+ * Returns null when the stamp should just use its baked PNG.
+ */
+function buildStrokeLockedSvgMarkup(
+  l: LineObj,
+  width: number,
+  height: number
+): string | null {
+  if (!l.keepStrokeOnResize || !l.sourceSvgMarkup || !l.sourceStampSize) return null
   const dw = Math.max(1, Math.round(width))
   const dh = Math.max(1, Math.round(height))
-  // Placement raster is already drawn at the authored size via drawSvgOnCanvas.
-  // Re-decoding the SVG as an <img> would use Lucide's intrinsic 100×100 (or
-  // viewBox-only 300×150) and bake a much thicker non-scaling stroke — that
-  // reads as a border once the 512 paint flatten is scaled onto a small logo.
+  // Placement raster matches authored size — avoid re-decoding SVG there.
   if (
     l.imageDataUrl &&
     Math.abs(dw - l.sourceStampSize) < 1 &&
     Math.abs(dh - l.sourceStampSize) < 1
   ) {
-    return l.imageDataUrl
+    return null
   }
-  // A numeric inverse scale only preserves strokes while width and height scale
-  // equally. Free corner-resizing is anisotropic, so horizontal and vertical
-  // strokes otherwise end up with different apparent widths. Convert the
-  // original stroke to its initial display-pixel width and let SVG's
-  // non-scaling-stroke keep that width under either axis scale.
+  // Free corner-resizing is anisotropic — convert original stroke to initial
+  // display-pixel width and keep it via non-scaling-stroke.
   const viewBox = l.sourceSvgMarkup.match(
     /viewBox=(["'])\s*[-+]?\d*\.?\d+(?:[ ,]+)[-+]?\d*\.?\d+(?:[ ,]+)([-+]?\d*\.?\d+)(?:[ ,]+)([-+]?\d*\.?\d+)\s*\1/i
   )
@@ -1073,15 +1073,85 @@ function stampRenderDataUrl(l: LineObj, width: number, height: number): string {
     /<(path|line|polyline|polygon|circle|ellipse|rect)\b(?![^>]*\bvector-effect=)/gi,
     '<$1 vector-effect="non-scaling-stroke"'
   )
-  // Rasterize at the current box so non-scaling-stroke is in display pixels,
-  // not the SVG's tiny intrinsic size.
   svg = svg.replace(/<svg([^>]*)>/i, (_match, attrs: string) => {
     const cleaned = String(attrs)
       .replace(/\s+width\s*=\s*["'][^"']*["']/gi, '')
       .replace(/\s+height\s*=\s*["'][^"']*["']/gi, '')
     return `<svg${cleaned} width="${dw}" height="${dh}">`
   })
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
+  return svg
+}
+
+/** Last stroke-locked (or placement) raster shown for a stamp — used while a new size decodes. */
+const stampStrokeLiveCache = new Map<string, HTMLImageElement>()
+/** Stamp ids mid box-resize — scale live cache instead of re-locking stroke every frame. */
+const stampStrokeRelockPaused = new Set<string>()
+
+function stampRenderDataUrl(l: LineObj, width: number, height: number): string {
+  if (!l.keepStrokeOnResize || !l.sourceSvgMarkup || !l.sourceStampSize) {
+    return l.imageDataUrl ?? ''
+  }
+  // Live resize: scale the last bitmap instead of re-decoding SVG every mousemove
+  // (async fallback to the placement PNG made strokes jump constantly).
+  if (stampStrokeRelockPaused.has(l.id)) {
+    return l.imageDataUrl ?? ''
+  }
+  const markup = buildStrokeLockedSvgMarkup(l, width, height)
+  if (!markup) return l.imageDataUrl ?? ''
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`
+}
+
+function pauseStampStrokeRelock(l: LineObj): void {
+  if (l.type !== 'stamp' || !l.keepStrokeOnResize || !l.sourceSvgMarkup) return
+  if (l.pts.length >= 2) {
+    const w = Math.max(1, Math.abs(l.pts[1].x - l.pts[0].x))
+    const h = Math.max(1, Math.abs(l.pts[1].y - l.pts[0].y))
+    const url = stampRenderDataUrl(l, w, h)
+    const cached = url ? stampImgCache.get(url) : undefined
+    if (cached && cached.complete && cached.naturalWidth > 0) {
+      stampStrokeLiveCache.set(l.id, cached)
+    } else if (l.imageDataUrl) {
+      const img = ensureStampImage(l.imageDataUrl)
+      if (img) stampStrokeLiveCache.set(l.id, img)
+    }
+  } else if (l.imageDataUrl) {
+    const img = ensureStampImage(l.imageDataUrl)
+    if (img) stampStrokeLiveCache.set(l.id, img)
+  }
+  stampStrokeRelockPaused.add(l.id)
+}
+
+/** Bake stroke-locked SVG into imageDataUrl at the stamp's current box (after resize). */
+async function rebakeStrokeLockedStamp(l: LineObj): Promise<boolean> {
+  if (
+    l.type !== 'stamp' ||
+    !l.keepStrokeOnResize ||
+    !l.sourceSvgMarkup ||
+    !l.sourceStampSize ||
+    l.pts.length < 2
+  ) {
+    return false
+  }
+  const a = l.pts[0]
+  const b = l.pts[1]
+  const dw = Math.max(1, Math.round(Math.abs(b.x - a.x)))
+  const dh = Math.max(1, Math.round(Math.abs(b.y - a.y)))
+  // Skip the "at source size use PNG" short-circuit so the bake always locks strokes.
+  const locked = buildStrokeLockedSvgMarkup({ ...l, imageDataUrl: undefined }, dw, dh)
+  if (!locked) return false
+  const canvas = document.createElement('canvas')
+  canvas.width = dw
+  canvas.height = dh
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return false
+  await drawSvgOnCanvas(ctx, locked, 0, 0, dw, dh)
+  const dataUrl = canvas.toDataURL('image/png')
+  l.imageDataUrl = dataUrl
+  // Keep sourceStampSize as the original stroke-lock reference (placement size).
+  // Updating it here would thicken locked strokes on the next resize.
+  const img = ensureStampImage(dataUrl)
+  if (img) stampStrokeLiveCache.set(l.id, img)
+  return true
 }
 
 const LINE_TYPES: { value: LineType; label: string }[] = [
@@ -3833,15 +3903,23 @@ function renderLineBody(ctx: CanvasRenderingContext2D, l: LineObj): void {
     const a = l.pts[0], b = l.pts[1]
     const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
     const w = Math.max(1, Math.abs(b.x - a.x)), h = Math.max(1, Math.abs(b.y - a.y))
-    const renderUrl = stampRenderDataUrl(l, w, h)
-    // A stroke-locked SVG is decoded asynchronously at each new size. Keep the
-    // previous raster visible during that short decode so resizing never flickers.
-    const img = ensureStampImage(renderUrl) ?? ensureStampImage(l.imageDataUrl)
+    const softSvg = !!(l.sourceSvgMarkup && l.keepStrokeOnResize)
+    let img: HTMLImageElement | null = null
+    if (softSvg && stampStrokeRelockPaused.has(l.id)) {
+      // Mid-resize: scale the last stable raster — never flip to a half-decoded SVG.
+      img = stampStrokeLiveCache.get(l.id) ?? ensureStampImage(l.imageDataUrl)
+    } else {
+      const renderUrl = stampRenderDataUrl(l, w, h)
+      // A stroke-locked SVG is decoded asynchronously at each new size. Prefer the
+      // last good locked raster over the placement PNG so strokes do not jump.
+      const fresh = renderUrl ? ensureStampImage(renderUrl) : null
+      if (fresh) stampStrokeLiveCache.set(l.id, fresh)
+      img = fresh ?? stampStrokeLiveCache.get(l.id) ?? ensureStampImage(l.imageDataUrl)
+    }
     if (img) {
       ctx.save()
       // Paint-edited rasters must stay crisp — smoothing + later Fill hardens AA
       // outward and blurs sections that were not clicked.
-      const softSvg = !!(l.sourceSvgMarkup && l.keepStrokeOnResize)
       ctx.imageSmoothingEnabled = softSvg
       if (softSvg) ctx.imageSmoothingQuality = 'high'
       if (shouldDrawObjectShadow(l)) {
@@ -8091,6 +8169,10 @@ export function IconPaintEditor({
             const snapshotResize =
               sel.pts.length === 2 &&
               (sel.type === 'shape' || sel.type === 'stamp' || sel.type === 'group')
+            pauseStampStrokeRelock(sel)
+            for (const child of linesRef.current) {
+              if (child.parentId === sel.id) pauseStampStrokeRelock(child)
+            }
             lineDragRef.current = {
               kind: 'handle',
               id: sel.id,
@@ -8108,6 +8190,10 @@ export function IconPaintEditor({
           }
           const ei = bboxEdgeAt(sel, pt)
           if (ei >= 0) {
+            pauseStampStrokeRelock(sel)
+            for (const child of linesRef.current) {
+              if (child.parentId === sel.id) pauseStampStrokeRelock(child)
+            }
             lineDragRef.current = {
               kind: 'bboxEdge',
               id: sel.id,
@@ -8864,6 +8950,27 @@ export function IconPaintEditor({
               .map((item) => item.id)
           : [dr.id]
       syncHolesAfterGeomChange(linesRef.current as HoleItem[], W, H, holeGeom, ids)
+    }
+    // Library stamps: rebake stroke-locked raster once after box resize (live drag
+    // only scaled the previous bitmap to avoid per-frame stroke jumps).
+    if (dr.kind === 'handle' || dr.kind === 'bboxEdge') {
+      const pausedIds = [...stampStrokeRelockPaused]
+      const toBake = pausedIds
+        .map((id) => linesRef.current.find((item) => item.id === id))
+        .filter((item): item is LineObj => !!item && item.type === 'stamp')
+      if (toBake.length) {
+        // Stay paused until bake finishes so redraw does not kick off SVG churn.
+        void Promise.all(toBake.map((item) => rebakeStrokeLockedStamp(item))).then(() => {
+          for (const id of pausedIds) stampStrokeRelockPaused.delete(id)
+          commitLines([...linesRef.current])
+          redrawLinesRef.current()
+          drawHandles()
+        })
+      } else {
+        stampStrokeRelockPaused.clear()
+      }
+    } else {
+      stampStrokeRelockPaused.clear()
     }
     commitLines([...linesRef.current])
     redrawLines(); drawHandles()
@@ -12682,13 +12789,17 @@ export function IconPaintEditor({
     if (!svg.includes('<svg')) return
     const paintColor = firstSolidColor(color)
     svg = applySvgColor(svg, paintColor)
-    const sizePx = Math.round(containerDraw * 0.35)
+    // Display size stays modest; rasterize near full Outer/content size so the
+    // stamp stays crisp under paint-canvas CSS scale and when resized (not a
+    // lag tradeoff — one SVG decode on place is cheap).
+    const displayPx = Math.max(16, Math.round(containerDraw * 0.35))
+    const rasterPx = Math.min(W, Math.max(displayPx, Math.round(containerDraw)))
     const canvas = document.createElement('canvas')
-    canvas.width = sizePx
-    canvas.height = sizePx
+    canvas.width = rasterPx
+    canvas.height = rasterPx
     const ctx = canvas.getContext('2d')!
-    await drawSvgOnCanvas(ctx, svg, 0, 0, sizePx, sizePx)
-    placeStampFromCanvas(canvas, at, source, svg)
+    await drawSvgOnCanvas(ctx, svg, 0, 0, rasterPx, rasterPx)
+    placeStampFromCanvas(canvas, at, source, svg, displayPx)
   }
 
   /** Place a raster stamp as a pointer-selectable vector (library icons, custom SVG). */
@@ -12696,7 +12807,9 @@ export function IconPaintEditor({
     canvas: HTMLCanvasElement,
     at?: Pt,
     source: 'library' | 'image' = 'image',
-    sourceSvgMarkup?: string
+    sourceSvgMarkup?: string,
+    /** On-canvas box size when the raster is higher-res than the intended stamp. */
+    displaySize?: number
   ) => {
     // Drop any uncommitted float so it doesn't fight the new stamp.
     if (floatRef.current) {
@@ -12705,13 +12818,15 @@ export function IconPaintEditor({
       const p = previewRef.current?.getContext('2d')
       if (p) p.clearRect(0, 0, W, H)
     }
-    const dw = Math.max(4, canvas.width)
-    const dh = Math.max(4, canvas.height)
+    const aspect = canvas.height > 0 ? canvas.width / canvas.height : 1
+    const dw = Math.max(4, displaySize ?? canvas.width)
+    const dh = Math.max(4, displaySize != null ? Math.round(displaySize / aspect) : canvas.height)
     const dataUrl = canvas.toDataURL('image/png')
-    ensureStampImage(dataUrl)
+    const id = genId()
+    const placedImg = ensureStampImage(dataUrl)
+    if (placedImg) stampStrokeLiveCache.set(id, placedImg)
     const x = at ? Math.round(at.x - dw / 2) : Math.round((W - dw) / 2)
     const y = at ? Math.round(at.y - dh / 2) : Math.round((H - dh) / 2)
-    const id = genId()
     const nl: LineObj = {
       id,
       type: 'stamp',
