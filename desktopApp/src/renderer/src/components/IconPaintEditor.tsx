@@ -5124,16 +5124,24 @@ function ShapePreview({ kind, px = 26 }: { kind: ShapeKind; px?: number }): JSX.
 }
 
 function ShapeMenu({
-  title, items, current, onPick, freePoly
+  title, items, current, onPick, freePoly, anchorRect
 }: {
   title: string
   items: { value: ShapeKind; label: string }[]
   current: ShapeKind
   onPick: (k: ShapeKind) => void
   freePoly?: { n: number; onN: (v: number) => void; onPick: () => void; active: boolean }
+  /** Button rect — menu is `fixed` so it is not clipped by the two-row toolbar. */
+  anchorRect: DOMRect
 }): JSX.Element {
+  const menuW = 264
+  const left = Math.max(8, Math.min(anchorRect.left, window.innerWidth - menuW - 8))
+  const top = anchorRect.bottom + 4
   return (
-    <div className="absolute top-full left-0 mt-1 z-40 w-[264px] p-2 rounded-lg bg-surface border border-border shadow-2xl">
+    <div
+      className="fixed z-[10050] w-[264px] p-2 rounded-lg bg-surface border border-border shadow-2xl"
+      style={{ left, top }}
+    >
       <div className="text-[10px] uppercase tracking-wide text-muted/70 px-1 pb-1">{title}</div>
       <div className="grid grid-cols-5 gap-1">
         {items.map((it) => (
@@ -5467,6 +5475,9 @@ export function IconPaintEditor({
   const [irregKind, setIrregKind] = useState<ShapeKind>('ellipse')
   const [freePolyN, setFreePolyN] = useState(5)
   const [openMenu, setOpenMenu] = useState<'poly' | 'irreg' | null>(null)
+  const [shapeMenuRect, setShapeMenuRect] = useState<DOMRect | null>(null)
+  const polyMenuBtnRef = useRef<HTMLButtonElement>(null)
+  const irregMenuBtnRef = useRef<HTMLButtonElement>(null)
   /** When On, polygon / irregular shapes keep a 1:1 aspect while drawing or corner-resizing. */
   const [shapeLockAspect, setShapeLockAspect] = useState(false)
   /** Preserve shape/icon stroke width while its bounds are resized. */
@@ -13417,7 +13428,10 @@ export function IconPaintEditor({
     shiftHeldRef.current = e.shiftKey
     // Prevent PreviewStage's outside-canvas handler from starting the same drag twice.
     e.stopPropagation()
-    if (openMenu) setOpenMenu(null)
+    if (openMenu) {
+      setOpenMenu(null)
+      setShapeMenuRect(null)
+    }
     const pt = toCanvas(e)
     if (tool === 'eyedropper') { eyedrop(pt.x, pt.y); return }
     if (tool === 'line' || tool === 'freepoly' || tool === 'pointer' || tool === 'shape' || tool === 'text' || tool === 'reshape') {
@@ -14814,6 +14828,7 @@ export function IconPaintEditor({
     setShapeKind(k)
     setTool('shape')
     setOpenMenu(null)
+    setShapeMenuRect(null)
     const id = selectedIdRef.current
     const live = id ? linesRef.current.find((l) => l.id === id) : null
     if (live && live.type === 'shape' && live.shape !== k) {
@@ -14828,6 +14843,7 @@ export function IconPaintEditor({
     setShapeKind(k)
     setTool('shape')
     setOpenMenu(null)
+    setShapeMenuRect(null)
     const id = selectedIdRef.current
     const live = id ? linesRef.current.find((l) => l.id === id) : null
     if (live && live.type === 'shape' && live.shape !== k) {
@@ -14846,7 +14862,15 @@ export function IconPaintEditor({
       }}
     >
     <div style={NO_DRAG} className="fixed top-10 left-0 right-0 bottom-0 z-[9998] flex flex-col bg-bg/95 backdrop-blur-sm">
-      {openMenu && <div className="absolute inset-0 z-30" onClick={() => setOpenMenu(null)} />}
+      {openMenu && (
+        <div
+          className="absolute inset-0 z-[10040]"
+          onClick={() => {
+            setOpenMenu(null)
+            setShapeMenuRect(null)
+          }}
+        />
+      )}
       {/* Header — drag region so the window can still be moved in paint mode */}
       <div style={DRAG} className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-surface shrink-0">
         <span className="text-sm font-semibold text-text">{title}</span>
@@ -14887,12 +14911,19 @@ export function IconPaintEditor({
           ))}
 
           {/* Polygon shapes group */}
-          <div className="relative z-40">
+          <div className="relative">
             <button
+              ref={polyMenuBtnRef}
               onClick={() => {
                 if (polyKind === 'freepoly') setTool('freepoly')
                 else { setShapeKind(polyKind); setTool('shape') }
-                setOpenMenu(openMenu === 'poly' ? null : 'poly')
+                if (openMenu === 'poly') {
+                  setOpenMenu(null)
+                  setShapeMenuRect(null)
+                } else {
+                  setShapeMenuRect(polyMenuBtnRef.current?.getBoundingClientRect() ?? null)
+                  setOpenMenu('poly')
+                }
               }}
               title="Polygon shapes ▾"
               className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
@@ -14901,26 +14932,43 @@ export function IconPaintEditor({
             >
               <Square size={16} />
             </button>
-            {openMenu === 'poly' && (
+            {openMenu === 'poly' && shapeMenuRect && (
               <ShapeMenu
                 title="Polygons"
                 items={POLY_SHAPES}
                 current={shapeKind}
+                anchorRect={shapeMenuRect}
                 onPick={pickPolyShape}
                 freePoly={{
                   n: freePolyN,
                   onN: setFreePolyN,
                   active: tool === 'freepoly',
-                  onPick: () => { setPolyKind('freepoly'); setTool('freepoly'); setOpenMenu(null) }
+                  onPick: () => {
+                    setPolyKind('freepoly')
+                    setTool('freepoly')
+                    setOpenMenu(null)
+                    setShapeMenuRect(null)
+                  }
                 }}
               />
             )}
           </div>
 
           {/* Irregular shapes group */}
-          <div className="relative z-40">
+          <div className="relative">
             <button
-              onClick={() => { setShapeKind(irregKind); setTool('shape'); setOpenMenu(openMenu === 'irreg' ? null : 'irreg') }}
+              ref={irregMenuBtnRef}
+              onClick={() => {
+                setShapeKind(irregKind)
+                setTool('shape')
+                if (openMenu === 'irreg') {
+                  setOpenMenu(null)
+                  setShapeMenuRect(null)
+                } else {
+                  setShapeMenuRect(irregMenuBtnRef.current?.getBoundingClientRect() ?? null)
+                  setOpenMenu('irreg')
+                }
+              }}
               title="Irregular shapes ▾"
               className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
                 irregGroupActive ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
@@ -14928,8 +14976,14 @@ export function IconPaintEditor({
             >
               <Circle size={16} />
             </button>
-            {openMenu === 'irreg' && (
-              <ShapeMenu title="Irregular shapes" items={IRREG_SHAPES} current={shapeKind} onPick={pickIrregShape} />
+            {openMenu === 'irreg' && shapeMenuRect && (
+              <ShapeMenu
+                title="Irregular shapes"
+                items={IRREG_SHAPES}
+                current={shapeKind}
+                anchorRect={shapeMenuRect}
+                onPick={pickIrregShape}
+              />
             )}
           </div>
 
@@ -15074,13 +15128,46 @@ export function IconPaintEditor({
         <div className="w-px h-6 bg-border shrink-0" />
 
         {/* Size / thickness / border width */}
-        <div className="flex items-center gap-2 shrink-0">
+        <div
+          className="flex items-center gap-2 shrink-0"
+          title={
+            fillableCtx || tool === 'shape' || tool === 'freepoly' || tool === 'polygon'
+              ? 'Border / stroke width of the selected shape (or next shape you draw)'
+              : tool === 'line' ||
+                  (tool === 'pointer' &&
+                    !!selectedObj &&
+                    (selectedObj.type === 'polyline' ||
+                      selectedObj.type === 'free' ||
+                      selectedObj.type === 'drawn' ||
+                      selectedObj.type === 'arrow'))
+                ? 'Stroke thickness of the selected line (or next line you draw)'
+                : tool === 'brush' || tool === 'eraser'
+                  ? 'Brush / eraser tip size'
+                  : tool === 'pointer' || tool === 'reshape'
+                    ? selectedId
+                      ? 'Stroke / border width of the selected object'
+                      : 'Default tip / stroke size used when you switch to Brush, Line, or Shape'
+                    : 'Tip / stroke size'
+          }
+        >
           <span className="text-[11px] text-muted whitespace-nowrap">
             {fillableCtx || tool === 'shape' || tool === 'freepoly' || tool === 'polygon'
               ? 'Border width'
-              : tool === 'line'
+              : tool === 'line' ||
+                  (tool === 'pointer' &&
+                    !!selectedObj &&
+                    (selectedObj.type === 'polyline' ||
+                      selectedObj.type === 'free' ||
+                      selectedObj.type === 'drawn' ||
+                      selectedObj.type === 'arrow'))
                 ? 'Thickness'
-                : 'Size'}
+                : tool === 'brush' || tool === 'eraser'
+                  ? 'Size'
+                  : tool === 'pointer' || tool === 'reshape'
+                    ? selectedId
+                      ? 'Stroke'
+                      : 'Size'
+                    : 'Size'}
           </span>
           <input
             type="range" min={0} max={128} value={size}
