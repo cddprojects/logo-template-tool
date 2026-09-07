@@ -4704,6 +4704,14 @@ function traceShape(ctx: CanvasRenderingContext2D, kind: ShapeKind, x: number, y
   }
 }
 
+interface OuterFillSnap {
+  target: 'fill' | 'border' | 'shadow' | null
+  color: string | null
+  colors: { fill?: string; border?: string; shadow?: string }
+  fillAll: boolean
+  preserveOverlay: boolean
+}
+
 interface Snap {
   /** Paint overlay pixels (editable brush/eraser layer). */
   container: ImageData
@@ -4715,6 +4723,8 @@ interface Snap {
   layerOrder: PaintLayerId[]
   /** Punch-hole bitmasks keyed by object id (not stored on LineObj). */
   punchBits: Record<string, Uint8Array>
+  /** Outer Fill → live colour sync (must undo with the fill pixels). */
+  outerFill: OuterFillSnap
 }
 
 interface HistoryEntry {
@@ -5981,6 +5991,30 @@ export function IconPaintEditor({
       .filter(Boolean)
       .join(' + ') || 'none'
 
+  const snapshotOuterFill = (): OuterFillSnap => ({
+    target: lastOuterFillTargetRef.current,
+    color: lastOuterFillColorRef.current,
+    colors: { ...lastOuterFillColorsRef.current },
+    fillAll: lastOuterFillAllRef.current,
+    preserveOverlay: preserveOuterOverlayRef.current
+  })
+
+  const applyOuterFillSnap = (snap: OuterFillSnap | undefined) => {
+    if (!snap) {
+      lastOuterFillTargetRef.current = null
+      lastOuterFillColorRef.current = null
+      lastOuterFillColorsRef.current = {}
+      lastOuterFillAllRef.current = false
+      preserveOuterOverlayRef.current = false
+      return
+    }
+    lastOuterFillTargetRef.current = snap.target
+    lastOuterFillColorRef.current = snap.color
+    lastOuterFillColorsRef.current = { ...snap.colors }
+    lastOuterFillAllRef.current = snap.fillAll
+    preserveOuterOverlayRef.current = snap.preserveOverlay
+  }
+
   const snapshotState = useCallback((): Snap | null => {
     const cc = containerCtx()
     const ct = contentCtx()
@@ -5999,7 +6033,8 @@ export function IconPaintEditor({
       baseContent: bct.getImageData(0, 0, W, H),
       lines: cloneLines(linesRef.current),
       layerOrder: [...layerOrderRef.current],
-      punchBits: clonePunchBitsMap()
+      punchBits: clonePunchBitsMap(),
+      outerFill: snapshotOuterFill()
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [W, H])
@@ -6376,6 +6411,8 @@ export function IconPaintEditor({
     }
     const restoredIds = new Set(restored.map((l) => l.id))
     setSelectedLayerIds((prev) => new Set([...prev].filter((id) => restoredIds.has(id))))
+    // Undo Outer Fill must clear Save sync refs — pixels alone are not enough.
+    applyOuterFillSnap(snap.outerFill)
     redrawLinesRef.current()
     drawHandles()
     lastSnapshotRef.current = snapshotState()
