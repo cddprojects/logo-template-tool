@@ -1420,9 +1420,9 @@ export function buildPaintContentSync(opts: {
     }
   }
 
-  // Inner Fill on base overlay (when not driven by linked text / content proxy).
+  // Inner Fill on base overlay (when not driven by linked text / letter-bake stamp).
   if (
-    !opts.vectors.some((v) => v.type === 'text' && v.linkedOutsideText) &&
+    !opts.vectors.some((v) => !!v.linkedOutsideText && (v.type === 'text' || v.type === 'stamp')) &&
     opts.contentOverlay &&
     canvasHasOpaquePaint(opts.contentOverlay)
   ) {
@@ -1445,7 +1445,19 @@ export function buildPaintContentSync(opts: {
   }
 
   const linkedTexts = opts.vectors.filter((v) => v.type === 'text' && v.linkedOutsideText)
-  const linked = linkedTexts.length ? linkedTexts[linkedTexts.length - 1] : undefined
+  const linkedText = linkedTexts.length ? linkedTexts[linkedTexts.length - 1] : undefined
+  // PH→ST→Fill bakes letters to a stamp but keeps linkedOutsideText — sync fill
+  // colour from that stamp so live textColor does not stay the pre-Fill white.
+  const linkedLetterBake = opts.vectors
+    .filter(
+      (v) =>
+        v.type === 'stamp' &&
+        !!v.linkedOutsideText &&
+        !v.punchMask &&
+        (v.layer ?? 'content') === 'content'
+    )
+    .pop()
+  const linked = linkedText ?? linkedLetterBake
   const proxy = opts.vectors.find(
     (v) => v.contentBound && (v.type === 'stamp' || v.type === 'shape') && v.pts.length >= 2
   )
@@ -1455,16 +1467,28 @@ export function buildPaintContentSync(opts: {
     // Only push Inner offset when the user moved/rotated/scaled letters in Paint.
     // Always rewriting offset from ink center drifts on every Save and fights
     // outside text edits (growing misalignment / punch artifacts).
-    if (paintVectorHasDisplayTransform(linked)) {
+    if (linked.type === 'text' && paintVectorHasDisplayTransform(linked)) {
       const ink = textInkCenter(linked)
       if (ink) {
         sync.offsetX = paintPxToDesign(ink.cx - res / 2, res)
         sync.offsetY = paintPxToDesign(ink.cy - res / 2, res)
       }
+    } else if (linked.type === 'stamp' && linked.pts.length >= 2) {
+      const a = linked.pts[0], b = linked.pts[1]
+      const cx = (a.x + b.x) / 2
+      const cy = (a.y + b.y) / 2
+      sync.offsetX = paintPxToDesign(cx - res / 2, res)
+      sync.offsetY = paintPxToDesign(cy - res / 2, res)
+      sync.sizeRatio = clampSizeRatio(Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y)) / drawArea)
     }
+    const rawColor = linked.color || '#ffffff'
+    const textColor =
+      rawColor.startsWith('#') && rawColor.length >= 7
+        ? rawColor.slice(0, 7)
+        : rawColor
     sync.letters = {
       text: linked.text ?? '',
-      textColor: linked.color || '#ffffff',
+      textColor,
       fontFamily: linked.fontFamily ?? 'Inter',
       fontWeight: String(linked.weight ?? (linked.bold ? 700 : 400)),
       fontItalic: !!linked.italic,
@@ -1472,7 +1496,7 @@ export function buildPaintContentSync(opts: {
       letterSpacing: paintPxToDesign(linked.letterSpacing ?? 0, res)
     }
     sync.fillColor = sync.letters.textColor
-    sync.sizeRatio = sync.letters.fontSizeRatio
+    if (sync.sizeRatio === undefined) sync.sizeRatio = sync.letters.fontSizeRatio
     Object.assign(sync, shadowSyncFromVector(linked, res, drawArea))
     return sync
   }

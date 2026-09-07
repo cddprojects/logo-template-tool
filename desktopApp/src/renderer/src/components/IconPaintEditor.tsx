@@ -8968,7 +8968,12 @@ export function IconPaintEditor({
     const x = c.getContext('2d')!
     const show = (l: LineObj) =>
       (includeContentBound || !l.contentBound) &&
-      (includeLinkedText || !l.linkedOutsideText) &&
+      // Letter-bake stamps keep linkedOutsideText for TE→BO sync, but they are
+      // already rasterized paint results — always include them when baking content
+      // (otherwise Save skips the stamp, empties decorations, and live white returns).
+      (includeLinkedText ||
+        !l.linkedOutsideText ||
+        (includeContentBound && l.type === 'stamp')) &&
       (l.visible ?? l.editable ?? true) !== false
     const ids = layer
       ? [layer]
