@@ -1502,7 +1502,9 @@ export async function renderLogo(
     ctx.fillRect(0, 0, totalW, totalH)
   }
 
-  if (icon.visible && icon.shape !== 'none') {
+  // Inner geo shape "None" only blanks the Inner fill — Outer / letters / lucide
+  // must still draw. Visibility is controlled by icon.visible alone.
+  if (icon.visible) {
     if (faviconIconSource) {
       await drawSyncedFaviconIcon(ctx, faviconIconSource, iconX, iconY, iconSize)
     } else {
