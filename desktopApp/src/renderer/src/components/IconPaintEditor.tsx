@@ -6380,21 +6380,10 @@ export function IconPaintEditor({
       }
 
       // Non-letter Inner: lift centered bake into a movable/resizable contentBound stamp.
-      // Skip when a prior Save baked see-through / punched Inner into session stamps —
-      // reseeding the live proxy would restore the original colour over the edit.
-      const hasPersistedInnerStamps = restored.some(
-        (l) =>
-          !l.contentBound &&
-          !l.linkedOutsideText &&
-          !l.punchMask &&
-          (l.layer ?? 'content') === 'content' &&
-          (l.type === 'stamp' || l.type === 'shape' || l.type === 'poly' || l.type === 'text')
-      )
-      if (
-        outsideAll?.kind === 'proxy' &&
-        !initialContentBakedInDecorations &&
-        !hasPersistedInnerStamps
-      ) {
+      // Skip only when Save baked Inner into decorations (see-through / punch / warp).
+      // User-added shapes/polys on the content layer must NOT block reseeding — otherwise
+      // Save → re-open drops the live geo/lucide stand-in while keeping the extra paint.
+      if (outsideAll?.kind === 'proxy' && !initialContentBakedInDecorations) {
         const crop = cropOpaqueToDataUrl(baseCt.canvas)
         if (crop) {
           const existing = restored.find(
@@ -6421,7 +6410,7 @@ export function IconPaintEditor({
             drawHandles()
           })
         }
-      } else if (outsideAll?.kind === 'proxy' && (initialContentBakedInDecorations || hasPersistedInnerStamps)) {
+      } else if (outsideAll?.kind === 'proxy' && initialContentBakedInDecorations) {
         // Baked Inner owns the pixels — keep live base clear.
         baseCt.clearRect(0, 0, W, H)
       }
@@ -14722,6 +14711,17 @@ export function IconPaintEditor({
   const editingStamp = selectedObj?.type === 'stamp'
   const editingContentProxy = !!(selectedObj?.contentBound && editingStamp)
   const fillableCtx = editingPoly || editingShape
+  /** Text / stamp / group ignore the general stroke Size slider. */
+  const selectionUsesStrokeSlider = (l: LineObj | null | undefined): boolean => {
+    if (!l || l.marqueeItem) return false
+    if (l.type === 'group' || l.type === 'text' || l.type === 'stamp') return false
+    return true
+  }
+  const strokeSizeEnabled =
+    tool === 'brush' ||
+    tool === 'eraser' ||
+    !selectedObj ||
+    selectionUsesStrokeSlider(selectedObj)
   const showVecOptions = !selectedIsGroup && !editingText && !editingStamp && (tool === 'line' || tool === 'freepoly' || tool === 'shape' || (selectedObj != null))
 
   const patchContentProxy = (patch: Partial<LineObj>, commit = true): void => {
@@ -15129,9 +15129,11 @@ export function IconPaintEditor({
 
         {/* Size / thickness / border width */}
         <div
-          className="flex items-center gap-2 shrink-0"
+          className={`flex items-center gap-2 shrink-0 ${strokeSizeEnabled ? '' : 'opacity-40'}`}
           title={
-            fillableCtx || tool === 'shape' || tool === 'freepoly' || tool === 'polygon'
+            !strokeSizeEnabled
+              ? 'Stroke size does not apply to text, stamps, or groups'
+              : fillableCtx || tool === 'shape' || tool === 'freepoly' || tool === 'polygon'
               ? 'Border / stroke width of the selected shape (or next shape you draw)'
               : tool === 'line' ||
                   (tool === 'pointer' &&
@@ -15164,26 +15166,35 @@ export function IconPaintEditor({
                 : tool === 'brush' || tool === 'eraser'
                   ? 'Size'
                   : tool === 'pointer' || tool === 'reshape'
-                    ? selectedId
+                    ? selectedId && selectionUsesStrokeSlider(selectedObj)
                       ? 'Stroke'
                       : 'Size'
                     : 'Size'}
           </span>
           <input
-            type="range" min={0} max={128} value={size}
+            type="range"
+            min={0}
+            max={128}
+            value={size}
+            disabled={!strokeSizeEnabled}
             onChange={(e) => {
+              if (!strokeSizeEnabled) return
               const v = Number(e.target.value)
               setSize(v)
-              if (selectedIdRef.current) {
-                updateSelectedLive((l) =>
-                  l.type === 'poly' || l.type === 'shape'
-                    ? { thickness: v, borderWidth: v }
-                    : { thickness: v, borderWidth: v }
-                )
+              if (selectedIdRef.current && selectionUsesStrokeSlider(
+                linesRef.current.find((l) => l.id === selectedIdRef.current)
+              )) {
+                updateSelectedLive((l) => ({ thickness: v, borderWidth: v }))
               }
             }}
-            onMouseUp={() => { if (selectedIdRef.current) pushHistory() }}
-            className="w-28"
+            onMouseUp={() => {
+              if (strokeSizeEnabled && selectedIdRef.current && selectionUsesStrokeSlider(
+                linesRef.current.find((l) => l.id === selectedIdRef.current)
+              )) {
+                pushHistory()
+              }
+            }}
+            className="w-28 disabled:cursor-not-allowed"
           />
           <span className="text-[10px] text-muted w-8 text-right tabular-nums">{size}px</span>
         </div>
