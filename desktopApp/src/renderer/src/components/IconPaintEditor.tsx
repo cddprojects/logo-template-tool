@@ -3189,6 +3189,45 @@ function bakeObjectAppearanceToStamp(item: LineObj, W: number, H: number): LineO
 }
 
 /**
+ * Older Saves baked letter Fill into a stamp (blocked in-paint text edit).
+ * Restore as editable text using the stamp centre + stored glyph fields.
+ */
+function letterBakeStampToEditableText(l: LineObj, W: number, H: number): LineObj {
+  if (l.type !== 'stamp' || !l.linkedOutsideText) return l
+  const color = isTransparentPaintColor(l.color ?? '')
+    ? (l.color as string)
+    : firstSolidColor(l.color ?? '#ffffffff')
+  const next: LineObj = {
+    ...l,
+    type: 'text',
+    imageDataUrl: undefined,
+    stampSource: undefined,
+    paintStrokes: undefined,
+    sourceSvgMarkup: undefined,
+    sourceStampSize: undefined,
+    keepStrokeOnResize: undefined,
+    color,
+    text: l.text ?? '',
+    name: l.name ?? 'Text',
+    fontFamily: l.fontFamily ?? 'Inter',
+    fontSize: l.fontSize ?? Math.round(Math.min(W, H) * 0.52),
+    weight: l.weight ?? (l.bold ? 700 : 400),
+    bold: l.bold ?? (l.weight ?? 400) >= 700,
+    italic: !!l.italic,
+    letterSpacing: l.letterSpacing ?? 0,
+    lineHeight: l.lineHeight ?? 1.28
+  }
+  if (l.pts.length >= 2) {
+    const cx = (l.pts[0].x + l.pts[1].x) / 2
+    const cy = (l.pts[0].y + l.pts[1].y) / 2
+    next.pts = [opticalTopLeftForText(next, cx, cy)]
+  } else if (!next.pts.length) {
+    next.pts = [opticalTopLeftForText(next, W / 2, H / 2)]
+  }
+  return next
+}
+
+/**
  * Solid-fill a punch/see-through pocket.
  * - Vector same-colour restore: mask clear only (no raster / no expand).
  * - Otherwise: crisp paint into the pocket only; keep other hole masks.
@@ -3221,6 +3260,20 @@ function refillHolePocket(
       ...item,
       color: fill,
       ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {}),
+      punchThrough: hasPunchCoverage(item.id),
+      punchEnclosedHole:
+        hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
+          ? item.punchEnclosedHole
+          : false
+    }
+  }
+
+  // Text must stay type:'text' so Paint can edit glyphs after Fill/Save.
+  // Hole maps are already scrubbed by the caller — mono-colour vector is enough.
+  if (item.type === 'text') {
+    return {
+      ...item,
+      color: fill,
       punchThrough: hasPunchCoverage(item.id),
       punchEnclosedHole:
         hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
@@ -6216,10 +6269,13 @@ export function IconPaintEditor({
             stripContentProxyVectors(initialVectors),
             null
           ) as unknown as LineObj[]
-        ).map((l) => ({
-          ...l,
-          visible: l.visible ?? l.editable ?? true
-        }))
+        ).map((l) => {
+          const next = letterBakeStampToEditableText(l, W, H)
+          return {
+            ...next,
+            visible: next.visible ?? next.editable ?? true
+          }
+        })
       } else if (outside && outsideAll?.kind !== 'proxy') {
         const seeded = lineFromOutsideText(outside, W, innerDraw)
         restored = [seeded]
@@ -9368,9 +9424,10 @@ export function IconPaintEditor({
           hasSeeThroughCoverage(item.id)
         const stillPunched = hadHole && subtractLocalPunchRegion(item, region, W, H)
         keepPunch = punch || stillPunched
-        // Vector text must stay vector — raster bake of white glyphs leaves AA
-        // fringe lines that survive later see-through / colour clears.
-        if (item.type === 'text' && wallHits === 0) {
+        // Vector text must stay vector — baking to stamp blocks in-paint text edit
+        // and leaves AA fringe that survives later see-through / colour clears.
+        // Holes (wallHits > 0) stay as masks; do not rasterize the glyph.
+        if (item.type === 'text') {
           return {
             ...item,
             color: firstSolidColor(color),
@@ -13529,6 +13586,10 @@ export function IconPaintEditor({
         }
         return [item]
       }
+      // Letter-bake stamps block text edit — persist as editable text vectors.
+      if (item.type === 'stamp' && item.linkedOutsideText) {
+        return [letterBakeStampToEditableText(item, W, H)]
+      }
       if (item.type === 'group' || item.marqueeItem) return [item]
       const seeThrough = objectHasSeeThroughHole(item)
       const modifiedProxy =
@@ -13541,10 +13602,10 @@ export function IconPaintEditor({
           isTransparentPaintColor(item.color ?? ''))
       if (seeThrough) {
         preparedHadSeeThrough = true
-        // Keep linkedOutsideText so outside letter edits can re-apply holes.
-        // Mixed punch+see-through: still bake appearance so ST holes survive,
-        // while punchMasks (exported later) keep Outer cuts from punch bits.
-        if (item.linkedOutsideText) return [item]
+        // Keep text vectors editable after Save (linked or paint-local).
+        // Mixed punch+see-through: hole PNGs + decorations bake carry ST;
+        // punchMasks (exported later) keep Outer cuts from punch bits.
+        if (item.type === 'text' || item.linkedOutsideText) return [item]
         return [bakeObjectAppearanceToStamp(item, W, H)]
       }
       if (modifiedProxy && item.punchThrough && !seeThrough) {
@@ -13554,6 +13615,8 @@ export function IconPaintEditor({
       }
       if (modifiedProxy) {
         // Proxy bake is not see-through — do not force skip-live Inner.
+        // Never rasterize text — Save must leave glyphs editable in Paint.
+        if (item.type === 'text') return [item]
         return [bakeObjectAppearanceToStamp(item, W, H)]
       }
       return [item]
