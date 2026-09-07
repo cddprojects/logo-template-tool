@@ -1098,7 +1098,10 @@ function stampRenderDataUrl(l: LineObj, width: number, height: number): string {
   }
   const markup = buildStrokeLockedSvgMarkup(l, width, height)
   if (!markup) return l.imageDataUrl ?? ''
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`
+  // Always tint with the stamp's live colour — sourceSvgMarkup alone can be stale
+  // after a picker recolour (applyStampColorKeepHoles only rewrote the PNG).
+  const tinted = applySvgColor(markup, firstSolidColor(l.color || '#000000ff'))
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(tinted)}`
 }
 
 function pauseStampStrokeRelock(l: LineObj): void {
@@ -1139,12 +1142,13 @@ async function rebakeStrokeLockedStamp(l: LineObj): Promise<boolean> {
   // Skip the "at source size use PNG" short-circuit so the bake always locks strokes.
   const locked = buildStrokeLockedSvgMarkup({ ...l, imageDataUrl: undefined }, dw, dh)
   if (!locked) return false
+  const tinted = applySvgColor(locked, firstSolidColor(l.color || '#000000ff'))
   const canvas = document.createElement('canvas')
   canvas.width = dw
   canvas.height = dh
   const ctx = canvas.getContext('2d')
   if (!ctx) return false
-  await drawSvgOnCanvas(ctx, locked, 0, 0, dw, dh)
+  await drawSvgOnCanvas(ctx, tinted, 0, 0, dw, dh)
   const dataUrl = canvas.toDataURL('image/png')
   l.imageDataUrl = dataUrl
   // Keep sourceStampSize as the original stroke-lock reference (placement size).
@@ -3506,8 +3510,15 @@ function applyStampColorKeepHoles(item: LineObj, nextColor: string): Partial<Lin
   }
   ctx.putImageData(img, 0, 0)
   const imageDataUrl = canvas.toDataURL('image/png')
-  ensureStampImage(imageDataUrl)
-  return { imageDataUrl, color: fill }
+  const placed = ensureStampImage(imageDataUrl)
+  if (placed) stampStrokeLiveCache.set(item.id, placed)
+  const patch: Partial<LineObj> = { imageDataUrl, color: fill }
+  // Keep SVG source in sync so keepStrokeOnResize re-rasters use the new colour
+  // (otherwise resize / live SVG path snaps back to the placement tint).
+  if (item.sourceSvgMarkup) {
+    patch.sourceSvgMarkup = applySvgColor(item.sourceSvgMarkup, fill)
+  }
+  return patch
 }
 
 function destOutObjectPunch(ctx: CanvasRenderingContext2D, l: LineObj): void {
