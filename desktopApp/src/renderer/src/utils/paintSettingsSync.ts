@@ -766,6 +766,296 @@ export function applyIconInnerSettingsKeepColors(
   }
 }
 
+/** Checkbox options for “Apply to all variants”. */
+export type ApplyToAllOptions = {
+  /** Shape & settings other than colour (type, size, position, geometry…). */
+  shape: boolean
+  /** Colour slots (and matching paint recolour when combined with shape+inner). */
+  color: boolean
+  /** Inner / content layer. */
+  inner: boolean
+  /** Outer / container layer. */
+  outer: boolean
+}
+
+export function applyToAllOptionsActive(opts: ApplyToAllOptions): boolean {
+  return (opts.shape || opts.color) && (opts.inner || opts.outer)
+}
+
+/** Outer geometry only (no colour slots) for logo icons. */
+const ICON_OUTER_GEOMETRY_KEYS = [
+  'containerEnabled',
+  'containerShape',
+  'containerType',
+  'containerImageDataUrl',
+  'containerSvgMarkup',
+  'containerPadding',
+  'containerBorderWidth',
+  'containerBorderRadius',
+  'containerSvgBorderPath',
+  'size',
+  'visible',
+  'shadowEnabled',
+  'shadowBlur',
+  'shadowSpread',
+  'shadowOffsetX',
+  'shadowOffsetY',
+  'transparentFillMode'
+] as const
+
+/** Copy source Inner paint (with colours); keep target Outer paint. */
+function mergePaintInnerFromSource(
+  sourceSession: PaintSession | null | undefined,
+  targetSession: PaintSession | null | undefined
+): PaintSession | null {
+  if (!sourceSession && !targetSession) return null
+  if (!sourceSession) return blankInnerPaintOnly(targetSession)
+  if (!targetSession) return structuredClone(sourceSession)
+  if (sourceSession.resolution !== targetSession.resolution) {
+    return structuredClone(sourceSession)
+  }
+  const containerVectors = (targetSession.vectors ?? []).filter(isPaintContainerLayerVector)
+  const contentVectors = structuredClone(
+    (sourceSession.vectors ?? []).filter((v) => !isPaintContainerLayerVector(v))
+  )
+  const usedIds = new Set(containerVectors.map((v) => v.id))
+  for (const v of contentVectors) {
+    if (!usedIds.has(v.id)) {
+      usedIds.add(v.id)
+      continue
+    }
+    const nextId = `${v.id}-inner-${Math.random().toString(36).slice(2, 8)}`
+    const oldId = v.id
+    v.id = nextId
+    for (const child of contentVectors) {
+      if (child.parentId === oldId) child.parentId = nextId
+    }
+  }
+  const punchMasks = [
+    ...(targetSession.punchMasks ?? []).filter((m) => m.layer === 'container'),
+    ...(sourceSession.punchMasks ?? []).filter((m) => m.layer === 'content')
+  ]
+  return {
+    ...targetSession,
+    containerPng: targetSession.containerPng,
+    containerDecorationsPng: targetSession.containerDecorationsPng,
+    contentPng: sourceSession.contentPng,
+    contentDecorationsPng: sourceSession.contentDecorationsPng,
+    decorationsPng: undefined,
+    vectors: [...containerVectors, ...contentVectors],
+    punchMasks: punchMasks.length ? punchMasks : undefined,
+    contentBakedInDecorations: sourceSession.contentBakedInDecorations,
+    linkedTextInDecorations: sourceSession.linkedTextInDecorations,
+    paintContentSizeRatio: sourceSession.paintContentSizeRatio,
+    paintContentDrawSize: sourceSession.paintContentDrawSize,
+    contentSync: sourceSession.contentSync
+  }
+}
+
+/** Copy source Outer paint; keep target Inner paint. */
+function mergePaintOuterFromSource(
+  sourceSession: PaintSession | null | undefined,
+  targetSession: PaintSession | null | undefined
+): PaintSession | null {
+  if (!sourceSession && !targetSession) return null
+  if (!sourceSession) return targetSession ? structuredClone(targetSession) : null
+  if (!targetSession) return structuredClone(sourceSession)
+  if (sourceSession.resolution !== targetSession.resolution) {
+    return structuredClone(sourceSession)
+  }
+  const contentVectors = (targetSession.vectors ?? []).filter((v) => !isPaintContainerLayerVector(v))
+  const containerVectors = structuredClone(
+    (sourceSession.vectors ?? []).filter(isPaintContainerLayerVector)
+  )
+  const usedIds = new Set(contentVectors.map((v) => v.id))
+  for (const v of containerVectors) {
+    if (!usedIds.has(v.id)) {
+      usedIds.add(v.id)
+      continue
+    }
+    const nextId = `${v.id}-outer-${Math.random().toString(36).slice(2, 8)}`
+    const oldId = v.id
+    v.id = nextId
+    for (const child of containerVectors) {
+      if (child.parentId === oldId) child.parentId = nextId
+    }
+  }
+  const punchMasks = [
+    ...(sourceSession.punchMasks ?? []).filter((m) => m.layer === 'container'),
+    ...(targetSession.punchMasks ?? []).filter((m) => m.layer === 'content')
+  ]
+  return {
+    ...targetSession,
+    containerPng: sourceSession.containerPng,
+    containerDecorationsPng: sourceSession.containerDecorationsPng,
+    contentPng: targetSession.contentPng,
+    contentDecorationsPng: targetSession.contentDecorationsPng,
+    decorationsPng: undefined,
+    vectors: [...containerVectors, ...contentVectors],
+    punchMasks: punchMasks.length ? punchMasks : undefined
+  }
+}
+
+/**
+ * Apply selected aspects of `source` onto `target` for “Apply to all”.
+ * shape+color+inner+outer ≡ full icon duplicate.
+ */
+export function applyIconToAllOptions(
+  source: IconConfig,
+  target: IconConfig,
+  opts: ApplyToAllOptions
+): IconConfig {
+  if (!applyToAllOptionsActive(opts)) return target
+
+  if (opts.shape && opts.color && opts.inner && opts.outer) {
+    return structuredClone(source)
+  }
+
+  // Shape (no colour) on both layers — existing “settings keep colors”.
+  if (opts.shape && !opts.color && opts.inner && opts.outer) {
+    return applyIconInnerSettingsKeepColors(source, target)
+  }
+
+  // Shape (no colour) on Inner only — existing “apply inner”.
+  if (opts.shape && !opts.color && opts.inner && !opts.outer) {
+    return applyIconInnerContent(source, target)
+  }
+
+  let next = structuredClone(target)
+
+  if (opts.inner) {
+    if (opts.shape && opts.color) {
+      const outerKeep = pickKeys(
+        next as unknown as Record<string, unknown>,
+        ICON_OUTER_KEYS
+      ) as Partial<IconConfig>
+      next = {
+        ...structuredClone(source),
+        ...outerKeep,
+        paintSession: mergePaintInnerFromSource(source.paintSession, target.paintSession)
+      }
+    } else if (opts.shape && !opts.color) {
+      next = applyIconInnerContent(source, next)
+    } else if (!opts.shape && opts.color) {
+      next = withIconTargetColors(next, source)
+      next.contentTypeStash = mergeTypeStashColors(
+        source.contentTypeStash,
+        next.contentTypeStash,
+        ICON_CONTENT_COLOR_KEYS,
+        iconPrimaryFill(source),
+        source.secondaryColor || ''
+      ) as IconConfig['contentTypeStash']
+    }
+  }
+
+  if (opts.outer) {
+    if (opts.shape && opts.color) {
+      Object.assign(
+        next,
+        pickKeys(source as unknown as Record<string, unknown>, ICON_OUTER_KEYS)
+      )
+      next.paintSession = mergePaintOuterFromSource(source.paintSession, next.paintSession)
+    } else if (opts.shape && !opts.color) {
+      Object.assign(
+        next,
+        pickKeys(source as unknown as Record<string, unknown>, ICON_OUTER_GEOMETRY_KEYS)
+      )
+      Object.assign(
+        next,
+        pickKeys(target as unknown as Record<string, unknown>, ICON_OUTER_COLOR_KEYS)
+      )
+    } else if (!opts.shape && opts.color) {
+      Object.assign(
+        next,
+        pickKeys(source as unknown as Record<string, unknown>, ICON_OUTER_COLOR_KEYS)
+      )
+    }
+  }
+
+  return next
+}
+
+/**
+ * Apply selected aspects of `source` favicon onto `target` for “Apply to all”.
+ */
+export function applyFaviconToAllOptions(
+  source: FaviconConfig,
+  target: FaviconConfig,
+  opts: ApplyToAllOptions
+): FaviconConfig {
+  if (!applyToAllOptionsActive(opts)) return target
+
+  if (opts.shape && opts.color && opts.inner && opts.outer) {
+    return structuredClone(source)
+  }
+
+  if (opts.shape && !opts.color && opts.inner && opts.outer) {
+    return applyFaviconInnerSettingsKeepColors(source, target)
+  }
+
+  if (opts.shape && !opts.color && opts.inner && !opts.outer) {
+    return applyFaviconInnerContent(source, target)
+  }
+
+  let next = structuredClone(target)
+
+  if (opts.inner) {
+    if (opts.shape && opts.color) {
+      next = {
+        ...next,
+        content: structuredClone(source.content),
+        contentTypeStash: source.contentTypeStash
+          ? structuredClone(source.contentTypeStash)
+          : next.contentTypeStash,
+        paintSession: mergePaintInnerFromSource(source.paintSession, target.paintSession)
+      }
+    } else if (opts.shape && !opts.color) {
+      next = applyFaviconInnerContent(source, next)
+    } else if (!opts.shape && opts.color) {
+      next = {
+        ...next,
+        content: withFaviconTargetColors(next.content, source.content),
+        contentTypeStash: mergeTypeStashColors(
+          source.contentTypeStash,
+          next.contentTypeStash,
+          FAVICON_CONTENT_COLOR_KEYS,
+          faviconPrimaryFill(source.content),
+          faviconSecondaryFill(source.content)
+        ) as FaviconConfig['contentTypeStash']
+      }
+    }
+  }
+
+  if (opts.outer) {
+    if (opts.shape && opts.color) {
+      Object.assign(
+        next,
+        pickKeys(source as unknown as Record<string, unknown>, [
+          ...FAVICON_OUTER_GEOMETRY_KEYS,
+          ...FAVICON_OUTER_COLOR_KEYS
+        ])
+      )
+      next.paintSession = mergePaintOuterFromSource(source.paintSession, next.paintSession)
+    } else if (opts.shape && !opts.color) {
+      Object.assign(
+        next,
+        pickKeys(source as unknown as Record<string, unknown>, FAVICON_OUTER_GEOMETRY_KEYS)
+      )
+      Object.assign(
+        next,
+        pickKeys(target as unknown as Record<string, unknown>, FAVICON_OUTER_COLOR_KEYS)
+      )
+    } else if (!opts.shape && opts.color) {
+      Object.assign(
+        next,
+        pickKeys(source as unknown as Record<string, unknown>, FAVICON_OUTER_COLOR_KEYS)
+      )
+    }
+  }
+
+  return next
+}
+
 export function isContentBoundVector(v: PaintVector): boolean {
   return !!(v.linkedOutsideText || v.contentBound)
 }

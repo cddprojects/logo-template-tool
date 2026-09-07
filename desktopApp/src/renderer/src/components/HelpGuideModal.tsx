@@ -78,16 +78,11 @@ function UseGuide(): JSX.Element {
             Use <span className="text-text">From favicon</span> / <span className="text-text">From logo</span> to copy while unsynced
           </li>
           <li>
-            <span className="text-text">Apply favicon to all</span> / <span className="text-text">Apply icon to all</span> copy
-            the active variant’s favicon or logo icon to every other variant (one-time copy, not live sync).
-            Synced logo icons copy through the favicon; unsynced logos copy their own custom icon
-          </li>
-          <li>
-            <span className="text-text">Apply inner to all</span> copies the active variant’s inner shape,
-            type, size, position, and paint geometry (recoloured to each target’s palette). Each variant
-            keeps its outer shape and Outer paint.{' '}
-            <span className="text-text">Duplicate icon settings (keep colors)</span> copies inner
-            type/shape/size and outer shape geometry — each variant keeps its own colours and paint edits
+            <span className="text-text">Apply to all</span> copies selected parts of the active
+            variant onto every other variant (one-time, not live sync). Choose{' '}
+            <span className="text-text">What</span> (Shape &amp; settings and/or Colour) and{' '}
+            <span className="text-text">Layer</span> (Inner and/or Outer). Checking all four is a
+            full icon/favicon duplicate. Synced logo icons copy through the favicon when applicable
           </li>
           <li>
             <span className="text-text">Paint</span> opens the icon editor. The right panel’s

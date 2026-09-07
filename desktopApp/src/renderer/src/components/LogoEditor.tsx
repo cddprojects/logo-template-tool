@@ -11,10 +11,8 @@ import { recolorFieldsAfterImageChange } from '../utils/imageRecolor'
 import {
   applyPaintSaveToFavicon,
   applyPaintSaveToIcon,
-  applyFaviconInnerContent,
-  applyFaviconInnerSettingsKeepColors,
-  applyIconInnerContent,
-  applyIconInnerSettingsKeepColors,
+  applyFaviconToAllOptions,
+  applyIconToAllOptions,
   clearIconUploadedImage,
   iconConfigToFaviconConfig,
   mapFaviconStashToIconStash,
@@ -23,7 +21,8 @@ import {
   logoPaintInnerDrawSize,
   logoPaintOuterLayout,
   outsideContentFromIcon,
-  switchIconSourceType
+  switchIconSourceType,
+  type ApplyToAllOptions
 } from '../utils/paintSettingsSync'
 import {
   contentTypeFromIcon,
@@ -54,6 +53,7 @@ import {
 } from './Controls'
 import { IconPicker } from './IconPicker'
 import { PreviewStage } from './PreviewStage'
+import { ApplyToAllBar } from './ApplyToAllBar'
 import { StylePanelResizeHandle } from './StylePanelResizeHandle'
 import { useStylePanelResize } from '../hooks/useStylePanelResize'
 import { lazyWithRetry } from '../utils/lazyWithRetry'
@@ -105,9 +105,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   const [editingLabel, setEditingLabel] = useState<string | null>(null)
   const [labelInput, setLabelInput] = useState('')
   const [styleClipboard, setStyleClipboard] = useState<LogoConfig | null>(null)
-  const [iconAppliedToAll, setIconAppliedToAll] = useState(false)
-  const [innerAppliedToAll, setInnerAppliedToAll] = useState(false)
-  const [innerSettingsAppliedToAll, setInnerSettingsAppliedToAll] = useState(false)
+  const [appliedToAll, setAppliedToAll] = useState(false)
   const dragIndexRef = useRef<number | null>(null)
   const variantsRef = useRef(variants)
   const faviconVariantsRef = useRef(faviconVariants)
@@ -768,76 +766,8 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
     )
   }
 
-  /**
-   * Apply only the active logo icon across logo variants.
-   * A synced source propagates its favicon design too; a custom source copies
-   * the original stored logo icon and leaves favicon variants untouched.
-   */
-  const applyActiveIconToAll = () => {
-    if (!safeConfig || !effectiveIcon || variants.length < 2) return
-
-    if (isSyncedWithFavicon && matchingFaviconVariant) {
-      if (onFaviconChange) {
-        const sourceFavicon = structuredClone(matchingFaviconVariant.config)
-        onFaviconChange(
-          faviconVariants.map((variant) => ({
-            ...variant,
-            config: structuredClone(sourceFavicon)
-          }))
-        )
-      }
-
-      const faviconLabels = new Set(faviconVariants.map((variant) => variant.label))
-      const mirrored = structuredClone(effectiveIcon)
-      onChange(
-        variants.map((variant) => {
-          if (faviconLabels.has(variant.label)) {
-            return {
-              ...variant,
-              config: {
-                ...variant.config,
-                iconLinked: true,
-                iconSyncBroken: false,
-                syncedIconSnapshot: null,
-                syncedIcon: structuredClone(mirrored)
-              }
-            }
-          }
-          return {
-            ...variant,
-            config: {
-              ...variant.config,
-              icon: structuredClone(mirrored),
-              syncedIcon: null,
-              iconLinked: false,
-              iconSyncBroken: false,
-              syncedIconSnapshot: null
-            }
-          }
-        })
-      )
-    } else {
-      const sourceIcon = structuredClone(effectiveIcon ?? safeConfig.icon)
-      onChange(
-        variants.map((variant) => ({
-          ...variant,
-          config: {
-            ...variant.config,
-            icon: structuredClone(sourceIcon),
-            iconLinked: false,
-            iconSyncBroken: false,
-            syncedIconSnapshot: null
-          }
-        }))
-      )
-    }
-
-    setIconAppliedToAll(true)
-    window.setTimeout(() => setIconAppliedToAll(false), 1600)
-  }
-
-  /** Copy only inner content; keep each variant's outer + color slots. */
-  const applyActiveInnerToAll = () => {
+  /** Apply checkbox selection from the active icon onto every other variant. */
+  const applySelectedToAll = (opts: ApplyToAllOptions) => {
     if (!safeConfig || !effectiveIcon || variants.length < 2) return
 
     if (isSyncedWithFavicon && matchingFaviconVariant) {
@@ -845,7 +775,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       const mergedByLabel = new Map(
         faviconVariants.map((variant) => [
           variant.label,
-          applyFaviconInnerContent(sourceFavicon, variant.config)
+          applyFaviconToAllOptions(sourceFavicon, variant.config, opts)
         ])
       )
       if (onFaviconChange) {
@@ -885,7 +815,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             ...variant,
             config: {
               ...variant.config,
-              icon: applyIconInnerContent(sourceIcon, variant.config.icon),
+              icon: applyIconToAllOptions(sourceIcon, variant.config.icon, opts),
               syncedIcon: null,
               iconLinked: false,
               iconSyncBroken: false,
@@ -901,7 +831,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
           ...variant,
           config: {
             ...variant.config,
-            icon: applyIconInnerContent(sourceIcon, variant.config.icon),
+            icon: applyIconToAllOptions(sourceIcon, variant.config.icon, opts),
             iconLinked: false,
             iconSyncBroken: false,
             syncedIconSnapshot: null
@@ -910,86 +840,8 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       )
     }
 
-    setInnerAppliedToAll(true)
-    window.setTimeout(() => setInnerAppliedToAll(false), 1600)
-  }
-
-  /** Duplicate icon settings (keep colors) — geometry from source, colours + paint stay. */
-  const applyActiveInnerSettingsKeepColors = () => {
-    if (!safeConfig || !effectiveIcon || variants.length < 2) return
-
-    if (isSyncedWithFavicon && matchingFaviconVariant) {
-      const sourceFavicon = matchingFaviconVariant.config
-      const mergedByLabel = new Map(
-        faviconVariants.map((variant) => [
-          variant.label,
-          applyFaviconInnerSettingsKeepColors(sourceFavicon, variant.config)
-        ])
-      )
-      if (onFaviconChange) {
-        onFaviconChange(
-          faviconVariants.map((variant) => ({
-            ...variant,
-            config: mergedByLabel.get(variant.label) ?? variant.config
-          }))
-        )
-      }
-
-      const sourceIcon = effectiveIcon
-      onChange(
-        variants.map((variant) => {
-          const mergedFav = mergedByLabel.get(variant.label)
-          if (mergedFav) {
-            const baseIcon =
-              variant.config.syncedIcon ??
-              variant.config.icon ??
-              safeConfig.icon
-            return {
-              ...variant,
-              config: {
-                ...variant.config,
-                iconLinked: true,
-                iconSyncBroken: false,
-                syncedIconSnapshot: null,
-                syncedIcon: faviconContentToIconConfig(
-                  mergedFav.content,
-                  baseIcon,
-                  mergedFav
-                )
-              }
-            }
-          }
-          return {
-            ...variant,
-            config: {
-              ...variant.config,
-              icon: applyIconInnerSettingsKeepColors(sourceIcon, variant.config.icon),
-              syncedIcon: null,
-              iconLinked: false,
-              iconSyncBroken: false,
-              syncedIconSnapshot: null
-            }
-          }
-        })
-      )
-    } else {
-      const sourceIcon = effectiveIcon ?? safeConfig.icon
-      onChange(
-        variants.map((variant) => ({
-          ...variant,
-          config: {
-            ...variant.config,
-            icon: applyIconInnerSettingsKeepColors(sourceIcon, variant.config.icon),
-            iconLinked: false,
-            iconSyncBroken: false,
-            syncedIconSnapshot: null
-          }
-        }))
-      )
-    }
-
-    setInnerSettingsAppliedToAll(true)
-    window.setTimeout(() => setInnerSettingsAppliedToAll(false), 1600)
+    setAppliedToAll(true)
+    window.setTimeout(() => setAppliedToAll(false), 1600)
   }
 
   // Drag-to-reorder variants.
@@ -1211,59 +1063,15 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
         )}
         </div>
         {variants.length > 1 && (
-          <div className="ml-1 flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={applyActiveIconToAll}
-              title={
-                isSyncedWithFavicon
-                  ? 'Apply this synced favicon to every favicon and logo variant'
-                  : 'Apply this original custom logo icon to every logo variant'
-              }
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
-                iconAppliedToAll
-                  ? 'border-success/60 bg-success/10 text-success'
-                  : 'border-border bg-surface3 text-muted hover:text-text hover:border-muted'
-              }`}
-            >
-              {iconAppliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
-              {iconAppliedToAll ? 'Applied to all' : 'Apply icon to all'}
-            </button>
-            <button
-              type="button"
-              onClick={applyActiveInnerToAll}
-              title={
-                isSyncedWithFavicon
-                  ? 'Copy the inner content shape/type and paint geometry to every favicon and logo variant. Each keeps its outer settings and colors.'
-                  : 'Copy the inner content shape/type and paint geometry to every logo variant. Each keeps its outer settings and colors.'
-              }
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
-                innerAppliedToAll
-                  ? 'border-success/60 bg-success/10 text-success'
-                  : 'border-border bg-surface3 text-muted hover:text-text hover:border-muted'
-              }`}
-            >
-              {innerAppliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
-              {innerAppliedToAll ? 'Inner applied' : 'Apply inner to all'}
-            </button>
-            <button
-              type="button"
-              onClick={applyActiveInnerSettingsKeepColors}
-              title={
-                isSyncedWithFavicon
-                  ? 'Copy inner type, shape, and size only. Each favicon/logo variant keeps its own colors and paint edits.'
-                  : 'Copy inner type, shape, and size only. Each logo variant keeps its own colors and paint edits.'
-              }
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
-                innerSettingsAppliedToAll
-                  ? 'border-success/60 bg-success/10 text-success'
-                  : 'border-border bg-surface3 text-muted hover:text-text hover:border-muted'
-              }`}
-            >
-              {innerSettingsAppliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
-              {innerSettingsAppliedToAll ? 'Settings applied' : 'Duplicate icon settings (keep colors)'}
-            </button>
-          </div>
+          <ApplyToAllBar
+            applied={appliedToAll}
+            onApply={applySelectedToAll}
+            title={
+              isSyncedWithFavicon
+                ? 'Copy selected parts of this synced favicon/logo to every favicon and logo variant'
+                : 'Copy selected parts of this logo icon to every logo variant'
+            }
+          />
         )}
       </div>
 

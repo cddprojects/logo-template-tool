@@ -20,19 +20,20 @@ import { hasMultipleColors } from '../utils/iconUtils'
 import { recolorFieldsAfterImageChange } from '../utils/imageRecolor'
 import {
   applyPaintSaveToFavicon,
-  applyFaviconInnerContent,
-  applyFaviconInnerSettingsKeepColors,
+  applyFaviconToAllOptions,
   clearFaviconUploadedImage,
   mapFaviconStashToIconStash,
   outsideContentFromFavicon,
   switchFaviconContentType,
-  updateIconStashAfterSave
+  updateIconStashAfterSave,
+  type ApplyToAllOptions
 } from '../utils/paintSettingsSync'
 import { faviconContentToIconConfig } from './LogoEditor'
 import { contentTypeFromIconForFavicon, FAVICON_CONTENT_TYPE_OPTIONS, unwrapSvgPath } from '../utils/contentTypeSync'
 import { sanitizePaintSessionProxies, syncOutsideLettersIntoPaintSession } from '../utils/paintDecorations'
 import { CanvaPromptPanel } from './CanvaPromptPanel'
 import { resolveCanvaAppName } from '../utils/canvaPrompt'
+import { ApplyToAllBar } from './ApplyToAllBar'
 
 const MAX_VARIANTS = Infinity
 
@@ -139,8 +140,6 @@ export function FaviconEditor({
   const [labelInput, setLabelInput] = useState('')
   const [styleClipboard, setStyleClipboard] = useState<FaviconConfig | null>(null)
   const [appliedToAll, setAppliedToAll] = useState(false)
-  const [innerAppliedToAll, setInnerAppliedToAll] = useState(false)
-  const [innerSettingsAppliedToAll, setInnerSettingsAppliedToAll] = useState(false)
   const dragIndexRef = useRef<number | null>(null)
   const variantsRef = useRef(variants)
   const logoVariantsRef = useRef(logoVariants)
@@ -608,43 +607,17 @@ export function FaviconEditor({
     )
   }
 
-  /** Copy the active favicon's complete design to every favicon variant. */
-  const applyActiveFaviconToAll = () => {
+  /** Apply checkbox selection from the active favicon onto every other variant. */
+  const applySelectedToAll = (opts: ApplyToAllOptions) => {
     if (!config || !active || variants.length < 2) return
     onChange(
       variants.map((variant) => ({
         ...variant,
-        config: structuredClone(config)
+        config: applyFaviconToAllOptions(config, variant.config, opts)
       }))
     )
     setAppliedToAll(true)
     window.setTimeout(() => setAppliedToAll(false), 1600)
-  }
-
-  /** Copy only inner content geometry; keep each variant's outer + color slots. */
-  const applyActiveInnerToAll = () => {
-    if (!config || !active || variants.length < 2) return
-    onChange(
-      variants.map((variant) => ({
-        ...variant,
-        config: applyFaviconInnerContent(config, variant.config)
-      }))
-    )
-    setInnerAppliedToAll(true)
-    window.setTimeout(() => setInnerAppliedToAll(false), 1600)
-  }
-
-  /** Duplicate icon settings (keep colors) — geometry from source, colours + paint stay. */
-  const applyActiveInnerSettingsKeepColors = () => {
-    if (!config || !active || variants.length < 2) return
-    onChange(
-      variants.map((variant) => ({
-        ...variant,
-        config: applyFaviconInnerSettingsKeepColors(config, variant.config)
-      }))
-    )
-    setInnerSettingsAppliedToAll(true)
-    window.setTimeout(() => setInnerSettingsAppliedToAll(false), 1600)
   }
 
   // Drag-to-reorder variants.
@@ -868,47 +841,11 @@ export function FaviconEditor({
         )}
         </div>
         {variants.length > 1 && (
-          <div className="ml-1 flex items-center gap-1.5 shrink-0">
-            <button
-              type="button"
-              onClick={applyActiveFaviconToAll}
-              title="Copy this favicon's complete design to every favicon variant"
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
-                appliedToAll
-                  ? 'border-success/60 bg-success/10 text-success'
-                  : 'border-border bg-surface3 text-muted hover:text-text hover:border-muted'
-              }`}
-            >
-              {appliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
-              {appliedToAll ? 'Applied to all' : 'Apply favicon to all'}
-            </button>
-            <button
-              type="button"
-              onClick={applyActiveInnerToAll}
-              title="Copy only the inner content shape/type and paint geometry. Each variant keeps its outer settings and its own colors (primary, secondary, text, …)."
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
-                innerAppliedToAll
-                  ? 'border-success/60 bg-success/10 text-success'
-                  : 'border-border bg-surface3 text-muted hover:text-text hover:border-muted'
-              }`}
-            >
-              {innerAppliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
-              {innerAppliedToAll ? 'Inner applied' : 'Apply inner to all'}
-            </button>
-            <button
-              type="button"
-              onClick={applyActiveInnerSettingsKeepColors}
-              title="Copy inner type, shape, and size only. Each variant keeps its own colors and its paint edits."
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
-                innerSettingsAppliedToAll
-                  ? 'border-success/60 bg-success/10 text-success'
-                  : 'border-border bg-surface3 text-muted hover:text-text hover:border-muted'
-              }`}
-            >
-              {innerSettingsAppliedToAll ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
-              {innerSettingsAppliedToAll ? 'Settings applied' : 'Duplicate icon settings (keep colors)'}
-            </button>
-          </div>
+          <ApplyToAllBar
+            applied={appliedToAll}
+            onApply={applySelectedToAll}
+            title="Copy selected parts of this favicon onto every other favicon variant"
+          />
         )}
       </div>
 
