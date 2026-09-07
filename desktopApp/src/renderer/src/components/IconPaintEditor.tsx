@@ -2917,7 +2917,7 @@ function textPunchBitsFromSavedLayer(
   c.height = H
   const ctx = c.getContext('2d')
   if (!ctx) return { bits, enclosed: !!l.punchEnclosedHole }
-  renderText(ctx, { ...l, color: '#000000', shadow: false, punchThrough: false })
+  renderLineBase(ctx, { ...l, color: '#000000', shadow: false, punchThrough: false })
   const gd = ctx.getImageData(0, 0, W, H).data
   const hole = new Uint8Array(bits.length)
   let glyph = 0
@@ -10012,9 +10012,58 @@ export function IconPaintEditor({
   /**
    * Build a full-object punch silhouette so Punch hole works when the user sets
    * transparent colour via the picker (not only via Fill → click).
+   *
+   * Prefer painting into the object-local UV canvas (unrotated). destOutLocalPunch
+   * and rewriteDisplayBits then apply rot/scale — so opacity→0 + PH after rotate
+   * cuts the rotated silhouette, not an axis-aligned AABB.
    */
   const ensureObjectPunchSilhouette = (item: LineObj) => {
     if (item.punchMask || item.type === 'group') return
+    const mode: HoleFillMode =
+      transparentFillModeRef.current === 'punch' || item.punchThrough ? 'punch' : 'see-through'
+    const box = punchLocalBox(item)
+    // Reshape warps display space — keep the display-flood path for those.
+    if (box && !lineHasReshapeWarp(item)) {
+      const cw = Math.max(1, Math.round(box.w))
+      const ch = Math.max(1, Math.round(box.h))
+      const canvas = document.createElement('canvas')
+      canvas.width = cw
+      canvas.height = ch
+      const pctx = canvas.getContext('2d')!
+      pctx.imageSmoothingEnabled = false
+      pctx.translate(-box.x, -box.y)
+      const draft: LineObj = {
+        ...item,
+        // Local UV only — rot/scale applied later when punching / rewriting bits.
+        rot: 0,
+        scaleX: 1,
+        scaleY: 1,
+        transformOrigin: undefined,
+        punchThrough: false,
+        shadow: false,
+        color: '#000000',
+        borderColor: '#000000',
+        fill: item.type === 'shape' || item.type === 'poly' ? true : item.fill
+      }
+      renderLineBody(pctx, draft)
+      const data = pctx.getImageData(0, 0, cw, ch).data
+      let n = 0
+      for (let i = 3; i < data.length; i += 4) {
+        if (data[i] > 8) n++
+      }
+      if (n > 0) {
+        const other: HoleFillMode = mode === 'punch' ? 'see-through' : 'punch'
+        const canvasMap = mode === 'punch' ? punchMaskCanvases : seeThroughMaskCanvases
+        const otherCanvas = mode === 'punch' ? seeThroughMaskCanvases : punchMaskCanvases
+        const otherBits = mode === 'punch' ? seeThroughMaskBits : punchMaskBits
+        otherCanvas.delete(item.id)
+        otherBits.delete(item.id)
+        canvasMap.set(item.id, canvas)
+        rewriteDisplayBits(item as HoleItem, W, H, holeGeom, mode)
+        syncHoleFlags(item as HoleItem)
+        return
+      }
+    }
     const probe = takeCanvas(W, H)
     try {
       const pctx = probe.getContext('2d')!
@@ -10023,16 +10072,12 @@ export function IconPaintEditor({
         ...item,
         punchThrough: false,
         shadow: false,
-        // Force opaque ink — transparent fills hide the body otherwise.
         color: '#000000',
         borderColor: '#000000',
         fill: item.type === 'shape' || item.type === 'poly' ? true : item.fill
       }
-      if (item.type === 'text') {
-        renderText(pctx, draft)
-      } else {
-        renderLineBase(pctx, draft)
-      }
+      // Display-space flood must include rot/scale (renderText alone does not).
+      renderLineBase(pctx, draft)
       const data = pctx.getImageData(0, 0, W, H).data
       const filled = new Uint8Array(W * H)
       let n = 0
@@ -10041,11 +10086,7 @@ export function IconPaintEditor({
         filled[p] = 1
         n++
       }
-      if (n > 0) {
-        const mode: HoleFillMode =
-          transparentFillModeRef.current === 'punch' || item.punchThrough ? 'punch' : 'see-through'
-        setLocalPunchFromFilled(item, filled, W, H, { mode })
-      }
+      if (n > 0) setLocalPunchFromFilled(item, filled, W, H, { mode, replace: true })
     } finally {
       releaseCanvas(probe)
     }
@@ -13844,7 +13885,8 @@ export function IconPaintEditor({
               const probe = takeCanvas(W, H)
               try {
                 const pctx = probe.getContext('2d')!
-                renderText(pctx, { ...l, color: '#000000', shadow: false, punchThrough: false })
+                // renderLineBase applies rot/scale (renderText alone does not).
+                renderLineBase(pctx, { ...l, color: '#000000', shadow: false, punchThrough: false })
                 const data = pctx.getImageData(0, 0, W, H).data
                 const ink = new Uint8Array(W * H)
                 for (let p = 0; p < ink.length; p++) {
