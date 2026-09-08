@@ -5500,16 +5500,23 @@ export function IconPaintEditor({
   const layerOrderRef = useRef(layerOrder)
   layerOrderRef.current = layerOrder
   const draggedLayerRef = useRef<string | null>(null)
-  /** Scrollable Layers list — edge + wheel assist while reordering. */
+  /** Scrollable Layers list — edge auto-scroll while pointer-reordering. */
   const layersPanelScrollRef = useRef<HTMLDivElement | null>(null)
   const layersDragScrollRafRef = useRef<number | null>(null)
   const layersDragScrollVelRef = useRef(0)
-  const layersDragWheelCleanupRef = useRef<(() => void) | null>(null)
+  const layersPointerPendingRef = useRef<{ key: string; x: number; y: number } | null>(null)
+  const layersPointerLastClientRef = useRef({ x: 0, y: 0 })
+  const layersPointerDetachRef = useRef<(() => void) | null>(null)
+  const layersPointerMoveHandlerRef = useRef<(e: PointerEvent) => void>(() => {})
+  const layersPointerUpHandlerRef = useRef<() => void>(() => {})
   type LayerDropPosition = 'before' | 'after' | 'inside'
   const [layerDropTarget, setLayerDropTarget] = useState<{
     key: string
     position: LayerDropPosition
   } | null>(null)
+  const layerDropTargetRef = useRef(layerDropTarget)
+  layerDropTargetRef.current = layerDropTarget
+  const [layerPointerDragging, setLayerPointerDragging] = useState(false)
   const [collapsedGroupIds, setCollapsedGroupIds] = useState<Set<string>>(() => new Set())
   const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null)
   const [layerNameDraft, setLayerNameDraft] = useState('')
@@ -7140,8 +7147,8 @@ export function IconPaintEditor({
         cancelAnimationFrame(layersDragScrollRafRef.current)
         layersDragScrollRafRef.current = null
       }
-      layersDragWheelCleanupRef.current?.()
-      layersDragWheelCleanupRef.current = null
+      layersPointerDetachRef.current?.()
+      layersPointerDetachRef.current = null
     }
   }, [])
 
@@ -14613,12 +14620,12 @@ export function IconPaintEditor({
     return true
   }
 
-  const dropPositionForRow = (
-    e: React.DragEvent<HTMLElement>,
+  const dropPositionForRect = (
+    rect: DOMRect,
+    clientY: number,
     allowInside: boolean
   ): LayerDropPosition => {
-    const rect = e.currentTarget.getBoundingClientRect()
-    const ratio = rect.height > 0 ? (e.clientY - rect.top) / rect.height : 0.5
+    const ratio = rect.height > 0 ? (clientY - rect.top) / rect.height : 0.5
     // Most of a group row is a nesting target; narrow edge strips still allow
     // precise reordering immediately above or below the group.
     if (allowInside && ratio >= 0.15 && ratio <= 0.85) return 'inside'
@@ -14633,24 +14640,33 @@ export function IconPaintEditor({
     }
   }
 
-  /** Wheel + edge auto-scroll so hierarchy drags can move past the visible list. */
-  const endLayersPanelDragAssist = () => {
-    stopLayersPanelEdgeScroll()
-    layersDragWheelCleanupRef.current?.()
-    layersDragWheelCleanupRef.current = null
-  }
-
-  const beginLayersPanelDragAssist = () => {
-    if (layersDragWheelCleanupRef.current) return
-    const onWheel = (e: WheelEvent) => {
-      if (!draggedLayerRef.current) return
-      const el = layersPanelScrollRef.current
-      if (!el) return
-      el.scrollTop += e.deltaY
-      e.preventDefault()
+  const resolveLayerDropAtPoint = (clientX: number, clientY: number) => {
+    const dragged = draggedLayerRef.current
+    if (!dragged) return
+    const stack = document.elementsFromPoint(clientX, clientY)
+    let row: HTMLElement | null = null
+    for (const node of stack) {
+      if (!(node instanceof Element)) continue
+      const hit = node.closest('[data-layer-drop-key]')
+      if (hit instanceof HTMLElement) {
+        row = hit
+        break
+      }
     }
-    window.addEventListener('wheel', onWheel, { passive: false })
-    layersDragWheelCleanupRef.current = () => window.removeEventListener('wheel', onWheel)
+    if (!row) return
+    const key = row.getAttribute('data-layer-drop-key')
+    if (!key || key === dragged) return
+    let allowInside = false
+    if (key.startsWith('object:')) {
+      const id = key.slice(7)
+      const target = linesRef.current.find((item) => item.id === id)
+      allowInside =
+        target?.type === 'group' && canNestDraggedIntoGroup(dragged, id)
+    }
+    const position = dropPositionForRect(row.getBoundingClientRect(), clientY, allowInside)
+    setLayerDropTarget((prev) =>
+      prev?.key === key && prev.position === position ? prev : { key, position }
+    )
   }
 
   const updateLayersPanelDragScroll = (clientY: number) => {
@@ -14684,9 +14700,86 @@ export function IconPaintEditor({
         return
       }
       list.scrollTop += speed
+      const { x, y } = layersPointerLastClientRef.current
+      resolveLayerDropAtPoint(x, y)
       layersDragScrollRafRef.current = requestAnimationFrame(tick)
     }
     layersDragScrollRafRef.current = requestAnimationFrame(tick)
+  }
+
+  const detachLayersPointerListeners = () => {
+    layersPointerDetachRef.current?.()
+    layersPointerDetachRef.current = null
+  }
+
+  const endLayersPointerDrag = (commit: boolean) => {
+    const dragged = draggedLayerRef.current
+    const target = layerDropTargetRef.current
+    layersPointerPendingRef.current = null
+    draggedLayerRef.current = null
+    setLayerDropTarget(null)
+    setLayerPointerDragging(false)
+    stopLayersPanelEdgeScroll()
+    detachLayersPointerListeners()
+    if (commit && dragged && target && target.key !== dragged) {
+      dropLayerItem(dragged, target.key, target.position)
+    }
+  }
+
+  const attachLayersPointerListeners = () => {
+    if (layersPointerDetachRef.current) return
+    const move = (e: PointerEvent) => layersPointerMoveHandlerRef.current(e)
+    const up = () => layersPointerUpHandlerRef.current()
+    const onWheel = (e: WheelEvent) => {
+      if (!draggedLayerRef.current) return
+      const el = layersPanelScrollRef.current
+      if (!el) return
+      el.scrollTop += e.deltaY
+      e.preventDefault()
+      const { x, y } = layersPointerLastClientRef.current
+      resolveLayerDropAtPoint(x, y)
+    }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+    window.addEventListener('wheel', onWheel, { passive: false })
+    layersPointerDetachRef.current = () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      window.removeEventListener('wheel', onWheel)
+    }
+  }
+
+  layersPointerMoveHandlerRef.current = (e: PointerEvent) => {
+    const pending = layersPointerPendingRef.current
+    if (pending && !draggedLayerRef.current) {
+      const dx = e.clientX - pending.x
+      const dy = e.clientY - pending.y
+      if (dx * dx + dy * dy < 25) return
+      draggedLayerRef.current = pending.key
+      layersPointerPendingRef.current = null
+      setLayerDropTarget(null)
+      setLayerPointerDragging(true)
+    }
+    if (!draggedLayerRef.current) return
+    layersPointerLastClientRef.current = { x: e.clientX, y: e.clientY }
+    updateLayersPanelDragScroll(e.clientY)
+    resolveLayerDropAtPoint(e.clientX, e.clientY)
+  }
+
+  layersPointerUpHandlerRef.current = () => {
+    if (draggedLayerRef.current) endLayersPointerDrag(true)
+    else {
+      layersPointerPendingRef.current = null
+      detachLayersPointerListeners()
+    }
+  }
+
+  const beginLayersPointerReorder = (key: string, clientX: number, clientY: number) => {
+    layersPointerPendingRef.current = { key, x: clientX, y: clientY }
+    layersPointerLastClientRef.current = { x: clientX, y: clientY }
+    attachLayersPointerListeners()
   }
 
   /**
@@ -16672,18 +16765,18 @@ export function IconPaintEditor({
           <div className="px-3 py-2 border-b border-border shrink-0">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">Layers</p>
             <p className="text-[9px] text-muted/70 mt-0.5">
-              Drag above/below · scroll while dragging · drop on group centre to nest · below Inner/Outer paint to send behind
+              Drag above/below · scroll or edge-hover while dragging · drop on group centre to nest · below Inner/Outer paint to send behind
             </p>
           </div>
           <div
             ref={layersPanelScrollRef}
-            className="flex-1 min-h-0 overflow-y-scroll p-2 space-y-1.5"
-            onDragOver={(e) => {
+            className={`flex-1 min-h-0 overflow-y-scroll p-2 space-y-1.5${
+              layerPointerDragging ? ' cursor-grabbing select-none' : ''
+            }`}
+            onScroll={() => {
               if (!draggedLayerRef.current) return
-              e.preventDefault()
-              e.stopPropagation()
-              e.dataTransfer.dropEffect = 'move'
-              updateLayersPanelDragScroll(e.clientY)
+              const { x, y } = layersPointerLastClientRef.current
+              resolveLayerDropAtPoint(x, y)
             }}
           >
             {layerOrder.map((id) => {
@@ -16716,9 +16809,11 @@ export function IconPaintEditor({
                       return (
                         <div
                           key={key}
-                          draggable={renamingLayerId !== l.id}
-                          onMouseDown={(e) => {
+                          data-layer-drop-key={key}
+                          onPointerDown={(e) => {
                             if (e.button !== 0 || renamingLayerId === l.id) return
+                            const t = e.target as HTMLElement | null
+                            if (t?.closest?.('input,button,textarea,a')) return
                             if (!effectivelyEnabled) return
                             selectedBaseLayerRef.current = null
                             setSelectedBaseLayer(null)
@@ -16740,65 +16835,18 @@ export function IconPaintEditor({
                             setTool('pointer')
                             redrawLines()
                             drawHandles()
+                            beginLayersPointerReorder(key, e.clientX, e.clientY)
                           }}
                           onDoubleClick={(e) => {
                             e.stopPropagation()
                             setRenamingLayerId(l.id)
                             setLayerNameDraft(l.name ?? defaultObjectLayerName(l))
                           }}
-                          onDragStart={(e) => {
-                            e.stopPropagation()
-                            draggedLayerRef.current = key
-                            setLayerDropTarget(null)
-                            beginLayersPanelDragAssist()
-                            e.dataTransfer.effectAllowed = 'move'
-                            e.dataTransfer.setData(PAINT_LAYER_MIME, key)
-                            e.dataTransfer.setData('text/plain', key)
-                          }}
-                          onDragOver={(e) => {
-                            if (draggedLayerRef.current && draggedLayerRef.current !== key) {
-                              e.preventDefault()
-                              e.stopPropagation()
-                              e.dataTransfer.dropEffect = 'move'
-                              updateLayersPanelDragScroll(e.clientY)
-                              const allowInside =
-                                l.type === 'group' &&
-                                canNestDraggedIntoGroup(draggedLayerRef.current, l.id)
-                              const position = dropPositionForRow(e, allowInside)
-                              setLayerDropTarget((prev) =>
-                                prev?.key === key && prev.position === position
-                                  ? prev
-                                  : { key, position }
-                              )
-                            }
-                          }}
-                          onDragLeave={(e) => {
-                            if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-                              setLayerDropTarget((prev) => prev?.key === key ? null : prev)
-                            }
-                          }}
-                          onDrop={(e) => {
-                            e.preventDefault()
-                            e.stopPropagation()
-                            const dragged = draggedLayerRef.current
-                            const allowInside =
-                              l.type === 'group' &&
-                              canNestDraggedIntoGroup(dragged, l.id)
-                            const position =
-                              layerDropTarget?.key === key
-                                ? layerDropTarget.position
-                                : dropPositionForRow(e, allowInside)
-                            draggedLayerRef.current = null
-                            setLayerDropTarget(null)
-                            endLayersPanelDragAssist()
-                            if (dragged) dropLayerItem(dragged, key, position)
-                          }}
-                          onDragEnd={() => {
-                            draggedLayerRef.current = null
-                            setLayerDropTarget(null)
-                            endLayersPanelDragAssist()
-                          }}
                           className={`relative flex items-center gap-1.5 rounded-lg border px-1.5 py-1.5 text-[11px] transition-colors cursor-pointer ${
+                            layerPointerDragging && draggedLayerRef.current === key
+                              ? 'opacity-45 '
+                              : ''
+                          }${
                             layerDropTarget?.key === key && layerDropTarget.position === 'inside'
                               ? 'ring-2 ring-accent bg-accent/25 '
                               : ''
@@ -16810,7 +16858,7 @@ export function IconPaintEditor({
                                 : 'border-border bg-surface3/40 text-muted opacity-55'
                           }`}
                           style={{ marginLeft: depth * 16 }}
-                          title="Drag to reorder · double-click name to rename"
+                          title="Drag to reorder · scroll while dragging · double-click name to rename"
                         >
                           {layerDropTarget?.key === key && layerDropTarget.position !== 'inside' && (
                             <span
@@ -16821,7 +16869,7 @@ export function IconPaintEditor({
                               <span className="absolute -left-0.5 -top-1 w-2 h-2 rounded-full bg-accent" />
                             </span>
                           )}
-                          <GripVertical size={13} className="cursor-grab shrink-0" />
+                          <GripVertical size={13} className="cursor-grab shrink-0 text-muted" />
                           {l.type === 'group' ? (
                             <button
                               type="button"
@@ -16945,9 +16993,11 @@ export function IconPaintEditor({
                     })}
                   {!belowBase && (
                   <div
-                    draggable={!disabled}
-                    onMouseDown={() => {
-                      if (disabled) return
+                    data-layer-drop-key={`base:${id}`}
+                    onPointerDown={(e) => {
+                      if (disabled || e.button !== 0) return
+                      const t = e.target as HTMLElement | null
+                      if (t?.closest?.('input,button,textarea,a')) return
                       setTool('pointer')
                       selectedBaseLayerRef.current = id
                       setSelectedBaseLayer(id)
@@ -16956,58 +17006,13 @@ export function IconPaintEditor({
                       setSelectedLayerIds(new Set())
                       clearPreview()
                       requestAnimationFrame(() => drawHandles())
-                    }}
-                    onDragStart={(e) => {
-                      e.stopPropagation()
-                      const key = `base:${id}`
-                      draggedLayerRef.current = key
-                      setLayerDropTarget(null)
-                      beginLayersPanelDragAssist()
-                      e.dataTransfer.effectAllowed = 'move'
-                      e.dataTransfer.setData(PAINT_LAYER_MIME, key)
-                      e.dataTransfer.setData('text/plain', key)
-                    }}
-                    onDragOver={(e) => {
-                      const key = `base:${id}`
-                      if (draggedLayerRef.current && draggedLayerRef.current !== key) {
-                        e.preventDefault()
-                        e.stopPropagation()
-                        e.dataTransfer.dropEffect = 'move'
-                        updateLayersPanelDragScroll(e.clientY)
-                        const position = dropPositionForRow(e, false)
-                        setLayerDropTarget((prev) =>
-                          prev?.key === key && prev.position === position
-                            ? prev
-                            : { key, position }
-                        )
-                      }
-                    }}
-                    onDragLeave={(e) => {
-                      const key = `base:${id}`
-                      if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
-                        setLayerDropTarget((prev) => prev?.key === key ? null : prev)
-                      }
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault()
-                      e.stopPropagation()
-                      const dragged = draggedLayerRef.current
-                      const key = `base:${id}`
-                      const position =
-                        layerDropTarget?.key === key
-                          ? layerDropTarget.position
-                          : dropPositionForRow(e, false)
-                      draggedLayerRef.current = null
-                      setLayerDropTarget(null)
-                      endLayersPanelDragAssist()
-                      if (dragged) dropLayerItem(dragged, key, position)
-                    }}
-                    onDragEnd={() => {
-                      draggedLayerRef.current = null
-                      setLayerDropTarget(null)
-                      endLayersPanelDragAssist()
+                      beginLayersPointerReorder(`base:${id}`, e.clientX, e.clientY)
                     }}
                     className={`relative flex items-center gap-1.5 rounded-lg border px-1.5 py-2 text-[11px] transition-colors ${
+                      layerPointerDragging && draggedLayerRef.current === `base:${id}`
+                        ? 'opacity-45 '
+                        : ''
+                    }${
                       disabled
                         ? 'opacity-40 border-border text-muted cursor-not-allowed'
                         : selectedBaseLayer === id
