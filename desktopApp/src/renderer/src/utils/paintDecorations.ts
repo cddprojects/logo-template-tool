@@ -514,7 +514,12 @@ export function sessionHasLinkedOutsideText(
 export function sessionHasLayeredDecorations(
   session: PaintSession | null | undefined
 ): boolean {
-  return !!(session?.containerDecorationsPng || session?.contentDecorationsPng)
+  return !!(
+    session?.containerDecorationsPng ||
+    session?.contentDecorationsPng ||
+    session?.contentAboveDecorationsPng ||
+    session?.contentBelowDecorationsPng
+  )
 }
 
 /**
@@ -761,12 +766,25 @@ export async function applyPaintLayerDecorations(
 
   const layeredPng =
     layer === 'container' ? session.containerDecorationsPng : session.contentDecorationsPng
-  if (layeredPng) {
+  if (layer === 'content') {
+    // Apply Edit may keep above/below planes separate. Prefer those so the first
+    // Apply does not depend on a sync composite of large data URLs (objects were
+    // missing until a second Apply when Image.complete became true).
+    const below = session.contentBelowDecorationsPng
+    const above = session.contentAboveDecorationsPng
+    if (below || above) {
+      if (below) await drawScaledPng(ctx, below, x, y, size, session, shapeFallback)
+      if (above) await drawScaledPng(ctx, above, x, y, size, session, shapeFallback)
+    } else if (layeredPng) {
+      await drawScaledPng(ctx, layeredPng, x, y, size, session, shapeFallback)
+    } else {
+      await drawScaledPng(ctx, session.contentPng, x, y, size, session, shapeFallback)
+    }
+  } else if (layeredPng) {
     await drawScaledPng(ctx, layeredPng, x, y, size, session, shapeFallback)
   } else {
     // Pre-layered sessions: fall back to raw overlay for this layer only.
-    const overlay = layer === 'container' ? session.containerPng : session.contentPng
-    await drawScaledPng(ctx, overlay, x, y, size, session, shapeFallback)
+    await drawScaledPng(ctx, session.containerPng, x, y, size, session, shapeFallback)
   }
 
   if (layer === 'content' && shouldRenderContentVectorsLive(session)) {

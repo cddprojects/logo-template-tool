@@ -595,20 +595,64 @@ function sourceHasBelowBaseContent(session: PaintSession): boolean {
 
 /** Draw data-URL PNGs in order onto a transparent canvas (sync for data URLs). */
 function compositeSessionPngs(resolution: number, pngs: Array<string | undefined | null>): string {
+  const layers = pngs.filter((src): src is string => !!src)
+  if (layers.length === 0) return emptyOverlayPng(resolution)
+  // Single plane: return as-is so object-baked decorations are never re-encoded
+  // through a sync Image decode that can miss on the first Apply pass.
+  if (layers.length === 1) return layers[0]!
+
   const c = document.createElement('canvas')
   c.width = Math.max(1, resolution)
   c.height = Math.max(1, resolution)
   const ctx = c.getContext('2d')
-  if (!ctx) return emptyOverlayPng(resolution)
-  for (const src of pngs) {
-    if (!src) continue
+  if (!ctx) return layers[layers.length - 1]!
+  let drew = 0
+  let missed = false
+  for (const src of layers) {
     const img = new Image()
     img.src = src
     if (img.complete && img.naturalWidth > 0) {
       ctx.drawImage(img, 0, 0)
+      drew++
+    } else {
+      missed = true
     }
   }
+  // First Apply often hits incomplete decode for large decoration data URLs.
+  // Prefer a non-blank plane over a hollow composite — preview also draws
+  // contentAbove/Below separately when present.
+  if (missed || drew === 0) {
+    for (let i = layers.length - 1; i >= 0; i--) {
+      if (!isBlankOverlayDataUrl(layers[i], resolution)) return layers[i]!
+    }
+    return layers[layers.length - 1]!
+  }
   return c.toDataURL('image/png')
+}
+
+function isBlankOverlayDataUrl(dataUrl: string | undefined | null, resolution: number): boolean {
+  if (!dataUrl) return true
+  return dataUrl === emptyOverlayPng(resolution)
+}
+
+/** Merge below + above content decoration planes for Apply Edit layer splits. */
+function mergeContentDecorationPlanes(
+  resolution: number,
+  below: string | undefined | null,
+  above: string | undefined | null
+): {
+  contentDecorationsPng: string
+  contentAboveDecorationsPng: string
+  contentBelowDecorationsPng: string
+} {
+  const empty = emptyOverlayPng(resolution)
+  const belowPlane = !isBlankOverlayDataUrl(below, resolution) ? below! : null
+  const abovePlane = !isBlankOverlayDataUrl(above, resolution) ? above! : null
+  return {
+    contentBelowDecorationsPng: belowPlane ?? empty,
+    contentAboveDecorationsPng: abovePlane ?? empty,
+    contentDecorationsPng: compositeSessionPngs(resolution, [belowPlane, abovePlane])
+  }
 }
 
 /** Inner Edit decorations: overlay + objects at/above Inner paint (never belowBase). */
@@ -1333,18 +1377,17 @@ function mergePaintInnerFromSource(
   const targetBelowDecor =
     targetSession.contentBelowDecorationsPng ??
     (sourceHasBelowBaseContent(targetSession) ? undefined : empty)
+  const decorPlanes = mergeContentDecorationPlanes(
+    targetSession.resolution,
+    targetBelowDecor,
+    innerDecor
+  )
   return {
     ...targetSession,
     containerPng: targetSession.containerPng,
     containerDecorationsPng: targetSession.containerDecorationsPng,
     contentPng: sourceSession.contentPng,
-    contentDecorationsPng: compositeSessionPngs(targetSession.resolution, [
-      targetBelowDecor,
-      innerDecor
-    ]),
-    contentAboveDecorationsPng: sourceSession.contentAboveDecorationsPng ?? innerDecor,
-    contentBelowDecorationsPng:
-      targetSession.contentBelowDecorationsPng ?? targetBelowDecor ?? empty,
+    ...decorPlanes,
     decorationsPng: undefined,
     vectors: [...keepOuter, ...takeInnerRebased],
     punchMasks: punchMasks.length ? punchMasks : undefined,
@@ -1378,16 +1421,15 @@ function mergePaintOuterFromSource(
     (sourceHasBelowBaseContent(sourceSession) ? undefined : empty)
 
   if (!targetSession) {
-    const aboveEmpty = empty
+    const decorPlanes = mergeContentDecorationPlanes(
+      sourceSession.resolution,
+      sourceBelow,
+      empty
+    )
     return {
       ...structuredClone(sourceSession),
       contentPng: empty,
-      contentDecorationsPng: compositeSessionPngs(sourceSession.resolution, [
-        sourceBelow,
-        aboveEmpty
-      ]),
-      contentAboveDecorationsPng: aboveEmpty,
-      contentBelowDecorationsPng: sourceBelow ?? empty,
+      ...decorPlanes,
       decorationsPng: undefined,
       vectors: structuredClone(takeOuter),
       punchMasks: sourceSession.punchMasks?.filter((m) => m.layer === 'container'),
@@ -1420,17 +1462,17 @@ function mergePaintOuterFromSource(
   const targetAbove =
     targetSession.contentAboveDecorationsPng ??
     contentDecorationsForEditInner(targetSession)
+  const decorPlanes = mergeContentDecorationPlanes(
+    targetSession.resolution,
+    sourceBelow,
+    targetAbove
+  )
   return {
     ...targetSession,
     containerPng: sourceSession.containerPng,
     containerDecorationsPng: sourceSession.containerDecorationsPng,
     contentPng: targetSession.contentPng,
-    contentDecorationsPng: compositeSessionPngs(targetSession.resolution, [
-      sourceBelow,
-      targetAbove
-    ]),
-    contentAboveDecorationsPng: targetAbove,
-    contentBelowDecorationsPng: sourceBelow ?? empty,
+    ...decorPlanes,
     decorationsPng: undefined,
     vectors: [...keepInner, ...takeOuterRebased],
     punchMasks: punchMasks.length ? punchMasks : undefined,
