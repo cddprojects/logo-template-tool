@@ -7232,28 +7232,104 @@ export function IconPaintEditor({
     y: boolean
     xAt: AlignmentPoint | null
     yAt: AlignmentPoint | null
+    /** Absolute guide positions (object or canvas). Prefer over xAt/yAt when set. */
+    xGuide?: number | null
+    yGuide?: number | null
+    xLabel?: string | null
+    yLabel?: string | null
   }
-  /** Snap an item's centre or outer edges to matching canvas guides. */
-  const snapRectToCanvas = (item: { x: number; y: number; w: number; h: number }): AlignmentSnap => {
+
+  /** ~4 CSS px — weak enough to nudge, easy to override with many objects. */
+  const weakSnapThreshold = (): number => {
     const screenRect = previewRef.current?.getBoundingClientRect()
     const scale = screenRect?.width ? W / screenRect.width : 1
-    // Same deliberately-light magnetic range for centre and all four edges.
-    const threshold = 6 * scale
-    const xCandidates: { delta: number; at: AlignmentPoint }[] = [
-      { delta: -item.x, at: 'start' },
-      { delta: W / 2 - (item.x + item.w / 2), at: 'center' },
-      { delta: W - (item.x + item.w), at: 'end' }
+    return 4 * scale
+  }
+
+  type SnapGuide = {
+    value: number
+    at: AlignmentPoint | null
+    label: string
+  }
+
+  /** Canvas edges/centre plus other visible object edges/centres (and optional sizes). */
+  const collectSnapGuides = (excludeIds?: Set<string>) => {
+    const xGuides: SnapGuide[] = [
+      { value: 0, at: 'start', label: 'Left edge' },
+      { value: W / 2, at: 'center', label: 'Center' },
+      { value: W, at: 'end', label: 'Right edge' }
     ]
-    const yCandidates: { delta: number; at: AlignmentPoint }[] = [
-      { delta: -item.y, at: 'start' },
-      { delta: H / 2 - (item.y + item.h / 2), at: 'center' },
-      { delta: H - (item.y + item.h), at: 'end' }
+    const yGuides: SnapGuide[] = [
+      { value: 0, at: 'start', label: 'Top edge' },
+      { value: H / 2, at: 'center', label: 'Center' },
+      { value: H, at: 'end', label: 'Bottom edge' }
     ]
+    const widths: number[] = [W / 2]
+    const heights: number[] = [H / 2]
+    const exclude = excludeIds ?? new Set<string>()
+    for (const other of linesRef.current) {
+      if (exclude.has(other.id)) continue
+      if (!isVectorVisible(other)) continue
+      if (other.marqueeItem || other.punchMask) continue
+      if (other.parentId && exclude.has(other.parentId)) continue
+      const b = boundsForLine(other)
+      if (!(b.w > 0) || !(b.h > 0)) continue
+      xGuides.push(
+        { value: b.x, at: null, label: 'Align' },
+        { value: b.x + b.w / 2, at: null, label: 'Align' },
+        { value: b.x + b.w, at: null, label: 'Align' }
+      )
+      yGuides.push(
+        { value: b.y, at: null, label: 'Align' },
+        { value: b.y + b.h / 2, at: null, label: 'Align' },
+        { value: b.y + b.h, at: null, label: 'Align' }
+      )
+      widths.push(b.w)
+      heights.push(b.h)
+    }
+    return { xGuides, yGuides, widths, heights }
+  }
+
+  /**
+   * Weak snap: item edges/centre ↔ canvas + other objects.
+   * Nearest hit within a tiny threshold wins so crowded canvases stay adjustable.
+   */
+  const snapRectToGuides = (
+    item: { x: number; y: number; w: number; h: number },
+    excludeIds?: Set<string>
+  ): AlignmentSnap => {
+    const threshold = weakSnapThreshold()
+    const { xGuides, yGuides } = collectSnapGuides(excludeIds)
+    const xEdges = [item.x, item.x + item.w / 2, item.x + item.w]
+    const yEdges = [item.y, item.y + item.h / 2, item.y + item.h]
+    type Cand = { delta: number; at: AlignmentPoint | null; guide: number; label: string }
+    const xCandidates: Cand[] = []
+    const yCandidates: Cand[] = []
+    for (const g of xGuides) {
+      for (const edge of xEdges) {
+        xCandidates.push({
+          delta: g.value - edge,
+          at: g.at,
+          guide: g.value,
+          label: g.label
+        })
+      }
+    }
+    for (const g of yGuides) {
+      for (const edge of yEdges) {
+        yCandidates.push({
+          delta: g.value - edge,
+          at: g.at,
+          guide: g.value,
+          label: g.label
+        })
+      }
+    }
     const xMatch = xCandidates
-      .filter((candidate) => Math.abs(candidate.delta) <= threshold)
+      .filter((c) => Math.abs(c.delta) <= threshold)
       .sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta))[0]
     const yMatch = yCandidates
-      .filter((candidate) => Math.abs(candidate.delta) <= threshold)
+      .filter((c) => Math.abs(c.delta) <= threshold)
       .sort((a, b) => Math.abs(a.delta) - Math.abs(b.delta))[0]
     return {
       dx: xMatch?.delta ?? 0,
@@ -7261,9 +7337,19 @@ export function IconPaintEditor({
       x: !!xMatch,
       y: !!yMatch,
       xAt: xMatch?.at ?? null,
-      yAt: yMatch?.at ?? null
+      yAt: yMatch?.at ?? null,
+      xGuide: xMatch?.guide ?? null,
+      yGuide: yMatch?.guide ?? null,
+      xLabel: xMatch?.label ?? null,
+      yLabel: yMatch?.label ?? null
     }
   }
+
+  /** @deprecated name kept for call-site clarity — now includes object guides. */
+  const snapRectToCanvas = (
+    item: { x: number; y: number; w: number; h: number },
+    excludeIds?: Set<string>
+  ): AlignmentSnap => snapRectToGuides(item, excludeIds)
 
   const boundsForLine = (l: LineObj): { x: number; y: number; w: number; h: number } => {
     const points = flattenLine(l).map((pt) => mapObjDisplayPt(pt, l))
@@ -7507,14 +7593,18 @@ export function IconPaintEditor({
     p.lineWidth = Math.max(1, 1.25 * scale)
     p.setLineDash([5 * scale, 4 * scale])
     if (snap.x) {
-      const gx = snap.xAt === 'start' ? 1 * scale : snap.xAt === 'end' ? W - 1 * scale : cx
+      const gx = snap.xGuide ?? (
+        snap.xAt === 'start' ? 1 * scale : snap.xAt === 'end' ? W - 1 * scale : cx
+      )
       p.beginPath()
       p.moveTo(gx, 0)
       p.lineTo(gx, H)
       p.stroke()
     }
     if (snap.y) {
-      const gy = snap.yAt === 'start' ? 1 * scale : snap.yAt === 'end' ? H - 1 * scale : cy
+      const gy = snap.yGuide ?? (
+        snap.yAt === 'start' ? 1 * scale : snap.yAt === 'end' ? H - 1 * scale : cy
+      )
       p.beginPath()
       p.moveTo(0, gy)
       p.lineTo(W, gy)
@@ -7522,25 +7612,45 @@ export function IconPaintEditor({
     }
     p.setLineDash([])
     p.font = `600 ${11 * scale}px Inter, sans-serif`
-    if (snap.xAt === 'center' || snap.yAt === 'center') {
+    const xLabel = snap.xLabel ?? (
+      snap.xAt === 'center' ? 'Center'
+        : snap.xAt === 'start' ? 'Left edge'
+          : snap.xAt === 'end' ? 'Right edge'
+            : null
+    )
+    const yLabel = snap.yLabel ?? (
+      snap.yAt === 'center' ? 'Center'
+        : snap.yAt === 'start' ? 'Top edge'
+          : snap.yAt === 'end' ? 'Bottom edge'
+            : null
+    )
+    if (snap.x && xLabel) {
+      const gx = snap.xGuide ?? (
+        snap.xAt === 'start' ? 1 * scale : snap.xAt === 'end' ? W - 1 * scale : cx
+      )
+      p.textAlign = gx < W / 2 ? 'left' : 'right'
+      p.textBaseline = 'top'
+      p.fillText(xLabel, gx < W / 2 ? gx + 7 * scale : gx - 7 * scale, 7 * scale)
+    }
+    if (snap.y && yLabel && yLabel !== xLabel) {
+      const gy = snap.yGuide ?? (
+        snap.yAt === 'start' ? 1 * scale : snap.yAt === 'end' ? H - 1 * scale : cy
+      )
+      p.textAlign = 'left'
+      p.textBaseline = gy < H / 2 ? 'top' : 'bottom'
+      p.fillText(yLabel, 7 * scale, gy < H / 2 ? gy + 7 * scale : gy - 7 * scale)
+    } else if (snap.y && yLabel && !snap.x) {
+      const gy = snap.yGuide ?? (
+        snap.yAt === 'start' ? 1 * scale : snap.yAt === 'end' ? H - 1 * scale : cy
+      )
+      p.textAlign = 'left'
+      p.textBaseline = gy < H / 2 ? 'top' : 'bottom'
+      p.fillText(yLabel, 7 * scale, gy < H / 2 ? gy + 7 * scale : gy - 7 * scale)
+    }
+    if ((snap.xAt === 'center' || snap.yAt === 'center') && (snap.xGuide == null || snap.xGuide === cx) && (snap.yGuide == null || snap.yGuide === cy)) {
       p.beginPath()
       p.arc(cx, cy, 3.5 * scale, 0, Math.PI * 2)
       p.fill()
-      p.textAlign = 'left'
-      p.textBaseline = 'bottom'
-      p.fillText('Center', cx + 7 * scale, cy - 6 * scale)
-    }
-    if (snap.xAt === 'start' || snap.xAt === 'end') {
-      p.textAlign = snap.xAt === 'start' ? 'left' : 'right'
-      p.textBaseline = 'top'
-      p.fillText(snap.xAt === 'start' ? 'Left edge' : 'Right edge',
-        snap.xAt === 'start' ? 7 * scale : W - 7 * scale, 7 * scale)
-    }
-    if (snap.yAt === 'start' || snap.yAt === 'end') {
-      p.textAlign = 'left'
-      p.textBaseline = snap.yAt === 'start' ? 'top' : 'bottom'
-      p.fillText(snap.yAt === 'start' ? 'Top edge' : 'Bottom edge',
-        7 * scale, snap.yAt === 'start' ? 24 * scale : H - 7 * scale)
     }
     p.restore()
   }
@@ -8887,24 +8997,39 @@ export function IconPaintEditor({
         }
         syncGroupBounds()
       }
-      // Unrotated box items also receive the 50% dimension snap/readout.
+      // Unrotated box items: weak edge/size snap to canvas + other objects.
       if (
         fixed &&
         before &&
         !(l.rot ?? 0) &&
         (l.type === 'shape' || l.type === 'stamp')
       ) {
-        const corner: Corner = resizeCorner ??
+        const exclude = new Set<string>([l.id, ...descendantIds(l.id)])
+        let corner: Corner = resizeCorner ??
           `${local.y < fixed.y ? 'n' : 's'}${local.x < fixed.x ? 'w' : 'e'}` as Corner
-        const box = {
+        const magnetic = snapResizePointToCanvasEdges(local, corner, exclude)
+        local = magnetic
+        corner = `${local.y < fixed.y ? 'n' : 's'}${local.x < fixed.x ? 'w' : 'e'}` as Corner
+        l.pts[idx] = local
+        let box = {
           x: Math.min(local.x, fixed.x),
           y: Math.min(local.y, fixed.y),
           w: Math.abs(local.x - fixed.x),
           h: Math.abs(local.y - fixed.y)
         }
-        // Resize handles track the pointer directly. Alignment remains visual;
-        // unlike object movement, corner dragging does not magnetically detach
-        // the handle from the cursor.
+        const lockAspect = !!(
+          (l.type === 'shape' && l.shape && (
+            (POLY_KIND_SET.has(l.shape) ? polyAspectRef.current : irregAspectRef.current).lock ||
+            shiftHeldRef.current
+          )) ||
+          (l.type === 'stamp' && shiftHeldRef.current)
+        )
+        const matched = snapResizeMatchOtherSizes(box, corner, before, lockAspect, exclude)
+        box = matched.rect
+        l.pts = [
+          { x: box.x, y: box.y },
+          { x: box.x + box.w, y: box.y + box.h }
+        ]
         if (l.type === 'shape' && l.keepStrokeOnResize === false) {
           const strokeScale = Math.min(
             Math.max(1, box.w) / Math.max(1, before.w),
@@ -8914,7 +9039,29 @@ export function IconPaintEditor({
           if (l.borderWidth != null) l.borderWidth *= strokeScale
         }
         syncGroupBounds()
-        schedulePaintView(true, () => drawAlignmentGuides(resizeEdgeGuide(box, corner)))
+        const halfW = Math.abs(box.w - W / 2) < 0.5
+        const halfH = Math.abs(box.h - H / 2) < 0.5
+        const edgeGuide = resizeEdgeGuide(box, corner)
+        const guide: AlignmentSnap = {
+          dx: 0,
+          dy: 0,
+          x: matched.align.x || edgeGuide.x,
+          y: matched.align.y || edgeGuide.y,
+          xAt: edgeGuide.xAt,
+          yAt: edgeGuide.yAt,
+          xGuide: matched.align.xGuide ?? (edgeGuide.x
+            ? (edgeGuide.xAt === 'start' ? 0 : edgeGuide.xAt === 'end' ? W : null)
+            : null),
+          yGuide: matched.align.yGuide ?? (edgeGuide.y
+            ? (edgeGuide.yAt === 'start' ? 0 : edgeGuide.yAt === 'end' ? H : null)
+            : null),
+          xLabel: matched.align.xLabel ?? (edgeGuide.xAt === 'start' ? 'Left edge' : edgeGuide.xAt === 'end' ? 'Right edge' : null),
+          yLabel: matched.align.yLabel ?? (edgeGuide.yAt === 'start' ? 'Top edge' : edgeGuide.yAt === 'end' ? 'Bottom edge' : null)
+        }
+        schedulePaintView(true, () => {
+          drawAlignmentGuides(guide)
+          drawHalfSizeGuides(box, { width: halfW, height: halfH })
+        })
         return
       }
       if (before && l.type === 'shape' && l.keepStrokeOnResize === false) {
@@ -9058,7 +9205,17 @@ export function IconPaintEditor({
           }
         }
       }
-      const snap = snapRectToCanvas(boundsForLine(l))
+      const exclude = new Set<string>([l.id, ...descendantIds(l.id)])
+      {
+        let parentId = l.parentId
+        const seen = new Set<string>()
+        while (parentId && !seen.has(parentId)) {
+          seen.add(parentId)
+          exclude.add(parentId)
+          parentId = linesRef.current.find((item) => item.id === parentId)?.parentId
+        }
+      }
+      const snap = snapRectToGuides(boundsForLine(l), exclude)
       if (snap.x || snap.y) {
         l.pts = l.pts.map((p) => ({ x: p.x + snap.dx, y: p.y + snap.dy }))
         translateReshape(l, snap.dx, snap.dy)
@@ -11945,18 +12102,20 @@ export function IconPaintEditor({
   // ── Copy / paste ─────────────────────────────────────────────────────────────
   const CORNER_HIT = 10
   type Corner = 'nw' | 'ne' | 'sw' | 'se'
-  const snapResizePointToCanvasEdges = (pt: Pt, corner: Corner): Pt => {
-    const screenRect = previewRef.current?.getBoundingClientRect()
-    const threshold = 6 * (screenRect?.width ? W / screenRect.width : 1)
-    const west = corner === 'nw' || corner === 'sw'
-    const north = corner === 'nw' || corner === 'ne'
+  const snapResizePointToCanvasEdges = (pt: Pt, _corner: Corner, excludeIds?: Set<string>): Pt => {
+    const threshold = weakSnapThreshold()
+    const { xGuides, yGuides } = collectSnapGuides(excludeIds)
+    const xHit = xGuides
+      .map((g) => ({ value: g.value, dist: Math.abs(pt.x - g.value) }))
+      .filter((c) => c.dist <= threshold)
+      .sort((a, b) => a.dist - b.dist)[0]
+    const yHit = yGuides
+      .map((g) => ({ value: g.value, dist: Math.abs(pt.y - g.value) }))
+      .filter((c) => c.dist <= threshold)
+      .sort((a, b) => a.dist - b.dist)[0]
     return {
-      x: west
-        ? (pt.x <= threshold ? 0 : pt.x)
-        : (pt.x >= W - threshold ? W : pt.x),
-      y: north
-        ? (pt.y <= threshold ? 0 : pt.y)
-        : (pt.y >= H - threshold ? H : pt.y)
+      x: xHit ? xHit.value : pt.x,
+      y: yHit ? yHit.value : pt.y
     }
   }
   const resizeEdgeGuide = (
@@ -12062,7 +12221,7 @@ export function IconPaintEditor({
     width: boolean
     height: boolean
   }
-  /** Snap resized selections near 50% of the canvas width or height. */
+  /** Snap resized selections near 50% of the canvas width or height (weak + short hysteresis). */
   const snapResizeToHalfCanvas = (
     rect: { x: number; y: number; w: number; h: number },
     corner: Corner,
@@ -12071,8 +12230,9 @@ export function IconPaintEditor({
   ): HalfSizeSnap => {
     const screenRect = previewRef.current?.getBoundingClientRect()
     const scale = screenRect?.width ? W / screenRect.width : 1
-    const threshold = 10 * scale
-    const releaseThreshold = 22 * scale
+    // Weak engage; short release so the magnet does not fight nearby object snaps.
+    const threshold = 5 * scale
+    const releaseThreshold = 12 * scale
     const targetW = W / 2
     const targetH = H / 2
     const widthNear = Math.abs(rect.w - targetW) <= (
@@ -12136,6 +12296,151 @@ export function IconPaintEditor({
     }
     resizeSnapLockRef.current = { width, height }
     return { rect: next, width, height }
+  }
+
+  /**
+   * Weak size match to other objects' width/height (and keep half-canvas if closer).
+   * Fixed opposite corner; easy to override (~4px).
+   */
+  const snapResizeMatchOtherSizes = (
+    rect: { x: number; y: number; w: number; h: number },
+    corner: Corner,
+    start: { x: number; y: number; w: number; h: number },
+    lockAspect: boolean,
+    excludeIds?: Set<string>
+  ): { rect: typeof rect; width: boolean; height: boolean; align: AlignmentSnap } => {
+    const threshold = weakSnapThreshold()
+    const { widths, heights } = collectSnapGuides(excludeIds)
+    const fixedX = corner === 'se' || corner === 'ne' ? start.x : start.x + start.w
+    const fixedY = corner === 'se' || corner === 'sw' ? start.y : start.y + start.h
+    const place = (w: number, h: number) => ({
+      x: corner === 'nw' || corner === 'sw' ? fixedX - w : fixedX,
+      y: corner === 'nw' || corner === 'ne' ? fixedY - h : fixedY,
+      w: Math.max(4, w),
+      h: Math.max(4, h)
+    })
+    let next = rect
+    let width = false
+    let height = false
+    let xGuide: number | null = null
+    let yGuide: number | null = null
+    let xLabel: string | null = null
+    let yLabel: string | null = null
+
+    if (lockAspect && start.w > 0 && start.h > 0) {
+      const aspect = start.w / start.h
+      type Opt = { rect: typeof rect; error: number; width: boolean; height: boolean; xG: number | null; yG: number | null }
+      const options: Opt[] = []
+      for (const tw of widths) {
+        if (Math.abs(rect.w - tw) > threshold) continue
+        const candidate = place(tw, tw / aspect)
+        options.push({
+          rect: candidate,
+          error: Math.abs(rect.w - tw),
+          width: true,
+          height: Math.abs(candidate.h - H / 2) < 0.5 || heights.some((th) => Math.abs(candidate.h - th) < 0.5),
+          xG: fixedX + (corner === 'nw' || corner === 'sw' ? -tw : tw),
+          yG: null
+        })
+      }
+      for (const th of heights) {
+        if (Math.abs(rect.h - th) > threshold) continue
+        const candidate = place(th * aspect, th)
+        options.push({
+          rect: candidate,
+          error: Math.abs(rect.h - th),
+          width: Math.abs(candidate.w - W / 2) < 0.5 || widths.some((tw) => Math.abs(candidate.w - tw) < 0.5),
+          height: true,
+          xG: null,
+          yG: fixedY + (corner === 'nw' || corner === 'ne' ? -th : th)
+        })
+      }
+      if (options.length) {
+        options.sort((a, b) => a.error - b.error)
+        const best = options[0]
+        next = best.rect
+        width = best.width
+        height = best.height
+        xGuide = best.xG
+        yGuide = best.yG
+        xLabel = best.width ? 'Match width' : null
+        yLabel = best.height ? 'Match height' : null
+      }
+    } else {
+      const wHit = widths
+        .map((tw) => ({ tw, dist: Math.abs(rect.w - tw) }))
+        .filter((c) => c.dist <= threshold)
+        .sort((a, b) => a.dist - b.dist)[0]
+      const hHit = heights
+        .map((th) => ({ th, dist: Math.abs(rect.h - th) }))
+        .filter((c) => c.dist <= threshold)
+        .sort((a, b) => a.dist - b.dist)[0]
+      if (wHit) {
+        next = place(wHit.tw, next.h)
+        width = true
+        xGuide = next.x + (corner === 'nw' || corner === 'sw' ? 0 : next.w)
+        xLabel = Math.abs(wHit.tw - W / 2) < 0.5 ? '50% width' : 'Match width'
+      }
+      if (hHit) {
+        next = place(next.w, hHit.th)
+        height = true
+        yGuide = next.y + (corner === 'nw' || corner === 'ne' ? 0 : next.h)
+        yLabel = Math.abs(hHit.th - H / 2) < 0.5 ? '50% height' : 'Match height'
+      }
+    }
+
+    // Edge-touch snap on free sides (after size), still weak.
+    const { xGuides, yGuides } = collectSnapGuides(excludeIds)
+    const west = corner === 'nw' || corner === 'sw'
+    const north = corner === 'nw' || corner === 'ne'
+    const freeX = west ? next.x : next.x + next.w
+    const freeY = north ? next.y : next.y + next.h
+    const xEdge = xGuides
+      .map((g) => ({ g, dist: Math.abs(freeX - g.value) }))
+      .filter((c) => c.dist <= threshold)
+      .sort((a, b) => a.dist - b.dist)[0]
+    const yEdge = yGuides
+      .map((g) => ({ g, dist: Math.abs(freeY - g.value) }))
+      .filter((c) => c.dist <= threshold)
+      .sort((a, b) => a.dist - b.dist)[0]
+    if (xEdge) {
+      if (west) {
+        const right = next.x + next.w
+        next = { ...next, x: xEdge.g.value, w: Math.max(4, right - xEdge.g.value) }
+      } else {
+        next = { ...next, w: Math.max(4, xEdge.g.value - next.x) }
+      }
+      xGuide = xEdge.g.value
+      xLabel = xEdge.g.label
+    }
+    if (yEdge) {
+      if (north) {
+        const bottom = next.y + next.h
+        next = { ...next, y: yEdge.g.value, h: Math.max(4, bottom - yEdge.g.value) }
+      } else {
+        next = { ...next, h: Math.max(4, yEdge.g.value - next.y) }
+      }
+      yGuide = yEdge.g.value
+      yLabel = yEdge.g.label
+    }
+
+    return {
+      rect: next,
+      width,
+      height,
+      align: {
+        dx: 0,
+        dy: 0,
+        x: xGuide != null,
+        y: yGuide != null,
+        xAt: null,
+        yAt: null,
+        xGuide,
+        yGuide,
+        xLabel,
+        yLabel
+      }
+    }
   }
 
   const drawHalfSizeGuides = (
@@ -13460,11 +13765,21 @@ export function IconPaintEditor({
       if (mr && marqueeRef.current) {
         const magneticPt = snapResizePointToCanvasEdges(pt, mr.corner)
         const next = resizeRect(mr.corner, mr.start, magneticPt, lockAspect)
-        const snap = snapResizeToHalfCanvas(next, mr.corner, mr.start, lockAspect)
-        marqueeRef.current = snap.rect
+        const half = snapResizeToHalfCanvas(next, mr.corner, mr.start, lockAspect)
+        const matched = snapResizeMatchOtherSizes(half.rect, mr.corner, mr.start, lockAspect)
+        marqueeRef.current = matched.rect
         drawSelOverlay()
-        drawAlignmentGuides(resizeEdgeGuide(snap.rect, mr.corner))
-        drawHalfSizeGuides(snap.rect, snap)
+        drawAlignmentGuides({
+          ...matched.align,
+          x: matched.align.x || half.width,
+          y: matched.align.y || half.height,
+          xLabel: matched.align.xLabel ?? (half.width ? '50% width' : null),
+          yLabel: matched.align.yLabel ?? (half.height ? '50% height' : null)
+        })
+        drawHalfSizeGuides(matched.rect, {
+          width: half.width || Math.abs(matched.rect.w - W / 2) < 0.5,
+          height: half.height || Math.abs(matched.rect.h - H / 2) < 0.5
+        })
         return
       }
       // Scale: resize the floating bitmap
@@ -13485,16 +13800,33 @@ export function IconPaintEditor({
       if (rz && f) {
         const magneticPt = snapResizePointToCanvasEdges(pt, rz.corner)
         const next = resizeRect(rz.corner, rz.start, magneticPt, lockAspect)
-        const snap = snapResizeToHalfCanvas(next, rz.corner, rz.start, lockAspect)
-        scaleFloatTo(f, snap.rect.x, snap.rect.y, snap.rect.w, snap.rect.h)
+        const half = snapResizeToHalfCanvas(next, rz.corner, rz.start, lockAspect)
+        const matched = snapResizeMatchOtherSizes(half.rect, rz.corner, rz.start, lockAspect)
+        const rect = matched.rect
+        scaleFloatTo(f, rect.x, rect.y, rect.w, rect.h)
         drawSelOverlay()
-        drawAlignmentGuides(resizeEdgeGuide(
+        const edgeGuide = resizeEdgeGuide(
           { x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height },
           rz.corner
-        ))
+        )
+        drawAlignmentGuides({
+          dx: 0,
+          dy: 0,
+          x: matched.align.x || edgeGuide.x || half.width,
+          y: matched.align.y || edgeGuide.y || half.height,
+          xAt: edgeGuide.xAt,
+          yAt: edgeGuide.yAt,
+          xGuide: matched.align.xGuide,
+          yGuide: matched.align.yGuide,
+          xLabel: matched.align.xLabel ?? (half.width ? '50% width' : null),
+          yLabel: matched.align.yLabel ?? (half.height ? '50% height' : null)
+        })
         drawHalfSizeGuides(
           { x: f.x, y: f.y, w: f.canvas.width, h: f.canvas.height },
-          snap
+          {
+            width: half.width || Math.abs(rect.w - W / 2) < 0.5,
+            height: half.height || Math.abs(rect.h - H / 2) < 0.5
+          }
         )
         return
       }
