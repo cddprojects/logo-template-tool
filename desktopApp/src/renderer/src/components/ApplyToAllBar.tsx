@@ -76,7 +76,7 @@ export function ApplyToAllBar({
         </label>
         <label
           className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap"
-          title="Paint-mode overlays, objects, and punch masks"
+          title="Paint edits: Inner = Inner paint + objects above it; Outer = everything below Inner paint"
         >
           <input
             type="checkbox"
@@ -89,7 +89,10 @@ export function ApplyToAllBar({
       </div>
       <div className="flex items-center gap-2 px-2 py-1 rounded-lg border border-border bg-surface3 text-[10px] text-muted">
         <span className="font-semibold text-text/80 whitespace-nowrap">Layer</span>
-        <label className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap">
+        <label
+          className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap"
+          title="With Edit: Inner paint + objects above it. With Shape/Colour: live Inner settings."
+        >
           <input
             type="checkbox"
             className="accent-accent"
@@ -98,7 +101,10 @@ export function ApplyToAllBar({
           />
           Inner
         </label>
-        <label className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap">
+        <label
+          className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap"
+          title="With Edit: everything below Inner paint (incl. Outer). With Shape/Colour: live Outer settings."
+        >
           <input
             type="checkbox"
             className="accent-accent"

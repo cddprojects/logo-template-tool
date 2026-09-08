@@ -550,6 +550,64 @@ function isPaintContainerLayerVector(v: PaintVector): boolean {
   return (v.layer ?? 'content') === 'container' && !isContentBoundVector(v)
 }
 
+/** Topmost group/root that owns nesting and belowBase for Apply Edit bucketing. */
+function paintEditRootOf(v: PaintVector, all: PaintVector[]): PaintVector {
+  const byId = new Map(all.map((item) => [item.id, item]))
+  let cur = v
+  const seen = new Set<string>()
+  while (cur.parentId && !seen.has(cur.id)) {
+    seen.add(cur.id)
+    const parent = byId.get(cur.parentId)
+    if (!parent) break
+    cur = parent
+  }
+  return cur
+}
+
+/**
+ * Apply Edit · Inner: Inner paint plane + objects at/above that row
+ * (content-layer roots that are not belowBase, including live Inner proxies).
+ */
+function isPaintEditInnerVector(v: PaintVector, all: PaintVector[]): boolean {
+  const root = paintEditRootOf(v, all)
+  if ((root.layer ?? 'content') !== 'content') return false
+  return !root.belowBase
+}
+
+/**
+ * Apply Edit · Outer: everything below the Inner paint row
+ * (content belowBase, or any Outer/container-layer object).
+ */
+function isPaintEditOuterVector(v: PaintVector, all: PaintVector[]): boolean {
+  return !isPaintEditInnerVector(v, all)
+}
+
+/** Clone vectors and remap ids that collide with `usedIds`. */
+function clonePaintVectorsRebasingIds(
+  vectors: PaintVector[],
+  usedIds: Set<string>,
+  suffix: string
+): PaintVector[] {
+  const cloned = structuredClone(vectors)
+  const idMap = new Map<string, string>()
+  for (const v of cloned) {
+    if (!usedIds.has(v.id)) {
+      usedIds.add(v.id)
+      continue
+    }
+    const nextId = `${v.id}-${suffix}-${Math.random().toString(36).slice(2, 8)}`
+    idMap.set(v.id, nextId)
+    usedIds.add(nextId)
+    v.id = nextId
+  }
+  for (const v of cloned) {
+    if (v.parentId && idMap.has(v.parentId)) {
+      v.parentId = idMap.get(v.parentId)
+    }
+  }
+  return cloned
+}
+
 /**
  * Keep target Outer paint. Copy source Inner object geometry (position/size),
  * but blank baked Inner PNGs and recolor vectors to the target palette.
@@ -809,7 +867,9 @@ export function applyToAllOptionsActive(opts: ApplyToAllOptions): boolean {
   )
 }
 
-/** Merge Paint session planes selected by Apply “Edit” + Layer checkboxes. */
+/** Merge Paint session planes selected by Apply “Edit” + Layer checkboxes.
+ * Inner = Inner paint + objects at/above it; Outer = everything below Inner paint.
+ */
 function mergePaintSessionForApplyOptions(
   sourceSession: PaintSession | null | undefined,
   targetSession: PaintSession | null | undefined,
@@ -959,7 +1019,10 @@ const ICON_OUTER_GEOMETRY_KEYS = [
   'transparentFillMode'
 ] as const
 
-/** Copy source Inner paint (with colours); keep target Outer paint. */
+/**
+ * Copy source Edit·Inner paint (Inner plane + objects at/above Inner paint).
+ * Keeps target Edit·Outer (everything below Inner paint, including Outer plane).
+ */
 function mergePaintInnerFromSource(
   sourceSession: PaintSession | null | undefined,
   targetSession: PaintSession | null | undefined
@@ -970,23 +1033,14 @@ function mergePaintInnerFromSource(
   if (sourceSession.resolution !== targetSession.resolution) {
     return structuredClone(sourceSession)
   }
-  const containerVectors = (targetSession.vectors ?? []).filter(isPaintContainerLayerVector)
-  const contentVectors = structuredClone(
-    (sourceSession.vectors ?? []).filter((v) => !isPaintContainerLayerVector(v))
+  const srcAll = sourceSession.vectors ?? []
+  const tgtAll = targetSession.vectors ?? []
+  const keepOuter = tgtAll.filter((v) => isPaintEditOuterVector(v, tgtAll))
+  const takeInner = clonePaintVectorsRebasingIds(
+    srcAll.filter((v) => isPaintEditInnerVector(v, srcAll)),
+    new Set(keepOuter.map((v) => v.id)),
+    'inner'
   )
-  const usedIds = new Set(containerVectors.map((v) => v.id))
-  for (const v of contentVectors) {
-    if (!usedIds.has(v.id)) {
-      usedIds.add(v.id)
-      continue
-    }
-    const nextId = `${v.id}-inner-${Math.random().toString(36).slice(2, 8)}`
-    const oldId = v.id
-    v.id = nextId
-    for (const child of contentVectors) {
-      if (child.parentId === oldId) child.parentId = nextId
-    }
-  }
   const punchMasks = [
     ...(targetSession.punchMasks ?? []).filter((m) => m.layer === 'container'),
     ...(sourceSession.punchMasks ?? []).filter((m) => m.layer === 'content')
@@ -998,7 +1052,7 @@ function mergePaintInnerFromSource(
     contentPng: sourceSession.contentPng,
     contentDecorationsPng: sourceSession.contentDecorationsPng,
     decorationsPng: undefined,
-    vectors: [...containerVectors, ...contentVectors],
+    vectors: [...keepOuter, ...takeInner],
     punchMasks: punchMasks.length ? punchMasks : undefined,
     contentBakedInDecorations: sourceSession.contentBakedInDecorations,
     linkedTextInDecorations: sourceSession.linkedTextInDecorations,
@@ -1012,7 +1066,10 @@ function mergePaintInnerFromSource(
   }
 }
 
-/** Copy source Outer paint; keep target Inner paint. */
+/**
+ * Copy source Edit·Outer paint (everything below Inner paint + Outer plane).
+ * Keeps target Edit·Inner (Inner plane + objects at/above Inner paint).
+ */
 function mergePaintOuterFromSource(
   sourceSession: PaintSession | null | undefined,
   targetSession: PaintSession | null | undefined
@@ -1023,23 +1080,14 @@ function mergePaintOuterFromSource(
   if (sourceSession.resolution !== targetSession.resolution) {
     return structuredClone(sourceSession)
   }
-  const contentVectors = (targetSession.vectors ?? []).filter((v) => !isPaintContainerLayerVector(v))
-  const containerVectors = structuredClone(
-    (sourceSession.vectors ?? []).filter(isPaintContainerLayerVector)
+  const srcAll = sourceSession.vectors ?? []
+  const tgtAll = targetSession.vectors ?? []
+  const keepInner = tgtAll.filter((v) => isPaintEditInnerVector(v, tgtAll))
+  const takeOuter = clonePaintVectorsRebasingIds(
+    srcAll.filter((v) => isPaintEditOuterVector(v, srcAll)),
+    new Set(keepInner.map((v) => v.id)),
+    'outer'
   )
-  const usedIds = new Set(contentVectors.map((v) => v.id))
-  for (const v of containerVectors) {
-    if (!usedIds.has(v.id)) {
-      usedIds.add(v.id)
-      continue
-    }
-    const nextId = `${v.id}-outer-${Math.random().toString(36).slice(2, 8)}`
-    const oldId = v.id
-    v.id = nextId
-    for (const child of containerVectors) {
-      if (child.parentId === oldId) child.parentId = nextId
-    }
-  }
   const punchMasks = [
     ...(sourceSession.punchMasks ?? []).filter((m) => m.layer === 'container'),
     ...(targetSession.punchMasks ?? []).filter((m) => m.layer === 'content')
@@ -1051,7 +1099,7 @@ function mergePaintOuterFromSource(
     contentPng: targetSession.contentPng,
     contentDecorationsPng: targetSession.contentDecorationsPng,
     decorationsPng: undefined,
-    vectors: [...containerVectors, ...contentVectors],
+    vectors: [...keepInner, ...takeOuter],
     punchMasks: punchMasks.length ? punchMasks : undefined
   }
 }

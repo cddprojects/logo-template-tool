@@ -86,12 +86,15 @@ function UseGuide(): JSX.Element {
             includes Site title (and related logo text settings) when Logo is checked, plus border
             / shadow settings (width, radius, blur, offset, on/off) but not their colours — those
             go with <span className="text-text">Colour settings</span> (fill, border colour, shadow
-            colour). <span className="text-text">Edit</span> copies Paint-mode overlays, objects,
-            and punch masks for the selected layers. Checking Shape + Colour settings + Edit with
-            both layers is a full icon/favicon duplicate for the selected apps. Colour settings on
-            Inner alone never rewrites Outer background. When Content is checked, other linked logo
-            variants are unsynced first so the copy lands on independent (non-sync) settings —
-            favicon and logo stay separable afterward. The active source variant is left unchanged
+            colour). <span className="text-text">Edit</span> copies Paint-mode work for the selected
+            layers: <span className="text-text">Inner</span> is the Inner paint plane plus objects
+            at/above that row; <span className="text-text">Outer</span> is everything below Inner
+            paint (including Outer paint and objects sent behind Inner). Checking Shape + Colour
+            settings + Edit with both layers is a full icon/favicon duplicate for the selected apps.
+            Colour settings on Inner alone never rewrites Outer background. When Content is checked,
+            other linked logo variants are unsynced first so the copy lands on independent
+            (non-sync) settings — favicon and logo stay separable afterward. The active source
+            variant is left unchanged
           </li>
           <li>
             <span className="text-text">Paint</span> opens the icon editor. The right panel’s
