@@ -777,9 +777,9 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
     const applyLogos = !!opts.logo && variants.length > 1
     if (!applyFavicons && !applyLogos) return
 
-    // Content (Shape & settings / Colour) always copies in non-sync mode so
+    // Content (Shape / Colour settings / Edit) copies in non-sync mode so
     // favicon and logo can stay separated: unsync every other logo variant first.
-    const contentSelected = opts.shape || opts.color
+    const contentSelected = opts.shape || opts.color || opts.edit
     const activeId = active?.id
 
     if (applyFavicons) {
@@ -791,10 +791,16 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
         iconConfigToFaviconConfig(effectiveIcon)
 
       onFaviconChange!(
-        faviconVariants.map((variant) => ({
-          ...variant,
-          config: applyFaviconToAllOptions(sourceFavicon, variant.config, opts)
-        }))
+        faviconVariants.map((variant) => {
+          // Never rewrite the source favicon twin in place (preserves Paint).
+          if (matchingFaviconVariant && variant.id === matchingFaviconVariant.id) {
+            return variant
+          }
+          return {
+            ...variant,
+            config: applyFaviconToAllOptions(sourceFavicon, variant.config, opts)
+          }
+        })
       )
     }
 
@@ -812,11 +818,17 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
           if (!applyLogos) {
             return { ...variant, config }
           }
+          if (!isOther) {
+            // Active source keeps its own Paint / icon; only shell text may match.
+            return {
+              ...variant,
+              config: applyLogoShellToAllOptions(sourceLogo, config, opts)
+            }
+          }
           config = applyLogoShellToAllOptions(sourceLogo, config, opts)
-          // Always write onto the independent icon after unsync; active source
-          // may stay linked and keep showing its favicon twin.
-          if (isOther || !(config.iconLinked ?? true)) {
-            config = {
+          return {
+            ...variant,
+            config: {
               ...config,
               icon: applyIconToAllOptions(sourceIcon, config.icon, opts),
               iconLinked: false,
@@ -825,7 +837,6 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
               syncedIconSnapshot: null
             }
           }
-          return { ...variant, config }
         })
       )
     }

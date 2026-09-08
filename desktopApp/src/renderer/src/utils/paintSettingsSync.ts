@@ -648,6 +648,10 @@ function blankInnerPaintOnly(session: PaintSession | null | undefined): PaintSes
  * Copy active favicon’s inner shape, size, and position onto a target.
  * Colors (and Outer paint) stay on the target.
  */
+/**
+ * Copy inner type/shape/size and outer shape geometry. Keeps each target’s colour
+ * slots and its full paint session (no paint geometry or colour remap).
+ */
 export function applyFaviconInnerContent(source: FaviconConfig, target: FaviconConfig): FaviconConfig {
   const primary = faviconPrimaryFill(target.content)
   const secondary = faviconSecondaryFill(target.content)
@@ -665,12 +669,7 @@ export function applyFaviconInnerContent(source: FaviconConfig, target: FaviconC
       primary,
       secondary
     ) as FaviconConfig['contentTypeStash'],
-    paintSession: mergePaintInnerGeometryNoColor(
-      source.paintSession,
-      target.paintSession,
-      primary,
-      secondary
-    )
+    paintSession: target.paintSession
   }
 }
 
@@ -715,6 +714,7 @@ export function applyFaviconInnerSettingsKeepColors(
 /**
  * Copy active icon’s inner shape, size, and position onto a target.
  * Colors (and Outer/container) stay on the target.
+ * Does not copy Paint session objects/overlays — use Apply “Edit” for that.
  */
 export function applyIconInnerContent(source: IconConfig, target: IconConfig): IconConfig {
   const outer = pickKeys(
@@ -742,12 +742,7 @@ export function applyIconInnerContent(source: IconConfig, target: IconConfig): I
       primary,
       secondary
     ) as IconConfig['contentTypeStash'],
-    paintSession: mergePaintInnerGeometryNoColor(
-      source.paintSession,
-      target.paintSession,
-      primary,
-      secondary
-    )
+    paintSession: target.paintSession
   }
 }
 
@@ -792,8 +787,10 @@ export function applyIconInnerSettingsKeepColors(
 export type ApplyToAllOptions = {
   /** Shape & settings other than colour (type, size, position, geometry…). */
   shape: boolean
-  /** Colour slots (and matching paint recolour when combined with shape+inner). */
+  /** Colour settings only (fill / border / shadow colour slots). */
   color: boolean
+  /** Paint-mode edits (overlays, objects, punch masks) for selected layers. */
+  edit: boolean
   /** Inner / content layer. */
   inner: boolean
   /** Outer / container layer. */
@@ -806,10 +803,25 @@ export type ApplyToAllOptions = {
 
 export function applyToAllOptionsActive(opts: ApplyToAllOptions): boolean {
   return (
-    (opts.shape || opts.color) &&
+    (opts.shape || opts.color || opts.edit) &&
     (opts.inner || opts.outer) &&
     (opts.favicon || opts.logo)
   )
+}
+
+/** Merge Paint session planes selected by Apply “Edit” + Layer checkboxes. */
+function mergePaintSessionForApplyOptions(
+  sourceSession: PaintSession | null | undefined,
+  targetSession: PaintSession | null | undefined,
+  opts: Pick<ApplyToAllOptions, 'edit' | 'inner' | 'outer'>
+): PaintSession | null | undefined {
+  if (!opts.edit) return targetSession
+  if (opts.inner && opts.outer) {
+    return sourceSession ? structuredClone(sourceSession) : null
+  }
+  if (opts.inner) return mergePaintInnerFromSource(sourceSession, targetSession)
+  if (opts.outer) return mergePaintOuterFromSource(sourceSession, targetSession)
+  return targetSession
 }
 
 /**
@@ -1046,7 +1058,8 @@ function mergePaintOuterFromSource(
 
 /**
  * Apply selected aspects of `source` onto `target` for “Apply to all”.
- * shape+color+inner+outer ≡ full icon duplicate.
+ * shape+color+edit+inner+outer ≡ full icon duplicate.
+ * Paint objects/overlays copy only when `edit` is set; `color` is colour settings only.
  */
 export function applyIconToAllOptions(
   source: IconConfig,
@@ -1055,18 +1068,36 @@ export function applyIconToAllOptions(
 ): IconConfig {
   if (!applyToAllOptionsActive({ ...opts, favicon: true, logo: true })) return target
 
-  if (opts.shape && opts.color && opts.inner && opts.outer) {
+  if (opts.shape && opts.color && opts.edit && opts.inner && opts.outer) {
     return structuredClone(source)
   }
 
-  // Shape (no colour) on both layers — existing “settings keep colors”.
+  // Shape (no colour) on both layers — settings keep colors; paint via `edit`.
   if (opts.shape && !opts.color && opts.inner && opts.outer) {
-    return applyIconInnerSettingsKeepColors(source, target)
+    const next = applyIconInnerSettingsKeepColors(source, target)
+    next.paintSession = mergePaintSessionForApplyOptions(
+      source.paintSession,
+      next.paintSession,
+      opts
+    )
+    return next
   }
 
-  // Shape (no colour) on Inner only — existing “apply inner”.
+  // Shape (no colour) on Inner only — settings only unless `edit`.
   if (opts.shape && !opts.color && opts.inner && !opts.outer) {
-    return applyIconInnerContent(source, target)
+    const next = applyIconInnerContent(source, target)
+    next.paintSession = mergePaintSessionForApplyOptions(
+      source.paintSession,
+      next.paintSession,
+      opts
+    )
+    if (!opts.outer) {
+      return preserveIconOuterColors(
+        { ...next, paintSession: stripOuterPaintSync(next.paintSession) },
+        target
+      )
+    }
+    return next
   }
 
   let next = structuredClone(target)
@@ -1080,7 +1111,8 @@ export function applyIconToAllOptions(
       next = {
         ...structuredClone(source),
         ...outerKeep,
-        paintSession: mergePaintInnerFromSource(source.paintSession, target.paintSession)
+        // Paint applied below from `edit` — start from target session.
+        paintSession: target.paintSession
       }
     } else if (opts.shape && !opts.color) {
       next = applyIconInnerContent(source, next)
@@ -1110,7 +1142,6 @@ export function applyIconToAllOptions(
         next,
         pickKeys(source as unknown as Record<string, unknown>, ICON_OUTER_KEYS)
       )
-      next.paintSession = mergePaintOuterFromSource(source.paintSession, next.paintSession)
     } else if (opts.shape && !opts.color) {
       Object.assign(
         next,
@@ -1128,6 +1159,12 @@ export function applyIconToAllOptions(
     }
   }
 
+  next.paintSession = mergePaintSessionForApplyOptions(
+    source.paintSession,
+    next.paintSession,
+    opts
+  )
+
   // Belt-and-suspenders: Inner-only must never rewrite Outer colour slots.
   if (!opts.outer) {
     next = preserveIconOuterColors(next, target)
@@ -1139,6 +1176,7 @@ export function applyIconToAllOptions(
 
 /**
  * Apply selected aspects of `source` favicon onto `target` for “Apply to all”.
+ * Paint objects/overlays copy only when `edit` is set; `color` is colour settings only.
  */
 export function applyFaviconToAllOptions(
   source: FaviconConfig,
@@ -1147,16 +1185,34 @@ export function applyFaviconToAllOptions(
 ): FaviconConfig {
   if (!applyToAllOptionsActive({ ...opts, favicon: true, logo: true })) return target
 
-  if (opts.shape && opts.color && opts.inner && opts.outer) {
+  if (opts.shape && opts.color && opts.edit && opts.inner && opts.outer) {
     return structuredClone(source)
   }
 
   if (opts.shape && !opts.color && opts.inner && opts.outer) {
-    return applyFaviconInnerSettingsKeepColors(source, target)
+    const next = applyFaviconInnerSettingsKeepColors(source, target)
+    next.paintSession = mergePaintSessionForApplyOptions(
+      source.paintSession,
+      next.paintSession,
+      opts
+    )
+    return next
   }
 
   if (opts.shape && !opts.color && opts.inner && !opts.outer) {
-    return applyFaviconInnerContent(source, target)
+    const next = applyFaviconInnerContent(source, target)
+    next.paintSession = mergePaintSessionForApplyOptions(
+      source.paintSession,
+      next.paintSession,
+      opts
+    )
+    if (!opts.outer) {
+      return {
+        ...preserveFaviconOuterColors(next, target),
+        paintSession: stripOuterPaintSync(next.paintSession)
+      }
+    }
+    return next
   }
 
   let next = structuredClone(target)
@@ -1169,7 +1225,7 @@ export function applyFaviconToAllOptions(
         contentTypeStash: source.contentTypeStash
           ? structuredClone(source.contentTypeStash)
           : next.contentTypeStash,
-        paintSession: mergePaintInnerFromSource(source.paintSession, target.paintSession)
+        paintSession: target.paintSession
       }
     } else if (opts.shape && !opts.color) {
       next = applyFaviconInnerContent(source, next)
@@ -1203,7 +1259,6 @@ export function applyFaviconToAllOptions(
           ...FAVICON_OUTER_COLOR_KEYS
         ])
       )
-      next.paintSession = mergePaintOuterFromSource(source.paintSession, next.paintSession)
     } else if (opts.shape && !opts.color) {
       Object.assign(
         next,
@@ -1220,6 +1275,12 @@ export function applyFaviconToAllOptions(
       )
     }
   }
+
+  next.paintSession = mergePaintSessionForApplyOptions(
+    source.paintSession,
+    next.paintSession,
+    opts
+  )
 
   if (!opts.outer) {
     next = preserveFaviconOuterColors(next, target)

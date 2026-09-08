@@ -80,16 +80,18 @@ function UseGuide(): JSX.Element {
           <li>
             <span className="text-text">Apply to all</span> copies selected parts of the active
             variant onto every other variant (one-time, not live sync). Choose{' '}
-            <span className="text-text">Content</span> (Shape &amp; settings and/or Colour),{' '}
-            <span className="text-text">Layer</span> (Inner and/or Outer), and{' '}
+            <span className="text-text">Content</span> (Shape &amp; settings, Colour settings,
+            and/or Edit), <span className="text-text">Layer</span> (Inner and/or Outer), and{' '}
             <span className="text-text">App</span> (Favicon and/or Logo). Shape &amp; settings
             includes Site title (and related logo text settings) when Logo is checked, plus border
             / shadow settings (width, radius, blur, offset, on/off) but not their colours — those
-            go with <span className="text-text">Colour</span> (fill, border colour, shadow colour).
-            Checking Content + Layer fully is a full icon/favicon duplicate for the selected apps.
-            Colour on Inner alone never rewrites Outer background. When Content is checked,
-            other linked logo variants are unsynced first so the copy lands on independent
-            (non-sync) settings — favicon and logo stay separable afterward
+            go with <span className="text-text">Colour settings</span> (fill, border colour, shadow
+            colour). <span className="text-text">Edit</span> copies Paint-mode overlays, objects,
+            and punch masks for the selected layers. Checking Shape + Colour settings + Edit with
+            both layers is a full icon/favicon duplicate for the selected apps. Colour settings on
+            Inner alone never rewrites Outer background. When Content is checked, other linked logo
+            variants are unsynced first so the copy lands on independent (non-sync) settings —
+            favicon and logo stay separable afterward. The active source variant is left unchanged
           </li>
           <li>
             <span className="text-text">Paint</span> opens the icon editor. The right panel’s

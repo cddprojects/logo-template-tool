@@ -17,8 +17,8 @@ interface ApplyToAllBarProps {
 
 /**
  * Checkbox-driven “apply active variant to all” control.
- * Content: shape/settings and/or colour. Layer: Inner and/or Outer.
- * App: Favicon and/or Logo.
+ * Content: shape/settings, colour settings, and/or paint edits.
+ * Layer: Inner and/or Outer. App: Favicon and/or Logo.
  */
 export function ApplyToAllBar({
   onApply,
@@ -29,6 +29,7 @@ export function ApplyToAllBar({
 }: ApplyToAllBarProps) {
   const [shape, setShape] = useState(true)
   const [color, setColor] = useState(false)
+  const [edit, setEdit] = useState(false)
   const [inner, setInner] = useState(true)
   const [outer, setOuter] = useState(false)
   const [favicon, setFavicon] = useState(showFavicon)
@@ -37,6 +38,7 @@ export function ApplyToAllBar({
   const opts: ApplyToAllOptions = {
     shape,
     color,
+    edit,
     inner,
     outer,
     favicon: showFavicon ? favicon : false,
@@ -60,14 +62,29 @@ export function ApplyToAllBar({
           />
           Shape & settings
         </label>
-        <label className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap">
+        <label
+          className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap"
+          title="Fill, border, and shadow colours only — not Paint objects"
+        >
           <input
             type="checkbox"
             className="accent-accent"
             checked={color}
             onChange={(e) => setColor(e.target.checked)}
           />
-          Colour
+          Colour settings
+        </label>
+        <label
+          className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap"
+          title="Paint-mode overlays, objects, and punch masks"
+        >
+          <input
+            type="checkbox"
+            className="accent-accent"
+            checked={edit}
+            onChange={(e) => setEdit(e.target.checked)}
+          />
+          Edit
         </label>
       </div>
       <div className="flex items-center gap-2 px-2 py-1 rounded-lg border border-border bg-surface3 text-[10px] text-muted">
