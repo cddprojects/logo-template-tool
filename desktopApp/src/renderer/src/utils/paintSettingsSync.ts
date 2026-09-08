@@ -736,15 +736,25 @@ function mergePaintInnerGeometryNoColor(
   }
 }
 
-/** Clear Inner paint on a session; leave Outer untouched. */
+/** Clear Inner paint on a session; leave Edit·Outer (plane + belowBase) untouched. */
 function blankInnerPaintOnly(session: PaintSession | null | undefined): PaintSession | null {
   if (!session) return null
-  const blanked = blankPaintContentOverlay(session)
+  const all = session.vectors ?? []
+  const keepOuter = all.filter((v) => isPaintEditOuterVector(v, all))
+  const empty = emptyOverlayPng(session.resolution)
+  const below =
+    session.contentBelowDecorationsPng ??
+    (sourceHasBelowBaseContent(session) ? undefined : empty)
   return {
-    ...blanked,
-    vectors: (session.vectors ?? []).filter(isPaintContainerLayerVector),
-    punchMasks: session.punchMasks?.filter((m) => m.layer !== 'content'),
-    contentSync: undefined,
+    ...session,
+    contentPng: empty,
+    contentAboveDecorationsPng: empty,
+    contentDecorationsPng: compositeSessionPngs(session.resolution, [below, empty]),
+    contentBelowDecorationsPng: session.contentBelowDecorationsPng ?? below ?? empty,
+    decorationsPng: undefined,
+    vectors: keepOuter,
+    punchMasks: session.punchMasks?.filter((m) => m.layer === 'container'),
+    contentSync: stripOuterPaintSync({ ...session, contentSync: session.contentSync })?.contentSync,
     paintContentSizeRatio: undefined,
     paintContentDrawSize: undefined,
     linkedTextInDecorations: false,
@@ -1013,6 +1023,30 @@ export function applyLogoShellToAllOptions(
   return next
 }
 
+/** Drop Inner fill / geometry hints from a paint session (Outer-only apply must not recolor Inner). */
+function stripInnerPaintSync(session: PaintSession | null | undefined): PaintSession | null {
+  if (!session) return null
+  if (!session.contentSync) return session
+  const {
+    fillColor: _fc,
+    letters: _letters,
+    clearContentOverlay: _cc,
+    clearContentBorder: _cb,
+    contentShadowEnabled: _cse,
+    contentShadowColor: _csc,
+    contentShadowBlur: _csb,
+    contentShadowSpread: _css,
+    contentShadowOffsetX: _csox,
+    contentShadowOffsetY: _csoy,
+    sizeRatio: _sr,
+    offsetX: _ox,
+    offsetY: _oy,
+    ...rest
+  } = session.contentSync
+  const nextSync = Object.keys(rest).length ? (rest as PaintContentSync) : undefined
+  return { ...session, contentSync: nextSync }
+}
+
 /** Drop Outer fill hints from a paint session (Inner-only apply must not recolor Outer). */
 function stripOuterPaintSync(session: PaintSession | null | undefined): PaintSession | null {
   if (!session) return null
@@ -1091,17 +1125,25 @@ function finalizeIconEditColors(
   if (!opts.color) {
     let session = stripPaintSessionColorHints(next.paintSession)
     // Source-coloured Inner bake would cover the target’s live palette.
-    if (session && paintSessionHasColorRewriteHints(source.paintSession)) {
+    if (
+      opts.inner &&
+      session &&
+      paintSessionHasColorRewriteHints(source.paintSession)
+    ) {
       session = { ...session, contentBakedInDecorations: false }
     }
     if (session?.vectors?.length) {
       const contentFill = iconPrimaryFill(target)
       const contentSecondary = target.secondaryColor || ''
       const outerFill = target.containerColor || contentFill
+      const all = session.vectors
       session = {
         ...session,
         vectors: session.vectors.map((v) => {
           if (v.punchMask) return v
+          // Layer-scoped apply: never rewrite the unchecked plane’s object colours.
+          if (!opts.outer && isPaintEditOuterVector(v, all)) return v
+          if (!opts.inner && isPaintEditInnerVector(v, all)) return v
           const fill = (v.layer ?? 'content') === 'container' ? outerFill : contentFill
           const secondary =
             (v.layer ?? 'content') === 'container' ? outerFill : contentSecondary
@@ -1123,7 +1165,9 @@ function finalizeIconEditColors(
     return out
   }
   // Colour + Edit: push Paint fill hints into live settings (logo + favicon parity).
-  const sync = next.paintSession?.contentSync
+  const sync = !opts.inner
+    ? stripInnerPaintSync(next.paintSession)?.contentSync
+    : next.paintSession?.contentSync
   return applyPaintContentSyncToIcon(next, sync)
 }
 
@@ -1136,17 +1180,25 @@ function finalizeFaviconEditColors(
   if (!opts.edit) return next
   if (!opts.color) {
     let session = stripPaintSessionColorHints(next.paintSession)
-    if (session && paintSessionHasColorRewriteHints(source.paintSession)) {
+    if (
+      opts.inner &&
+      session &&
+      paintSessionHasColorRewriteHints(source.paintSession)
+    ) {
       session = { ...session, contentBakedInDecorations: false }
     }
     if (session?.vectors?.length) {
       const contentFill = faviconPrimaryFill(target.content)
       const contentSecondary = faviconSecondaryFill(target.content)
       const outerFill = target.backgroundColor || contentFill
+      const all = session.vectors
       session = {
         ...session,
         vectors: session.vectors.map((v) => {
           if (v.punchMask) return v
+          // Layer-scoped apply: never rewrite the unchecked plane’s object colours.
+          if (!opts.outer && isPaintEditOuterVector(v, all)) return v
+          if (!opts.inner && isPaintEditInnerVector(v, all)) return v
           const fill = (v.layer ?? 'content') === 'container' ? outerFill : contentFill
           const secondary =
             (v.layer ?? 'content') === 'container' ? outerFill : contentSecondary
@@ -1168,7 +1220,13 @@ function finalizeFaviconEditColors(
     }
     return out
   }
-  const sync = next.paintSession?.contentSync
+  const sync = !opts.inner
+    ? stripInnerPaintSync(next.paintSession)?.contentSync
+    : next.paintSession?.contentSync
+  if (!opts.inner) {
+    // Outer-only: outer shell colours only — leave Inner content settings alone.
+    return applyPaintOuterSyncToFavicon(next, sync)
+  }
   return applyPaintOuterSyncToFavicon(
     {
       ...next,
@@ -1221,8 +1279,7 @@ const ICON_OUTER_GEOMETRY_KEYS = [
 
 /**
  * Copy source Edit·Inner paint (Inner plane + objects at/above Inner paint).
- * Keeps target Outer plane only (container-layer). Content belowBase is Edit·Outer
- * and is cleared when Outer is not part of the apply.
+ * Keeps target Edit·Outer untouched (Outer plane + content belowBase).
  */
 function mergePaintInnerFromSource(
   sourceSession: PaintSession | null | undefined,
@@ -1235,7 +1292,7 @@ function mergePaintInnerFromSource(
   const empty = emptyOverlayPng(sourceSession.resolution)
   const innerDecor = contentDecorationsForEditInner(sourceSession)
 
-  if (!targetSession || sourceSession.resolution !== targetSession.resolution) {
+  if (!targetSession) {
     return {
       ...structuredClone(sourceSession),
       containerPng: empty,
@@ -1256,11 +1313,14 @@ function mergePaintInnerFromSource(
     }
   }
 
+  // Different resolution: cannot composite Inner rasters — leave target Outer alone
+  // and clear only Inner (do not import source Outer by accident).
+  if (sourceSession.resolution !== targetSession.resolution) {
+    return blankInnerPaintOnly(targetSession)
+  }
+
   const tgtAll = targetSession.vectors ?? []
-  // Outer plane only (container-layer). Content belowBase is Edit·Outer — if Layer
-  // Outer is unchecked it must not remain on the target (name-matched twins that
-  // still hold the full source paint were keeping those objects via keepOuter).
-  const keepOuter = tgtAll.filter((v) => isPaintContainerLayerVector(v))
+  const keepOuter = tgtAll.filter((v) => isPaintEditOuterVector(v, tgtAll))
   const takeInnerRebased = clonePaintVectorsRebasingIds(
     takeInner,
     new Set(keepOuter.map((v) => v.id)),
@@ -1270,14 +1330,21 @@ function mergePaintInnerFromSource(
     ...(targetSession.punchMasks ?? []).filter((m) => m.layer === 'container'),
     ...(sourceSession.punchMasks ?? []).filter((m) => m.layer === 'content')
   ]
+  const targetBelowDecor =
+    targetSession.contentBelowDecorationsPng ??
+    (sourceHasBelowBaseContent(targetSession) ? undefined : empty)
   return {
     ...targetSession,
     containerPng: targetSession.containerPng,
     containerDecorationsPng: targetSession.containerDecorationsPng,
     contentPng: sourceSession.contentPng,
-    contentDecorationsPng: innerDecor,
+    contentDecorationsPng: compositeSessionPngs(targetSession.resolution, [
+      targetBelowDecor,
+      innerDecor
+    ]),
     contentAboveDecorationsPng: sourceSession.contentAboveDecorationsPng ?? innerDecor,
-    contentBelowDecorationsPng: empty,
+    contentBelowDecorationsPng:
+      targetSession.contentBelowDecorationsPng ?? targetBelowDecor ?? empty,
     decorationsPng: undefined,
     vectors: [...keepOuter, ...takeInnerRebased],
     punchMasks: punchMasks.length ? punchMasks : undefined,
@@ -1295,7 +1362,7 @@ function mergePaintInnerFromSource(
 
 /**
  * Copy source Edit·Outer paint (everything below Inner paint + Outer plane).
- * Keeps target Edit·Inner (Inner plane + objects at/above Inner paint).
+ * Keeps target Edit·Inner untouched (Inner plane + objects at/above Inner paint).
  */
 function mergePaintOuterFromSource(
   sourceSession: PaintSession | null | undefined,
@@ -1310,7 +1377,7 @@ function mergePaintOuterFromSource(
     sourceSession.contentBelowDecorationsPng ??
     (sourceHasBelowBaseContent(sourceSession) ? undefined : empty)
 
-  if (!targetSession || sourceSession.resolution !== targetSession.resolution) {
+  if (!targetSession) {
     const aboveEmpty = empty
     return {
       ...structuredClone(sourceSession),
@@ -1326,8 +1393,17 @@ function mergePaintOuterFromSource(
       punchMasks: sourceSession.punchMasks?.filter((m) => m.layer === 'container'),
       contentBakedInDecorations: false,
       linkedTextInDecorations: false,
-      contentSync: undefined
+      contentSync: stripInnerPaintSync({
+        ...sourceSession,
+        contentSync: sourceSession.contentSync
+      })?.contentSync
     }
+  }
+
+  // Different resolution: cannot composite Outer rasters — leave target Inner alone
+  // and clear only Outer (do not wipe Inner by accident).
+  if (sourceSession.resolution !== targetSession.resolution) {
+    return blankOuterPaintOnly(targetSession)
   }
 
   const tgtAll = targetSession.vectors ?? []
@@ -1357,7 +1433,39 @@ function mergePaintOuterFromSource(
     contentBelowDecorationsPng: sourceBelow ?? empty,
     decorationsPng: undefined,
     vectors: [...keepInner, ...takeOuterRebased],
-    punchMasks: punchMasks.length ? punchMasks : undefined
+    punchMasks: punchMasks.length ? punchMasks : undefined,
+    contentBakedInDecorations: targetSession.contentBakedInDecorations,
+    linkedTextInDecorations: targetSession.linkedTextInDecorations,
+    paintContentSizeRatio: targetSession.paintContentSizeRatio,
+    paintContentDrawSize: targetSession.paintContentDrawSize,
+    // Outer fill sync from source only — never carry Inner rewrite hints.
+    contentSync: stripInnerPaintSync({
+      ...sourceSession,
+      contentSync: sourceSession.contentSync
+    })?.contentSync
+  }
+}
+
+/** Clear Outer paint on a session; leave Edit·Inner (plane + aboveBase) untouched. */
+function blankOuterPaintOnly(session: PaintSession | null | undefined): PaintSession | null {
+  if (!session) return null
+  const all = session.vectors ?? []
+  const keepInner = all.filter((v) => isPaintEditInnerVector(v, all))
+  const empty = emptyOverlayPng(session.resolution)
+  const above =
+    session.contentAboveDecorationsPng ?? contentDecorationsForEditInner(session)
+  return {
+    ...session,
+    containerPng: empty,
+    containerDecorationsPng: empty,
+    contentPng: session.contentPng,
+    contentAboveDecorationsPng: session.contentAboveDecorationsPng ?? above,
+    contentBelowDecorationsPng: empty,
+    contentDecorationsPng: above,
+    decorationsPng: undefined,
+    vectors: keepInner,
+    punchMasks: session.punchMasks?.filter((m) => m.layer === 'content'),
+    contentSync: stripInnerPaintSync(session)?.contentSync
   }
 }
 
@@ -1480,6 +1588,10 @@ export function applyIconToAllOptions(
     next = preserveIconOuterColors(next, target)
     next.paintSession = stripOuterPaintSync(next.paintSession)
   }
+  // Outer-only must never carry Inner paint rewrite hints.
+  if (!opts.inner) {
+    next.paintSession = stripInnerPaintSync(next.paintSession)
+  }
 
   return finalizeIconEditColors(next, target, source, opts)
 }
@@ -1600,6 +1712,9 @@ export function applyFaviconToAllOptions(
   if (!opts.outer) {
     next = preserveFaviconOuterColors(next, target)
     next.paintSession = stripOuterPaintSync(next.paintSession)
+  }
+  if (!opts.inner) {
+    next.paintSession = stripInnerPaintSync(next.paintSession)
   }
 
   return finalizeFaviconEditColors(next, target, source, opts)
