@@ -1221,7 +1221,8 @@ const ICON_OUTER_GEOMETRY_KEYS = [
 
 /**
  * Copy source Edit·Inner paint (Inner plane + objects at/above Inner paint).
- * Keeps target Edit·Outer (everything below Inner paint, including Outer plane).
+ * Keeps target Outer plane only (container-layer). Content belowBase is Edit·Outer
+ * and is cleared when Outer is not part of the apply.
  */
 function mergePaintInnerFromSource(
   sourceSession: PaintSession | null | undefined,
@@ -1256,7 +1257,10 @@ function mergePaintInnerFromSource(
   }
 
   const tgtAll = targetSession.vectors ?? []
-  const keepOuter = tgtAll.filter((v) => isPaintEditOuterVector(v, tgtAll))
+  // Outer plane only (container-layer). Content belowBase is Edit·Outer — if Layer
+  // Outer is unchecked it must not remain on the target (name-matched twins that
+  // still hold the full source paint were keeping those objects via keepOuter).
+  const keepOuter = tgtAll.filter((v) => isPaintContainerLayerVector(v))
   const takeInnerRebased = clonePaintVectorsRebasingIds(
     takeInner,
     new Set(keepOuter.map((v) => v.id)),
@@ -1266,21 +1270,14 @@ function mergePaintInnerFromSource(
     ...(targetSession.punchMasks ?? []).filter((m) => m.layer === 'container'),
     ...(sourceSession.punchMasks ?? []).filter((m) => m.layer === 'content')
   ]
-  const targetBelowDecor =
-    targetSession.contentBelowDecorationsPng ??
-    (sourceHasBelowBaseContent(targetSession) ? undefined : empty)
   return {
     ...targetSession,
     containerPng: targetSession.containerPng,
     containerDecorationsPng: targetSession.containerDecorationsPng,
     contentPng: sourceSession.contentPng,
-    contentDecorationsPng: compositeSessionPngs(targetSession.resolution, [
-      targetBelowDecor,
-      innerDecor
-    ]),
+    contentDecorationsPng: innerDecor,
     contentAboveDecorationsPng: sourceSession.contentAboveDecorationsPng ?? innerDecor,
-    contentBelowDecorationsPng:
-      targetSession.contentBelowDecorationsPng ?? targetBelowDecor ?? empty,
+    contentBelowDecorationsPng: empty,
     decorationsPng: undefined,
     vectors: [...keepOuter, ...takeInnerRebased],
     punchMasks: punchMasks.length ? punchMasks : undefined,

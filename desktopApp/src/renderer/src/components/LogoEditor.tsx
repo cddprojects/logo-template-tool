@@ -793,10 +793,9 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
 
       onFaviconChange!(
         faviconVariants.map((variant) => {
-          // Never rewrite the source favicon twin in place (preserves Paint).
-          if (matchingFaviconVariant && variant.id === matchingFaviconVariant.id) {
-            return variant
-          }
+          // Apply to every favicon including the name-matched twin. Skipping the
+          // twin left full source paint (incl. below-Inner objects) when only
+          // Layer · Inner was checked.
           return {
             ...variant,
             config: applyFaviconToAllOptions(sourceFavicon, variant.config, opts)

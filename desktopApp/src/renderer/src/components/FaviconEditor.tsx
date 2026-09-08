@@ -658,21 +658,25 @@ export function FaviconEditor({
 
       onLogoChange(
         logoVariants.map((lv) => {
-          const isOther = !sourceTwinId || lv.id !== sourceTwinId
+          const isTwin = !!sourceTwinId && lv.id === sourceTwinId
           let next = lv.config
-          if (contentSelected && isOther) {
+          // Unsync before content copy so twin/other logos do not stay linked.
+          if (contentSelected) {
             next = unsyncLogoConfig(next)
           }
-          if (!isOther) {
-            // Name-matched twin of the active favicon: leave icon/paint alone.
-            return { ...lv, config: withShell(next) }
-          }
           next = withShell(next)
-          const mergedFav = mergedByLabel.get(lv.label)
+          // Apply icon/paint to every logo including the name-matched twin.
+          // Skipping the twin left full source paint (incl. below-Inner) when
+          // only Layer · Inner was checked.
+          const mergedFav = isTwin
+            ? sourceFavicon
+            : (mergedByLabel.get(lv.label) ?? sourceFavicon)
           const baseIcon = next.syncedIcon ?? next.icon
-          const sourceForLogo = mergedFav
-            ? faviconContentToIconConfig(mergedFav.content, baseIcon, mergedFav)
-            : faviconContentToIconConfig(sourceFavicon.content, baseIcon, sourceFavicon)
+          const sourceForLogo = faviconContentToIconConfig(
+            mergedFav.content,
+            baseIcon,
+            mergedFav
+          )
           return {
             ...lv,
             config: {
