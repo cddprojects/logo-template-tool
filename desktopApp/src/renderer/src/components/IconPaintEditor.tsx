@@ -5500,6 +5500,11 @@ export function IconPaintEditor({
   const layerOrderRef = useRef(layerOrder)
   layerOrderRef.current = layerOrder
   const draggedLayerRef = useRef<string | null>(null)
+  /** Scrollable Layers list — edge + wheel assist while reordering. */
+  const layersPanelScrollRef = useRef<HTMLDivElement | null>(null)
+  const layersDragScrollRafRef = useRef<number | null>(null)
+  const layersDragScrollVelRef = useRef(0)
+  const layersDragWheelCleanupRef = useRef<(() => void) | null>(null)
   type LayerDropPosition = 'before' | 'after' | 'inside'
   const [layerDropTarget, setLayerDropTarget] = useState<{
     key: string
@@ -7128,6 +7133,17 @@ export function IconPaintEditor({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [undo, redo, onClose, tool])
+
+  useEffect(() => {
+    return () => {
+      if (layersDragScrollRafRef.current != null) {
+        cancelAnimationFrame(layersDragScrollRafRef.current)
+        layersDragScrollRafRef.current = null
+      }
+      layersDragWheelCleanupRef.current?.()
+      layersDragWheelCleanupRef.current = null
+    }
+  }, [])
 
   // Map a mouse event to working-resolution coordinates.
   const toCanvas = (e: React.MouseEvent): { x: number; y: number } => {
@@ -14609,6 +14625,70 @@ export function IconPaintEditor({
     return ratio < 0.5 ? 'before' : 'after'
   }
 
+  const stopLayersPanelEdgeScroll = () => {
+    layersDragScrollVelRef.current = 0
+    if (layersDragScrollRafRef.current != null) {
+      cancelAnimationFrame(layersDragScrollRafRef.current)
+      layersDragScrollRafRef.current = null
+    }
+  }
+
+  /** Wheel + edge auto-scroll so hierarchy drags can move past the visible list. */
+  const endLayersPanelDragAssist = () => {
+    stopLayersPanelEdgeScroll()
+    layersDragWheelCleanupRef.current?.()
+    layersDragWheelCleanupRef.current = null
+  }
+
+  const beginLayersPanelDragAssist = () => {
+    if (layersDragWheelCleanupRef.current) return
+    const onWheel = (e: WheelEvent) => {
+      if (!draggedLayerRef.current) return
+      const el = layersPanelScrollRef.current
+      if (!el) return
+      el.scrollTop += e.deltaY
+      e.preventDefault()
+    }
+    window.addEventListener('wheel', onWheel, { passive: false })
+    layersDragWheelCleanupRef.current = () => window.removeEventListener('wheel', onWheel)
+  }
+
+  const updateLayersPanelDragScroll = (clientY: number) => {
+    const el = layersPanelScrollRef.current
+    if (!el || !draggedLayerRef.current) {
+      stopLayersPanelEdgeScroll()
+      return
+    }
+    const rect = el.getBoundingClientRect()
+    const edge = 40
+    let vel = 0
+    if (clientY < rect.top + edge) {
+      const t = Math.min(1, (rect.top + edge - clientY) / edge)
+      vel = -Math.ceil(3 + t * 16)
+    } else if (clientY > rect.bottom - edge) {
+      const t = Math.min(1, (clientY - (rect.bottom - edge)) / edge)
+      vel = Math.ceil(3 + t * 16)
+    }
+    layersDragScrollVelRef.current = vel
+    if (!vel) {
+      stopLayersPanelEdgeScroll()
+      return
+    }
+    if (layersDragScrollRafRef.current != null) return
+    const tick = () => {
+      layersDragScrollRafRef.current = null
+      const list = layersPanelScrollRef.current
+      const speed = layersDragScrollVelRef.current
+      if (!list || !draggedLayerRef.current || !speed) {
+        layersDragScrollVelRef.current = 0
+        return
+      }
+      list.scrollTop += speed
+      layersDragScrollRafRef.current = requestAnimationFrame(tick)
+    }
+    layersDragScrollRafRef.current = requestAnimationFrame(tick)
+  }
+
   /**
    * Word-style crop: Crop enters a mode with handles. Apply with Crop again,
    * Enter, or click outside. Escape cancels.
@@ -16592,16 +16672,18 @@ export function IconPaintEditor({
           <div className="px-3 py-2 border-b border-border shrink-0">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">Layers</p>
             <p className="text-[9px] text-muted/70 mt-0.5">
-              Drag above/below · drop on group centre to nest · below Inner/Outer paint to send behind
+              Drag above/below · scroll while dragging · drop on group centre to nest · below Inner/Outer paint to send behind
             </p>
           </div>
           <div
+            ref={layersPanelScrollRef}
             className="flex-1 min-h-0 overflow-y-scroll p-2 space-y-1.5"
             onDragOver={(e) => {
               if (!draggedLayerRef.current) return
               e.preventDefault()
               e.stopPropagation()
               e.dataTransfer.dropEffect = 'move'
+              updateLayersPanelDragScroll(e.clientY)
             }}
           >
             {layerOrder.map((id) => {
@@ -16668,6 +16750,7 @@ export function IconPaintEditor({
                             e.stopPropagation()
                             draggedLayerRef.current = key
                             setLayerDropTarget(null)
+                            beginLayersPanelDragAssist()
                             e.dataTransfer.effectAllowed = 'move'
                             e.dataTransfer.setData(PAINT_LAYER_MIME, key)
                             e.dataTransfer.setData('text/plain', key)
@@ -16677,6 +16760,7 @@ export function IconPaintEditor({
                               e.preventDefault()
                               e.stopPropagation()
                               e.dataTransfer.dropEffect = 'move'
+                              updateLayersPanelDragScroll(e.clientY)
                               const allowInside =
                                 l.type === 'group' &&
                                 canNestDraggedIntoGroup(draggedLayerRef.current, l.id)
@@ -16706,11 +16790,13 @@ export function IconPaintEditor({
                                 : dropPositionForRow(e, allowInside)
                             draggedLayerRef.current = null
                             setLayerDropTarget(null)
+                            endLayersPanelDragAssist()
                             if (dragged) dropLayerItem(dragged, key, position)
                           }}
                           onDragEnd={() => {
                             draggedLayerRef.current = null
                             setLayerDropTarget(null)
+                            endLayersPanelDragAssist()
                           }}
                           className={`relative flex items-center gap-1.5 rounded-lg border px-1.5 py-1.5 text-[11px] transition-colors cursor-pointer ${
                             layerDropTarget?.key === key && layerDropTarget.position === 'inside'
@@ -16876,6 +16962,7 @@ export function IconPaintEditor({
                       const key = `base:${id}`
                       draggedLayerRef.current = key
                       setLayerDropTarget(null)
+                      beginLayersPanelDragAssist()
                       e.dataTransfer.effectAllowed = 'move'
                       e.dataTransfer.setData(PAINT_LAYER_MIME, key)
                       e.dataTransfer.setData('text/plain', key)
@@ -16886,6 +16973,7 @@ export function IconPaintEditor({
                         e.preventDefault()
                         e.stopPropagation()
                         e.dataTransfer.dropEffect = 'move'
+                        updateLayersPanelDragScroll(e.clientY)
                         const position = dropPositionForRow(e, false)
                         setLayerDropTarget((prev) =>
                           prev?.key === key && prev.position === position
@@ -16911,11 +16999,13 @@ export function IconPaintEditor({
                           : dropPositionForRow(e, false)
                       draggedLayerRef.current = null
                       setLayerDropTarget(null)
+                      endLayersPanelDragAssist()
                       if (dragged) dropLayerItem(dragged, key, position)
                     }}
                     onDragEnd={() => {
                       draggedLayerRef.current = null
                       setLayerDropTarget(null)
+                      endLayersPanelDragAssist()
                     }}
                     className={`relative flex items-center gap-1.5 rounded-lg border px-1.5 py-2 text-[11px] transition-colors ${
                       disabled
