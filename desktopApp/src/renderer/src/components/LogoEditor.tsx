@@ -785,12 +785,11 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
     const activeId = active?.id
 
     if (applyFavicons) {
-      const sourceFavicon =
-        (isSyncedWithFavicon && matchingFaviconVariant
-          ? matchingFaviconVariant.config
-          : null) ??
-        matchingFaviconVariant?.config ??
-        iconConfigToFaviconConfig(effectiveIcon)
+      // Synced: favicon twin matches the on-screen logo. Unsynced: build from the
+      // active logo icon so Edit / Colour from this side actually reach favicons.
+      const sourceFavicon = isSyncedWithFavicon && matchingFaviconVariant
+        ? matchingFaviconVariant.config
+        : iconConfigToFaviconConfig(effectiveIcon, matchingFaviconVariant?.config)
 
       onFaviconChange!(
         faviconVariants.map((variant) => {

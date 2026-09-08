@@ -1028,6 +1028,156 @@ function stripOuterPaintSync(session: PaintSession | null | undefined): PaintSes
   return { ...session, contentSync: nextSync }
 }
 
+/**
+ * Remove live-colour rewrite hints from a paint session.
+ * Edit without Colour must copy paint geometry only — not fill / border / shadow slots.
+ */
+function stripPaintSessionColorHints(
+  session: PaintSession | null | undefined
+): PaintSession | null {
+  if (!session) return null
+  if (!session.contentSync) return session
+  const {
+    fillColor: _fc,
+    outerFillColor: _of,
+    outerBorderColor: _ob,
+    outerShadowColor: _os,
+    contentShadowColor: _cs,
+    clearOuterOverlay: _co,
+    clearContentOverlay: _cc,
+    clearContentBorder: _cb,
+    letters,
+    ...rest
+  } = session.contentSync
+  const nextSync: PaintContentSync = { ...rest }
+  if (letters) {
+    // Keep glyph / font geometry from Paint; drop the colour slot.
+    const { textColor: _tc, ...letterRest } = letters
+    nextSync.letters = { ...letterRest, textColor: '' }
+  }
+  const hasKeys =
+    Object.keys(nextSync).some((k) => k !== 'letters') ||
+    !!(nextSync.letters && (nextSync.letters.text || nextSync.letters.fontFamily))
+  return {
+    ...session,
+    contentSync: hasKeys ? nextSync : undefined
+  }
+}
+
+function paintSessionHasColorRewriteHints(
+  session: PaintSession | null | undefined
+): boolean {
+  const s = session?.contentSync
+  if (!s) return !!session?.contentBakedInDecorations
+  return !!(
+    s.fillColor ||
+    s.clearContentOverlay ||
+    s.clearOuterOverlay ||
+    s.outerFillColor ||
+    s.outerBorderColor ||
+    s.outerShadowColor ||
+    (s.letters?.textColor && s.letters.textColor !== '')
+  )
+}
+
+/** After Edit merge: honour Colour checkbox for live slots + vector fills. */
+function finalizeIconEditColors(
+  next: IconConfig,
+  target: IconConfig,
+  source: IconConfig,
+  opts: Pick<ApplyToAllOptions, 'edit' | 'color' | 'inner' | 'outer'>
+): IconConfig {
+  if (!opts.edit) return next
+  if (!opts.color) {
+    let session = stripPaintSessionColorHints(next.paintSession)
+    // Source-coloured Inner bake would cover the target’s live palette.
+    if (session && paintSessionHasColorRewriteHints(source.paintSession)) {
+      session = { ...session, contentBakedInDecorations: false }
+    }
+    if (session?.vectors?.length) {
+      const contentFill = iconPrimaryFill(target)
+      const contentSecondary = target.secondaryColor || ''
+      const outerFill = target.containerColor || contentFill
+      session = {
+        ...session,
+        vectors: session.vectors.map((v) => {
+          if (v.punchMask) return v
+          const fill = (v.layer ?? 'content') === 'container' ? outerFill : contentFill
+          const secondary =
+            (v.layer ?? 'content') === 'container' ? outerFill : contentSecondary
+          return recolorContentVectors([v], fill, secondary)[0]!
+        })
+      }
+    }
+    let out: IconConfig = {
+      ...withIconTargetColors(next, target),
+      paintSession: session
+    }
+    if (!opts.outer) out = preserveIconOuterColors(out, target)
+    else {
+      Object.assign(
+        out,
+        pickKeys(target as unknown as Record<string, unknown>, ICON_OUTER_COLOR_KEYS)
+      )
+    }
+    return out
+  }
+  // Colour + Edit: push Paint fill hints into live settings (logo + favicon parity).
+  const sync = next.paintSession?.contentSync
+  return applyPaintContentSyncToIcon(next, sync)
+}
+
+function finalizeFaviconEditColors(
+  next: FaviconConfig,
+  target: FaviconConfig,
+  source: FaviconConfig,
+  opts: Pick<ApplyToAllOptions, 'edit' | 'color' | 'inner' | 'outer'>
+): FaviconConfig {
+  if (!opts.edit) return next
+  if (!opts.color) {
+    let session = stripPaintSessionColorHints(next.paintSession)
+    if (session && paintSessionHasColorRewriteHints(source.paintSession)) {
+      session = { ...session, contentBakedInDecorations: false }
+    }
+    if (session?.vectors?.length) {
+      const contentFill = faviconPrimaryFill(target.content)
+      const contentSecondary = faviconSecondaryFill(target.content)
+      const outerFill = target.backgroundColor || contentFill
+      session = {
+        ...session,
+        vectors: session.vectors.map((v) => {
+          if (v.punchMask) return v
+          const fill = (v.layer ?? 'content') === 'container' ? outerFill : contentFill
+          const secondary =
+            (v.layer ?? 'content') === 'container' ? outerFill : contentSecondary
+          return recolorContentVectors([v], fill, secondary)[0]!
+        })
+      }
+    }
+    let out: FaviconConfig = {
+      ...next,
+      content: withFaviconTargetColors(next.content, target.content),
+      paintSession: session
+    }
+    if (!opts.outer) out = preserveFaviconOuterColors(out, target)
+    else {
+      Object.assign(
+        out,
+        pickKeys(target as unknown as Record<string, unknown>, FAVICON_OUTER_COLOR_KEYS)
+      )
+    }
+    return out
+  }
+  const sync = next.paintSession?.contentSync
+  return applyPaintOuterSyncToFavicon(
+    {
+      ...next,
+      content: applyPaintContentSyncToFaviconContent(next.content, sync)
+    },
+    sync
+  )
+}
+
 function preserveIconOuterColors(next: IconConfig, target: IconConfig): IconConfig {
   return {
     ...next,
@@ -1238,7 +1388,7 @@ export function applyIconToAllOptions(
       next.paintSession,
       opts
     )
-    return next
+    return finalizeIconEditColors(next, target, source, opts)
   }
 
   // Shape (no colour) on Inner only — settings only unless `edit`.
@@ -1250,12 +1400,17 @@ export function applyIconToAllOptions(
       opts
     )
     if (!opts.outer) {
-      return preserveIconOuterColors(
-        { ...next, paintSession: stripOuterPaintSync(next.paintSession) },
-        target
+      return finalizeIconEditColors(
+        preserveIconOuterColors(
+          { ...next, paintSession: stripOuterPaintSync(next.paintSession) },
+          target
+        ),
+        target,
+        source,
+        opts
       )
     }
-    return next
+    return finalizeIconEditColors(next, target, source, opts)
   }
 
   let next = structuredClone(target)
@@ -1329,7 +1484,7 @@ export function applyIconToAllOptions(
     next.paintSession = stripOuterPaintSync(next.paintSession)
   }
 
-  return next
+  return finalizeIconEditColors(next, target, source, opts)
 }
 
 /**
@@ -1354,7 +1509,7 @@ export function applyFaviconToAllOptions(
       next.paintSession,
       opts
     )
-    return next
+    return finalizeFaviconEditColors(next, target, source, opts)
   }
 
   if (opts.shape && !opts.color && opts.inner && !opts.outer) {
@@ -1365,12 +1520,17 @@ export function applyFaviconToAllOptions(
       opts
     )
     if (!opts.outer) {
-      return {
-        ...preserveFaviconOuterColors(next, target),
-        paintSession: stripOuterPaintSync(next.paintSession)
-      }
+      return finalizeFaviconEditColors(
+        {
+          ...preserveFaviconOuterColors(next, target),
+          paintSession: stripOuterPaintSync(next.paintSession)
+        },
+        target,
+        source,
+        opts
+      )
     }
-    return next
+    return finalizeFaviconEditColors(next, target, source, opts)
   }
 
   let next = structuredClone(target)
@@ -1445,7 +1605,7 @@ export function applyFaviconToAllOptions(
     next.paintSession = stripOuterPaintSync(next.paintSession)
   }
 
-  return next
+  return finalizeFaviconEditColors(next, target, source, opts)
 }
 
 export function isContentBoundVector(v: PaintVector): boolean {
@@ -2322,7 +2482,7 @@ export function applyPaintContentSyncToFaviconContent(
   if (sync.letters) {
     next.type = 'letters'
     next.text = sync.letters.text
-    next.textColor = sync.letters.textColor
+    if (sync.letters.textColor) next.textColor = sync.letters.textColor
     next.fontFamily = sync.letters.fontFamily
     next.fontWeight = sync.letters.fontWeight
     next.fontItalic = sync.letters.fontItalic
@@ -2398,7 +2558,7 @@ export function applyPaintContentSyncToIcon(
   if (sync.letters) {
     next.sourceType = 'letters'
     next.text = sync.letters.text
-    next.textColor = sync.letters.textColor
+    if (sync.letters.textColor) next.textColor = sync.letters.textColor
     next.fontFamily = sync.letters.fontFamily
     next.fontWeight = sync.letters.fontWeight
     next.fontItalic = sync.letters.fontItalic
