@@ -13034,11 +13034,13 @@ export function IconPaintEditor({
     setMarqueeMode(mode)
   }
 
-  /** Place an external image as a floating selection on the top editable layer. */
+  /**
+   * Place an external raster as a stamp object on the top editable layer
+   * (same as SVG upload — appears in the Layers panel immediately).
+   */
   const placeExternalImage = (dataUrl: string, at?: Pt) => {
     const img = new Image()
     img.onload = () => {
-      if (floatRef.current) commitFloat()
       const maxW = W * 0.85
       const maxH = H * 0.85
       const scale = Math.min(1, maxW / Math.max(1, img.width), maxH / Math.max(1, img.height))
@@ -13051,14 +13053,7 @@ export function IconPaintEditor({
       ctx.imageSmoothingEnabled = true
       ctx.imageSmoothingQuality = 'high'
       ctx.drawImage(img, 0, 0, dw, dh)
-      const x = at ? Math.round(at.x - dw / 2) : Math.round((W - dw) / 2)
-      const y = at ? Math.round(at.y - dh / 2) : Math.round((H - dh) / 2)
-      floatRef.current = { canvas, x, y, source: cloneCanvas(canvas), selectable: true }
-      marqueeRef.current = null
-      setHasMarquee(true)
-      setMarqueeMode('scale')
-      if (tool !== 'select') setTool('select')
-      drawSelOverlay()
+      placeStampFromCanvas(canvas, at, 'image')
     }
     img.onerror = () => {}
     img.src = dataUrl
