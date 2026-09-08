@@ -812,6 +812,23 @@ export function applyToAllOptionsActive(opts: ApplyToAllOptions): boolean {
   )
 }
 
+/**
+ * Break logo ↔ favicon sync and bake the live mirror into `icon`.
+ * Used by Apply to all so Content copies land on independent (non-sync) settings.
+ */
+export function unsyncLogoConfig(config: LogoConfig): LogoConfig {
+  const linked = config.iconLinked ?? true
+  const frozen = linked ? (config.syncedIcon ?? config.icon) : config.icon
+  return {
+    ...config,
+    iconLinked: false,
+    iconSyncBroken: false,
+    syncedIconSnapshot: null,
+    syncedIcon: null,
+    icon: structuredClone(frozen)
+  }
+}
+
 /** Logo wordmark / layout — Shape & settings (no colour slots). */
 const LOGO_SHELL_SHAPE_KEYS = [
   'text',

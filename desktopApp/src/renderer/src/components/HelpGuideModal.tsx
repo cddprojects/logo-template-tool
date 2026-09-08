@@ -87,8 +87,9 @@ function UseGuide(): JSX.Element {
             / shadow settings (width, radius, blur, offset, on/off) but not their colours — those
             go with <span className="text-text">Colour</span> (fill, border colour, shadow colour).
             Checking Content + Layer fully is a full icon/favicon duplicate for the selected apps.
-            Colour on Inner alone never rewrites Outer background. Synced logo icons follow
-            favicon updates only when Logo is also checked
+            Colour on Inner alone never rewrites Outer background. When Content is checked,
+            other linked logo variants are unsynced first so the copy lands on independent
+            (non-sync) settings — favicon and logo stay separable afterward
           </li>
           <li>
             <span className="text-text">Paint</span> opens the icon editor. The right panel’s

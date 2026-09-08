@@ -28,6 +28,7 @@ import {
   outsideContentFromFavicon,
   switchFaviconContentType,
   updateIconStashAfterSave,
+  unsyncLogoConfig,
   type ApplyToAllOptions
 } from '../utils/paintSettingsSync'
 import { faviconContentToIconConfig } from './LogoEditor'
@@ -618,6 +619,10 @@ export function FaviconEditor({
     const applyLogos = !!opts.logo && !!onLogoChange && logoVariants.length > 1
     if (!applyFavicons && !applyLogos) return
 
+    // Content copies run in non-sync mode so favicon/logo stay separable.
+    const contentSelected = opts.shape || opts.color
+    const sourceTwinId = matchingLogoVariant?.id
+
     const sourceFavicon = config
     const mergedByLabel = new Map(
       variants.map((variant) => [
@@ -625,27 +630,6 @@ export function FaviconEditor({
         applyFaviconToAllOptions(sourceFavicon, variant.config, opts)
       ])
     )
-
-    // Favicon-only: freeze linked logos so sync does not pull favicon updates.
-    if (applyFavicons && !applyLogos && onLogoChange) {
-      onLogoChange(
-        logoVariants.map((lv) => {
-          if (!(lv.config.iconLinked ?? true)) return lv
-          const frozen = lv.config.syncedIcon ?? lv.config.icon
-          return {
-            ...lv,
-            config: {
-              ...lv.config,
-              iconLinked: false,
-              iconSyncBroken: false,
-              syncedIconSnapshot: null,
-              syncedIcon: null,
-              icon: structuredClone(frozen)
-            }
-          }
-        })
-      )
-    }
 
     if (applyFavicons) {
       onChange(
@@ -661,14 +645,38 @@ export function FaviconEditor({
         matchingLogoVariant?.config ??
         logoVariants.find((l) => l.label === active.label)?.config ??
         logoVariants[0]?.config
-      const withShell = (config: LogoConfig): LogoConfig =>
-        sourceLogo ? applyLogoShellToAllOptions(sourceLogo, config, opts) : config
+      const withShell = (cfg: LogoConfig): LogoConfig =>
+        sourceLogo ? applyLogoShellToAllOptions(sourceLogo, cfg, opts) : cfg
 
       onLogoChange(
         logoVariants.map((lv) => {
+          const isOther = !sourceTwinId || lv.id !== sourceTwinId
+          let next = lv.config
+          if (contentSelected && isOther) {
+            next = unsyncLogoConfig(next)
+          }
+          next = withShell(next)
           const mergedFav = mergedByLabel.get(lv.label)
-          const baseIcon = lv.config.syncedIcon ?? lv.config.icon
-          if (mergedFav && (lv.config.iconLinked ?? true) && applyFavicons) {
+          const baseIcon = next.syncedIcon ?? next.icon
+          // Other variants (and already-unsynced twins): independent icon copy.
+          if (isOther || !(next.iconLinked ?? true)) {
+            const sourceForLogo = mergedFav
+              ? faviconContentToIconConfig(mergedFav.content, baseIcon, mergedFav)
+              : faviconContentToIconConfig(sourceFavicon.content, baseIcon, sourceFavicon)
+            return {
+              ...lv,
+              config: {
+                ...next,
+                iconLinked: false,
+                iconSyncBroken: false,
+                syncedIconSnapshot: null,
+                syncedIcon: null,
+                icon: applyIconToAllOptions(sourceForLogo, baseIcon, opts)
+              }
+            }
+          }
+          // Active name-matched twin may stay linked; look follows favicon if applied.
+          if (applyFavicons && mergedFav) {
             let syncedIcon = faviconContentToIconConfig(
               mergedFav.content,
               baseIcon,
@@ -684,32 +692,25 @@ export function FaviconEditor({
             }
             return {
               ...lv,
-              config: withShell({
-                ...lv.config,
+              config: {
+                ...next,
                 iconLinked: true,
                 iconSyncBroken: false,
                 syncedIconSnapshot: null,
                 syncedIcon
-              })
+              }
             }
           }
-          // Logo-only, or unmatched label: apply onto the logo icon from the
-          // favicon twin (or active favicon mapped through content→icon).
-          const sourceForLogo = mergedFav
-            ? faviconContentToIconConfig(mergedFav.content, baseIcon, mergedFav)
-            : faviconContentToIconConfig(sourceFavicon.content, baseIcon, sourceFavicon)
-          return {
-            ...lv,
-            config: withShell({
-              ...lv.config,
-              iconLinked: false,
-              iconSyncBroken: false,
-              syncedIconSnapshot: null,
-              syncedIcon: null,
-              icon: applyIconToAllOptions(sourceForLogo, baseIcon, opts)
-            })
-          }
+          return { ...lv, config: next }
         })
+      )
+    } else if (applyFavicons && contentSelected && onLogoChange) {
+      // Favicon-only: freeze every linked logo so sync does not pull updates.
+      onLogoChange(
+        logoVariants.map((lv) => ({
+          ...lv,
+          config: unsyncLogoConfig(lv.config)
+        }))
       )
     }
 
