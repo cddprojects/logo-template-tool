@@ -5170,7 +5170,7 @@ function ShapePreview({ kind, px = 26 }: { kind: ShapeKind; px?: number }): JSX.
 }
 
 function ShapeMenu({
-  title, items, current, onPick, freePoly, anchorRect
+  title, items, current, onPick, freePoly, aspectLock, anchorRect
 }: {
   title: string
   items: { value: ShapeKind; label: string }[]
@@ -5181,12 +5181,16 @@ function ShapeMenu({
     onN: (v: number) => void
     onPick: () => void
     active: boolean
-    lockAspect: boolean
-    onLockAspect: (v: boolean) => void
+  }
+  /** Optional W:H aspect lock (polygons / irregular). */
+  aspectLock?: {
+    enabled: boolean
+    onEnabled: (v: boolean) => void
     aspectW: number
     aspectH: number
     onAspectW: (v: number) => void
     onAspectH: (v: number) => void
+    title?: string
   }
   /** Button rect — menu is `fixed` so it is not clipped by the two-row toolbar. */
   anchorRect: DOMRect
@@ -5198,6 +5202,7 @@ function ShapeMenu({
     <div
       className="fixed z-[10050] w-[264px] p-2 rounded-lg bg-surface border border-border shadow-2xl"
       style={{ left, top }}
+      onMouseDown={(e) => e.stopPropagation()}
     >
       <div className="text-[10px] uppercase tracking-wide text-muted/70 px-1 pb-1">{title}</div>
       <div className="grid grid-cols-5 gap-1">
@@ -5215,65 +5220,65 @@ function ShapeMenu({
         ))}
       </div>
       {freePoly && (
-        <div className="mt-2 pt-2 border-t border-border space-y-2">
-          <div className="flex items-center gap-2">
-            <span className="text-[11px] text-text font-medium">Free polygon</span>
+        <div className="mt-2 pt-2 border-t border-border flex items-center gap-2">
+          <span className="text-[11px] text-text font-medium">Free polygon</span>
+          <input
+            type="number" min={3} max={60} value={freePoly.n}
+            onChange={(e) => freePoly.onN(Math.max(3, Math.min(60, Number(e.target.value) || 3)))}
+            className="w-14 px-1.5 py-1 rounded bg-surface3 border border-border text-[11px] text-text focus:outline-none focus:border-accent"
+          />
+          <span className="text-[10px] text-muted">edges</span>
+          <button
+            onClick={freePoly.onPick}
+            className={`ml-auto px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+              freePoly.active ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+            }`}
+          >
+            Use
+          </button>
+        </div>
+      )}
+      {aspectLock && (
+        <div className={`${freePoly ? 'mt-2' : 'mt-2 pt-2 border-t border-border'} flex items-center gap-1.5 flex-wrap`}>
+          <label
+            className="flex items-center gap-1.5 text-[11px] text-muted cursor-pointer select-none"
+            title={aspectLock.title ?? 'When checked, keep the set aspect ratio while drawing. Hold Shift for the same while unchecked.'}
+          >
             <input
-              type="number" min={3} max={60} value={freePoly.n}
-              onChange={(e) => freePoly.onN(Math.max(3, Math.min(60, Number(e.target.value) || 3)))}
-              className="w-14 px-1.5 py-1 rounded bg-surface3 border border-border text-[11px] text-text focus:outline-none focus:border-accent"
+              type="checkbox"
+              checked={aspectLock.enabled}
+              onChange={(e) => aspectLock.onEnabled(e.target.checked)}
+              className="accent-accent"
             />
-            <span className="text-[10px] text-muted">edges</span>
-            <button
-              onClick={freePoly.onPick}
-              className={`ml-auto px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
-                freePoly.active ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
-              }`}
-            >
-              Use
-            </button>
-          </div>
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <label
-              className="flex items-center gap-1.5 text-[11px] text-muted cursor-pointer select-none"
-              title="When checked, free polygons keep the set aspect ratio while drawing. Hold Shift for the same while unchecked."
-            >
-              <input
-                type="checkbox"
-                checked={freePoly.lockAspect}
-                onChange={(e) => freePoly.onLockAspect(e.target.checked)}
-                className="accent-accent"
-              />
-              Lock aspect
-            </label>
-            <input
-              type="number"
-              min={0.01}
-              step="any"
-              value={freePoly.aspectW}
-              onChange={(e) => {
-                const v = Number(e.target.value)
-                freePoly.onAspectW(Number.isFinite(v) && v > 0 ? v : 1)
-              }}
-              onClick={(e) => e.stopPropagation()}
-              className="w-12 px-1 py-1 rounded bg-surface3 border border-border text-[11px] text-text text-center focus:outline-none focus:border-accent"
-              title="Aspect width"
-            />
-            <span className="text-[11px] text-muted">:</span>
-            <input
-              type="number"
-              min={0.01}
-              step="any"
-              value={freePoly.aspectH}
-              onChange={(e) => {
-                const v = Number(e.target.value)
-                freePoly.onAspectH(Number.isFinite(v) && v > 0 ? v : 1)
-              }}
-              onClick={(e) => e.stopPropagation()}
-              className="w-12 px-1 py-1 rounded bg-surface3 border border-border text-[11px] text-text text-center focus:outline-none focus:border-accent"
-              title="Aspect height"
-            />
-          </div>
+            Lock aspect
+          </label>
+          <input
+            type="number"
+            min={0.01}
+            step="any"
+            value={aspectLock.aspectW}
+            onChange={(e) => {
+              const v = Number(e.target.value)
+              aspectLock.onAspectW(Number.isFinite(v) && v > 0 ? v : 1)
+            }}
+            onClick={(e) => e.stopPropagation()}
+            className="w-12 px-1 py-1 rounded bg-surface3 border border-border text-[11px] text-text text-center focus:outline-none focus:border-accent"
+            title="Aspect width"
+          />
+          <span className="text-[11px] text-muted">:</span>
+          <input
+            type="number"
+            min={0.01}
+            step="any"
+            value={aspectLock.aspectH}
+            onChange={(e) => {
+              const v = Number(e.target.value)
+              aspectLock.onAspectH(Number.isFinite(v) && v > 0 ? v : 1)
+            }}
+            onClick={(e) => e.stopPropagation()}
+            className="w-12 px-1 py-1 rounded bg-surface3 border border-border text-[11px] text-text text-center focus:outline-none focus:border-accent"
+            title="Aspect height"
+          />
         </div>
       )}
     </div>
@@ -5574,10 +5579,18 @@ export function IconPaintEditor({
   const [polyKind, setPolyKind] = useState<ShapeKind | 'freepoly'>('rect')
   const [irregKind, setIrregKind] = useState<ShapeKind>('ellipse')
   const [freePolyN, setFreePolyN] = useState(5)
-  /** Free-polygon draw lock: optional W:H box (defaults 1:1). */
+  /** Polygon-menu aspect lock (preset polygons + free poly). Defaults 1:1. */
   const [polyLockAspect, setPolyLockAspect] = useState(false)
   const [polyAspectW, setPolyAspectW] = useState(1)
   const [polyAspectH, setPolyAspectH] = useState(1)
+  /** Irregular-menu aspect lock. Defaults 1:1. */
+  const [irregLockAspect, setIrregLockAspect] = useState(false)
+  const [irregAspectW, setIrregAspectW] = useState(1)
+  const [irregAspectH, setIrregAspectH] = useState(1)
+  const polyAspectRef = useRef({ lock: false, w: 1, h: 1 })
+  const irregAspectRef = useRef({ lock: false, w: 1, h: 1 })
+  polyAspectRef.current = { lock: polyLockAspect, w: polyAspectW, h: polyAspectH }
+  irregAspectRef.current = { lock: irregLockAspect, w: irregAspectW, h: irregAspectH }
   const [openMenu, setOpenMenu] = useState<'poly' | 'irreg' | null>(null)
   const [shapeMenuRect, setShapeMenuRect] = useState<DOMRect | null>(null)
   const polyMenuBtnRef = useRef<HTMLButtonElement>(null)
@@ -8666,14 +8679,22 @@ export function IconPaintEditor({
     } else if (dr.kind === 'create') {
       const origin = dr.grab ?? l.pts[0]
       let end = pt
-      if (l.type === 'poly' && (polyLockAspect || shiftHeldRef.current)) {
-        const aw = Math.max(0.01, polyAspectW || 1)
-        const ah = Math.max(0.01, polyAspectH || 1)
+      const polyFamily =
+        l.type === 'poly' ||
+        (l.type === 'shape' && !!l.shape && POLY_KIND_SET.has(l.shape))
+      const irregFamily =
+        l.type === 'shape' && !!l.shape && !POLY_KIND_SET.has(l.shape)
+      const polyAsp = polyAspectRef.current
+      const irregAsp = irregAspectRef.current
+      if (polyFamily && (polyAsp.lock || shiftHeldRef.current)) {
+        const aw = Math.max(0.01, polyAsp.w || 1)
+        const ah = Math.max(0.01, polyAsp.h || 1)
         end = lockAspectRatioEnd(origin, pt, aw / ah)
-      } else if (
-        shiftHeldRef.current &&
-        (l.type === 'shape' || l.type === 'stamp')
-      ) {
+      } else if (irregFamily && (irregAsp.lock || shiftHeldRef.current)) {
+        const aw = Math.max(0.01, irregAsp.w || 1)
+        const ah = Math.max(0.01, irregAsp.h || 1)
+        end = lockAspectRatioEnd(origin, pt, aw / ah)
+      } else if (shiftHeldRef.current && l.type === 'stamp') {
         end = lockAspectEnd(origin, pt)
       }
       if (l.type === 'shape' || l.type === 'stamp') l.pts = [origin, end]
@@ -8742,11 +8763,19 @@ export function IconPaintEditor({
       if (fixed && !(l.rot ?? 0) && (l.type === 'shape' || l.type === 'stamp')) {
         resizeCorner = `${local.y < fixed.y ? 'n' : 's'}${local.x < fixed.x ? 'w' : 'e'}` as Corner
       }
-      // Preset shapes / stamps use 2 bbox corners — Shift locks 1:1 against the opposite corner.
+      // Preset shapes / stamps use 2 bbox corners — aspect lock or Shift constrains the box.
       if (fixed) {
         if (l.type === 'group' && shiftHeldRef.current && dr.startRect) {
           local = lockAspectRatioEnd(fixed, local, dr.startRect.w / Math.max(1, dr.startRect.h))
-        } else if (shiftHeldRef.current && (l.type === 'shape' || l.type === 'stamp')) {
+        } else if (l.type === 'shape' && l.shape) {
+          const polyFamily = POLY_KIND_SET.has(l.shape)
+          const asp = polyFamily ? polyAspectRef.current : irregAspectRef.current
+          if (asp.lock || shiftHeldRef.current) {
+            const aw = Math.max(0.01, asp.w || 1)
+            const ah = Math.max(0.01, asp.h || 1)
+            local = lockAspectRatioEnd(fixed, local, aw / ah)
+          }
+        } else if (shiftHeldRef.current && l.type === 'stamp') {
           local = lockAspectEnd(fixed, local)
         } else if (l.type === 'straight') {
           const screenRect = previewRef.current?.getBoundingClientRect()
@@ -15136,18 +15165,21 @@ export function IconPaintEditor({
                   n: freePolyN,
                   onN: setFreePolyN,
                   active: tool === 'freepoly',
-                  lockAspect: polyLockAspect,
-                  onLockAspect: setPolyLockAspect,
-                  aspectW: polyAspectW,
-                  aspectH: polyAspectH,
-                  onAspectW: setPolyAspectW,
-                  onAspectH: setPolyAspectH,
                   onPick: () => {
                     setPolyKind('freepoly')
                     setTool('freepoly')
                     setOpenMenu(null)
                     setShapeMenuRect(null)
                   }
+                }}
+                aspectLock={{
+                  enabled: polyLockAspect,
+                  onEnabled: setPolyLockAspect,
+                  aspectW: polyAspectW,
+                  aspectH: polyAspectH,
+                  onAspectW: setPolyAspectW,
+                  onAspectH: setPolyAspectH,
+                  title: 'When checked, polygons (including free polygon) keep this aspect while drawing or corner-resizing. Hold Shift for the same while unchecked.'
                 }}
               />
             )}
@@ -15182,6 +15214,15 @@ export function IconPaintEditor({
                 current={shapeKind}
                 anchorRect={shapeMenuRect}
                 onPick={pickIrregShape}
+                aspectLock={{
+                  enabled: irregLockAspect,
+                  onEnabled: setIrregLockAspect,
+                  aspectW: irregAspectW,
+                  aspectH: irregAspectH,
+                  onAspectW: setIrregAspectW,
+                  onAspectH: setIrregAspectH,
+                  title: 'When checked, irregular shapes keep this aspect while drawing or corner-resizing. Hold Shift for the same while unchecked.'
+                }}
               />
             )}
           </div>
