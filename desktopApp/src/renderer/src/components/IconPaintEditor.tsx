@@ -4427,6 +4427,49 @@ function lockAspectEnd(origin: Pt, end: Pt): Pt {
   }
 }
 
+/**
+ * Snap a 2-point straight-line end to horizontal or vertical when near those axes.
+ * `forceOrtho` (Shift) locks to the nearest axis.
+ */
+function snapStraightLineEnd(
+  origin: Pt,
+  end: Pt,
+  thresholdPx: number,
+  forceOrtho: boolean
+): { pt: Pt; axis: 'h' | 'v' | null } {
+  const dx = end.x - origin.x
+  const dy = end.y - origin.y
+  const ax = Math.abs(dx)
+  const ay = Math.abs(dy)
+  if (ax < 0.5 && ay < 0.5) return { pt: end, axis: null }
+
+  if (forceOrtho) {
+    if (ax >= ay) return { pt: { x: end.x, y: origin.y }, axis: 'h' }
+    return { pt: { x: origin.x, y: end.y }, axis: 'v' }
+  }
+
+  const nearH = ay <= thresholdPx
+  const nearV = ax <= thresholdPx
+  if (nearH && (!nearV || ay <= ax)) {
+    return { pt: { x: end.x, y: origin.y }, axis: 'h' }
+  }
+  if (nearV) {
+    return { pt: { x: origin.x, y: end.y }, axis: 'v' }
+  }
+
+  // Longer strokes: snap by angle (~7.5° of H or V).
+  const degFromH = (Math.atan2(ay, ax) * 180) / Math.PI
+  const degFromV = 90 - degFromH
+  const angleThresh = 7.5
+  if (degFromH <= angleThresh && degFromH <= degFromV) {
+    return { pt: { x: end.x, y: origin.y }, axis: 'h' }
+  }
+  if (degFromV <= angleThresh) {
+    return { pt: { x: origin.x, y: end.y }, axis: 'v' }
+  }
+  return { pt: end, axis: null }
+}
+
 function lockAspectRatioEnd(origin: Pt, end: Pt, ratio: number): Pt {
   const dx = end.x - origin.x
   const dy = end.y - origin.y
@@ -5133,7 +5176,18 @@ function ShapeMenu({
   items: { value: ShapeKind; label: string }[]
   current: ShapeKind
   onPick: (k: ShapeKind) => void
-  freePoly?: { n: number; onN: (v: number) => void; onPick: () => void; active: boolean }
+  freePoly?: {
+    n: number
+    onN: (v: number) => void
+    onPick: () => void
+    active: boolean
+    lockAspect: boolean
+    onLockAspect: (v: boolean) => void
+    aspectW: number
+    aspectH: number
+    onAspectW: (v: number) => void
+    onAspectH: (v: number) => void
+  }
   /** Button rect — menu is `fixed` so it is not clipped by the two-row toolbar. */
   anchorRect: DOMRect
 }): JSX.Element {
@@ -5161,22 +5215,65 @@ function ShapeMenu({
         ))}
       </div>
       {freePoly && (
-        <div className="mt-2 pt-2 border-t border-border flex items-center gap-2">
-          <span className="text-[11px] text-text font-medium">Free polygon</span>
-          <input
-            type="number" min={3} max={60} value={freePoly.n}
-            onChange={(e) => freePoly.onN(Math.max(3, Math.min(60, Number(e.target.value) || 3)))}
-            className="w-14 px-1.5 py-1 rounded bg-surface3 border border-border text-[11px] text-text focus:outline-none focus:border-accent"
-          />
-          <span className="text-[10px] text-muted">edges</span>
-          <button
-            onClick={freePoly.onPick}
-            className={`ml-auto px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
-              freePoly.active ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
-            }`}
-          >
-            Use
-          </button>
+        <div className="mt-2 pt-2 border-t border-border space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] text-text font-medium">Free polygon</span>
+            <input
+              type="number" min={3} max={60} value={freePoly.n}
+              onChange={(e) => freePoly.onN(Math.max(3, Math.min(60, Number(e.target.value) || 3)))}
+              className="w-14 px-1.5 py-1 rounded bg-surface3 border border-border text-[11px] text-text focus:outline-none focus:border-accent"
+            />
+            <span className="text-[10px] text-muted">edges</span>
+            <button
+              onClick={freePoly.onPick}
+              className={`ml-auto px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                freePoly.active ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+              }`}
+            >
+              Use
+            </button>
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <label
+              className="flex items-center gap-1.5 text-[11px] text-muted cursor-pointer select-none"
+              title="When checked, free polygons keep the set aspect ratio while drawing. Hold Shift for the same while unchecked."
+            >
+              <input
+                type="checkbox"
+                checked={freePoly.lockAspect}
+                onChange={(e) => freePoly.onLockAspect(e.target.checked)}
+                className="accent-accent"
+              />
+              Lock aspect
+            </label>
+            <input
+              type="number"
+              min={0.01}
+              step="any"
+              value={freePoly.aspectW}
+              onChange={(e) => {
+                const v = Number(e.target.value)
+                freePoly.onAspectW(Number.isFinite(v) && v > 0 ? v : 1)
+              }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-12 px-1 py-1 rounded bg-surface3 border border-border text-[11px] text-text text-center focus:outline-none focus:border-accent"
+              title="Aspect width"
+            />
+            <span className="text-[11px] text-muted">:</span>
+            <input
+              type="number"
+              min={0.01}
+              step="any"
+              value={freePoly.aspectH}
+              onChange={(e) => {
+                const v = Number(e.target.value)
+                freePoly.onAspectH(Number.isFinite(v) && v > 0 ? v : 1)
+              }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-12 px-1 py-1 rounded bg-surface3 border border-border text-[11px] text-text text-center focus:outline-none focus:border-accent"
+              title="Aspect height"
+            />
+          </div>
         </div>
       )}
     </div>
@@ -5477,12 +5574,14 @@ export function IconPaintEditor({
   const [polyKind, setPolyKind] = useState<ShapeKind | 'freepoly'>('rect')
   const [irregKind, setIrregKind] = useState<ShapeKind>('ellipse')
   const [freePolyN, setFreePolyN] = useState(5)
+  /** Free-polygon draw lock: optional W:H box (defaults 1:1). */
+  const [polyLockAspect, setPolyLockAspect] = useState(false)
+  const [polyAspectW, setPolyAspectW] = useState(1)
+  const [polyAspectH, setPolyAspectH] = useState(1)
   const [openMenu, setOpenMenu] = useState<'poly' | 'irreg' | null>(null)
   const [shapeMenuRect, setShapeMenuRect] = useState<DOMRect | null>(null)
   const polyMenuBtnRef = useRef<HTMLButtonElement>(null)
   const irregMenuBtnRef = useRef<HTMLButtonElement>(null)
-  /** When On, polygon / irregular shapes keep a 1:1 aspect while drawing or corner-resizing. */
-  const [shapeLockAspect, setShapeLockAspect] = useState(false)
   /** Preserve shape/icon stroke width while its bounds are resized. */
   const [keepStrokeOnResize, setKeepStrokeOnResize] = useState(true)
 
@@ -7250,6 +7349,43 @@ export function IconPaintEditor({
     p.restore()
   }
 
+  /** Magenta H/V guides while a 2-point straight line snaps to an axis. */
+  const drawStraightLineSnapGuides = (origin: Pt, end: Pt, axis: 'h' | 'v') => {
+    const p = previewRef.current?.getContext('2d')
+    if (!p) return
+    const rect = previewRef.current?.getBoundingClientRect()
+    const scale = rect?.width ? W / rect.width : 1
+    const mx = (origin.x + end.x) / 2
+    const my = (origin.y + end.y) / 2
+    p.save()
+    p.strokeStyle = '#ec4899'
+    p.fillStyle = '#ec4899'
+    p.lineWidth = Math.max(1, 1.25 * scale)
+    p.setLineDash([5 * scale, 4 * scale])
+    if (axis === 'h') {
+      p.beginPath()
+      p.moveTo(0, origin.y)
+      p.lineTo(W, origin.y)
+      p.stroke()
+    } else {
+      p.beginPath()
+      p.moveTo(origin.x, 0)
+      p.lineTo(origin.x, H)
+      p.stroke()
+    }
+    p.setLineDash([])
+    p.beginPath()
+    p.moveTo(origin.x, origin.y)
+    p.lineTo(end.x, end.y)
+    p.lineWidth = Math.max(1.5, 2 * scale)
+    p.stroke()
+    p.font = `600 ${11 * scale}px Inter, sans-serif`
+    p.textAlign = 'left'
+    p.textBaseline = 'bottom'
+    p.fillText(axis === 'h' ? 'Horizontal' : 'Vertical', mx + 8 * scale, my - 6 * scale)
+    p.restore()
+  }
+
   /** Purple guides while dragging a reshape corner onto a snap target. */
   const drawReshapeSnapGuides = () => {
     const guides = reshapeSnapGuidesRef.current
@@ -8529,12 +8665,31 @@ export function IconPaintEditor({
       if (dist(last, pt) >= minDist) l.pts.push(pt)
     } else if (dr.kind === 'create') {
       const origin = dr.grab ?? l.pts[0]
-      const end = ((shapeLockAspect || shiftHeldRef.current) && (l.type === 'shape' || l.type === 'poly' || l.type === 'stamp'))
-        ? lockAspectEnd(origin, pt)
-        : pt
+      let end = pt
+      if (l.type === 'poly' && (polyLockAspect || shiftHeldRef.current)) {
+        const aw = Math.max(0.01, polyAspectW || 1)
+        const ah = Math.max(0.01, polyAspectH || 1)
+        end = lockAspectRatioEnd(origin, pt, aw / ah)
+      } else if (
+        shiftHeldRef.current &&
+        (l.type === 'shape' || l.type === 'stamp')
+      ) {
+        end = lockAspectEnd(origin, pt)
+      }
       if (l.type === 'shape' || l.type === 'stamp') l.pts = [origin, end]
       else if (l.type === 'poly') l.pts = regularPolyPts(origin, end, l.pts.length)
-      else setLineEndAndControls(l, pt)
+      else if (l.type === 'straight') {
+        const screenRect = previewRef.current?.getBoundingClientRect()
+        const scale = screenRect?.width ? W / screenRect.width : 1
+        const snapped = snapStraightLineEnd(origin, pt, 8 * scale, shiftHeldRef.current)
+        setLineEndAndControls(l, snapped.pt)
+        if (snapped.axis) {
+          schedulePaintView(true, () =>
+            drawStraightLineSnapGuides(origin, snapped.pt, snapped.axis!)
+          )
+          return
+        }
+      } else setLineEndAndControls(l, pt)
     } else if (dr.kind === 'handle') {
       const resizeSnapshot = dr.snapshot
       const sourceLine = resizeSnapshot?.find((item) => item.id === l.id)
@@ -8587,15 +8742,25 @@ export function IconPaintEditor({
       if (fixed && !(l.rot ?? 0) && (l.type === 'shape' || l.type === 'stamp')) {
         resizeCorner = `${local.y < fixed.y ? 'n' : 's'}${local.x < fixed.x ? 'w' : 'e'}` as Corner
       }
-      // Preset shapes / stamps use 2 bbox corners — lock aspect against the opposite corner.
+      // Preset shapes / stamps use 2 bbox corners — Shift locks 1:1 against the opposite corner.
       if (fixed) {
         if (l.type === 'group' && shiftHeldRef.current && dr.startRect) {
           local = lockAspectRatioEnd(fixed, local, dr.startRect.w / Math.max(1, dr.startRect.h))
-        } else if (
-          (shapeLockAspect || shiftHeldRef.current) &&
-          (l.type === 'shape' || l.type === 'stamp')
-        ) {
+        } else if (shiftHeldRef.current && (l.type === 'shape' || l.type === 'stamp')) {
           local = lockAspectEnd(fixed, local)
+        } else if (l.type === 'straight') {
+          const screenRect = previewRef.current?.getBoundingClientRect()
+          const scale = screenRect?.width ? W / screenRect.width : 1
+          const snapped = snapStraightLineEnd(fixed, local, 8 * scale, shiftHeldRef.current)
+          local = snapped.pt
+          if (snapped.axis) {
+            l.pts[idx] = local
+            syncGroupBounds()
+            schedulePaintView(true, () =>
+              drawStraightLineSnapGuides(fixed, local, snapped.axis!)
+            )
+            return
+          }
         }
       }
       const groupBefore = l.type === 'group' && l.pts.length >= 2
@@ -14845,7 +15010,15 @@ export function IconPaintEditor({
     setShapeMenuRect(null)
     const id = selectedIdRef.current
     const live = id ? linesRef.current.find((l) => l.id === id) : null
-    if (live && live.type === 'shape' && live.shape !== k) {
+    // Only retarget an already-selected polygon-family shape — never convert
+    // irregular ↔ polygon (or free poly) when picking from the toolbar menus.
+    if (
+      live &&
+      live.type === 'shape' &&
+      live.shape &&
+      POLY_KIND_SET.has(live.shape) &&
+      live.shape !== k
+    ) {
       clearHolesOnShapeIdentityChange(live)
       updateSelected({ shape: k })
       redrawLines()
@@ -14860,7 +15033,13 @@ export function IconPaintEditor({
     setShapeMenuRect(null)
     const id = selectedIdRef.current
     const live = id ? linesRef.current.find((l) => l.id === id) : null
-    if (live && live.type === 'shape' && live.shape !== k) {
+    if (
+      live &&
+      live.type === 'shape' &&
+      live.shape &&
+      !POLY_KIND_SET.has(live.shape) &&
+      live.shape !== k
+    ) {
       clearHolesOnShapeIdentityChange(live)
       updateSelected({ shape: k })
       redrawLines()
@@ -14957,6 +15136,12 @@ export function IconPaintEditor({
                   n: freePolyN,
                   onN: setFreePolyN,
                   active: tool === 'freepoly',
+                  lockAspect: polyLockAspect,
+                  onLockAspect: setPolyLockAspect,
+                  aspectW: polyAspectW,
+                  aspectH: polyAspectH,
+                  onAspectW: setPolyAspectW,
+                  onAspectH: setPolyAspectH,
                   onPick: () => {
                     setPolyKind('freepoly')
                     setTool('freepoly')
@@ -15231,20 +15416,6 @@ export function IconPaintEditor({
               onChange={(e) => { setShapeFill(e.target.checked); if (fillableCtx && selectedIdRef.current) updateSelected({ fill: e.target.checked }) }}
             />
             Fill shape
-          </label>
-        )}
-        {(tool === 'shape' || tool === 'freepoly' || editingShape || editingPoly) && (
-          <label
-            className="flex items-center gap-1.5 text-[11px] text-muted cursor-pointer select-none shrink-0"
-            title="Keep a square bounding box while drawing or resizing polygon / irregular shapes"
-          >
-            <input
-              type="checkbox"
-              checked={shapeLockAspect}
-              onChange={(e) => setShapeLockAspect(e.target.checked)}
-              className="accent-accent"
-            />
-            Lock aspect ratio
           </label>
         )}
         {(tool === 'shape' || tool === 'freepoly' || editingShape || editingPoly ||
