@@ -493,6 +493,8 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       decorationsPng: result.decorationsPng,
       containerDecorationsPng: result.containerDecorationsPng,
       contentDecorationsPng: result.contentDecorationsPng,
+      contentAboveDecorationsPng: result.contentAboveDecorationsPng,
+      contentBelowDecorationsPng: result.contentBelowDecorationsPng,
       // Linked letters stay as live outside settings (not baked into decorations).
       linkedTextInDecorations: result.linkedTextInDecorations ?? false,
       contentBakedInDecorations: result.contentBakedInDecorations ?? false,

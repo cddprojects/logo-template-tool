@@ -571,6 +571,16 @@ export interface PaintSession {
    */
   contentDecorationsPng?: string
   /**
+   * Inner paint stack split for Apply Edit: overlay + objects at/above Inner paint
+   * (excludes belowBase objects). Used when Apply Edit · Inner must not carry
+   * objects that sit behind the Inner paint row.
+   */
+  contentAboveDecorationsPng?: string
+  /**
+   * Inner paint stack split for Apply Edit: objects below Inner paint only.
+   */
+  contentBelowDecorationsPng?: string
+  /**
    * True when `decorationsPng` includes linkedOutsideText glyphs. Outside render
    * then skips live letters to avoid doubling. Older sessions omit this flag.
    */
@@ -684,6 +694,10 @@ export interface PaintSaveResult {
   containerDecorationsPng?: string
   /** Inner-layer overlays + vectors only. */
   contentDecorationsPng?: string
+  /** Inner overlay + objects at/above Inner paint (Apply Edit · Inner). */
+  contentAboveDecorationsPng?: string
+  /** Objects below Inner paint only (Apply Edit · Outer). */
+  contentBelowDecorationsPng?: string
   /** Outside settings sync hints (applied on Save). */
   contentSync?: PaintContentSync
   /** When true, linked Inner letters were baked into decorations (e.g. rotation). */

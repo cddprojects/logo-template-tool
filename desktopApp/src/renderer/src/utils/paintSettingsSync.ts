@@ -361,7 +361,9 @@ function mergeTypeStashColors(
       contentOverlayPng: undefined,
       contentVectors: entry.contentVectors
         ? recolorContentVectors(
-            structuredClone(entry.contentVectors).filter(isPaintInnerGeometryVector),
+            structuredClone(entry.contentVectors).filter((v) =>
+              isPaintInnerGeometryVector(v, entry.contentVectors ?? [])
+            ),
             primaryFill,
             secondaryFill
           )
@@ -536,9 +538,10 @@ function recolorContentVectors(
  * Includes user-added objects plus live-inner proxies that were flipped or
  * rotated in Paint — untransformed linkedOutsideText / contentBound stay
  * driven by outside settings on each variant.
+ * Excludes objects behind the Inner paint row (belowBase).
  */
-function isPaintInnerGeometryVector(v: PaintVector): boolean {
-  if ((v.layer ?? 'content') !== 'content') return false
+function isPaintInnerGeometryVector(v: PaintVector, all: PaintVector[]): boolean {
+  if (!isPaintEditInnerVector(v, all)) return false
   // Live Inner stand-ins (raster or slot) only copy when Paint-warped.
   if (v.contentBound || v.contentProxySlot || v.linkedOutsideText) {
     return paintVectorHasDisplayTransform(v)
@@ -582,6 +585,43 @@ function isPaintEditOuterVector(v: PaintVector, all: PaintVector[]): boolean {
   return !isPaintEditInnerVector(v, all)
 }
 
+function sourceHasBelowBaseContent(session: PaintSession): boolean {
+  const all = session.vectors ?? []
+  return all.some((v) => {
+    const root = paintEditRootOf(v, all)
+    return (root.layer ?? 'content') === 'content' && !!root.belowBase
+  })
+}
+
+/** Draw data-URL PNGs in order onto a transparent canvas (sync for data URLs). */
+function compositeSessionPngs(resolution: number, pngs: Array<string | undefined | null>): string {
+  const c = document.createElement('canvas')
+  c.width = Math.max(1, resolution)
+  c.height = Math.max(1, resolution)
+  const ctx = c.getContext('2d')
+  if (!ctx) return emptyOverlayPng(resolution)
+  for (const src of pngs) {
+    if (!src) continue
+    const img = new Image()
+    img.src = src
+    if (img.complete && img.naturalWidth > 0) {
+      ctx.drawImage(img, 0, 0)
+    }
+  }
+  return c.toDataURL('image/png')
+}
+
+/** Inner Edit decorations: overlay + objects at/above Inner paint (never belowBase). */
+function contentDecorationsForEditInner(source: PaintSession): string {
+  if (source.contentAboveDecorationsPng) return source.contentAboveDecorationsPng
+  if (!sourceHasBelowBaseContent(source)) {
+    return source.contentDecorationsPng ?? source.contentPng
+  }
+  // Older saves baked below-base objects into contentDecorationsPng — fall back
+  // to the brush overlay only so Apply Edit · Inner cannot carry them.
+  return source.contentPng
+}
+
 /** Clone vectors and remap ids that collide with `usedIds`. */
 function clonePaintVectorsRebasingIds(
   vectors: PaintVector[],
@@ -623,7 +663,11 @@ function mergePaintInnerGeometryNoColor(
   if (!targetSession) {
     const empty = emptyOverlayPng(sourceSession.resolution)
     const contentVectors = recolorContentVectors(
-      structuredClone((sourceSession.vectors ?? []).filter(isPaintInnerGeometryVector)),
+      structuredClone(
+        (sourceSession.vectors ?? []).filter((v) =>
+          isPaintInnerGeometryVector(v, sourceSession.vectors ?? [])
+        )
+      ),
       primaryFill,
       secondaryFill
     )
@@ -633,6 +677,8 @@ function mergePaintInnerGeometryNoColor(
       containerDecorationsPng: empty,
       contentPng: empty,
       contentDecorationsPng: empty,
+      contentAboveDecorationsPng: empty,
+      contentBelowDecorationsPng: empty,
       decorationsPng: undefined,
       vectors: contentVectors,
       punchMasks: sourceSession.punchMasks?.filter((m) => m.layer === 'content'),
@@ -647,7 +693,11 @@ function mergePaintInnerGeometryNoColor(
   const empty = emptyOverlayPng(targetSession.resolution)
   const containerVectors = (targetSession.vectors ?? []).filter(isPaintContainerLayerVector)
   const contentVectors = recolorContentVectors(
-    structuredClone((sourceSession.vectors ?? []).filter(isPaintInnerGeometryVector)),
+    structuredClone(
+      (sourceSession.vectors ?? []).filter((v) =>
+        isPaintInnerGeometryVector(v, sourceSession.vectors ?? [])
+      )
+    ),
     primaryFill,
     secondaryFill
   )
@@ -1029,15 +1079,36 @@ function mergePaintInnerFromSource(
 ): PaintSession | null {
   if (!sourceSession && !targetSession) return null
   if (!sourceSession) return blankInnerPaintOnly(targetSession)
-  if (!targetSession) return structuredClone(sourceSession)
-  if (sourceSession.resolution !== targetSession.resolution) {
-    return structuredClone(sourceSession)
-  }
   const srcAll = sourceSession.vectors ?? []
+  const takeInner = srcAll.filter((v) => isPaintEditInnerVector(v, srcAll))
+  const empty = emptyOverlayPng(sourceSession.resolution)
+  const innerDecor = contentDecorationsForEditInner(sourceSession)
+
+  if (!targetSession || sourceSession.resolution !== targetSession.resolution) {
+    return {
+      ...structuredClone(sourceSession),
+      containerPng: empty,
+      containerDecorationsPng: empty,
+      contentPng: sourceSession.contentPng,
+      contentDecorationsPng: innerDecor,
+      contentAboveDecorationsPng: sourceSession.contentAboveDecorationsPng ?? innerDecor,
+      contentBelowDecorationsPng: empty,
+      decorationsPng: undefined,
+      vectors: structuredClone(takeInner),
+      punchMasks: sourceSession.punchMasks?.filter((m) => m.layer === 'content'),
+      contentBakedInDecorations: sourceSession.contentBakedInDecorations,
+      linkedTextInDecorations: sourceSession.linkedTextInDecorations,
+      contentSync: stripOuterPaintSync({
+        ...sourceSession,
+        contentSync: sourceSession.contentSync
+      })?.contentSync
+    }
+  }
+
   const tgtAll = targetSession.vectors ?? []
   const keepOuter = tgtAll.filter((v) => isPaintEditOuterVector(v, tgtAll))
-  const takeInner = clonePaintVectorsRebasingIds(
-    srcAll.filter((v) => isPaintEditInnerVector(v, srcAll)),
+  const takeInnerRebased = clonePaintVectorsRebasingIds(
+    takeInner,
     new Set(keepOuter.map((v) => v.id)),
     'inner'
   )
@@ -1045,14 +1116,23 @@ function mergePaintInnerFromSource(
     ...(targetSession.punchMasks ?? []).filter((m) => m.layer === 'container'),
     ...(sourceSession.punchMasks ?? []).filter((m) => m.layer === 'content')
   ]
+  const targetBelowDecor =
+    targetSession.contentBelowDecorationsPng ??
+    (sourceHasBelowBaseContent(targetSession) ? undefined : empty)
   return {
     ...targetSession,
     containerPng: targetSession.containerPng,
     containerDecorationsPng: targetSession.containerDecorationsPng,
     contentPng: sourceSession.contentPng,
-    contentDecorationsPng: sourceSession.contentDecorationsPng,
+    contentDecorationsPng: compositeSessionPngs(targetSession.resolution, [
+      targetBelowDecor,
+      innerDecor
+    ]),
+    contentAboveDecorationsPng: sourceSession.contentAboveDecorationsPng ?? innerDecor,
+    contentBelowDecorationsPng:
+      targetSession.contentBelowDecorationsPng ?? targetBelowDecor ?? empty,
     decorationsPng: undefined,
-    vectors: [...keepOuter, ...takeInner],
+    vectors: [...keepOuter, ...takeInnerRebased],
     punchMasks: punchMasks.length ? punchMasks : undefined,
     contentBakedInDecorations: sourceSession.contentBakedInDecorations,
     linkedTextInDecorations: sourceSession.linkedTextInDecorations,
@@ -1076,15 +1156,37 @@ function mergePaintOuterFromSource(
 ): PaintSession | null {
   if (!sourceSession && !targetSession) return null
   if (!sourceSession) return targetSession ? structuredClone(targetSession) : null
-  if (!targetSession) return structuredClone(sourceSession)
-  if (sourceSession.resolution !== targetSession.resolution) {
-    return structuredClone(sourceSession)
-  }
   const srcAll = sourceSession.vectors ?? []
+  const takeOuter = srcAll.filter((v) => isPaintEditOuterVector(v, srcAll))
+  const empty = emptyOverlayPng(sourceSession.resolution)
+  const sourceBelow =
+    sourceSession.contentBelowDecorationsPng ??
+    (sourceHasBelowBaseContent(sourceSession) ? undefined : empty)
+
+  if (!targetSession || sourceSession.resolution !== targetSession.resolution) {
+    const aboveEmpty = empty
+    return {
+      ...structuredClone(sourceSession),
+      contentPng: empty,
+      contentDecorationsPng: compositeSessionPngs(sourceSession.resolution, [
+        sourceBelow,
+        aboveEmpty
+      ]),
+      contentAboveDecorationsPng: aboveEmpty,
+      contentBelowDecorationsPng: sourceBelow ?? empty,
+      decorationsPng: undefined,
+      vectors: structuredClone(takeOuter),
+      punchMasks: sourceSession.punchMasks?.filter((m) => m.layer === 'container'),
+      contentBakedInDecorations: false,
+      linkedTextInDecorations: false,
+      contentSync: undefined
+    }
+  }
+
   const tgtAll = targetSession.vectors ?? []
   const keepInner = tgtAll.filter((v) => isPaintEditInnerVector(v, tgtAll))
-  const takeOuter = clonePaintVectorsRebasingIds(
-    srcAll.filter((v) => isPaintEditOuterVector(v, srcAll)),
+  const takeOuterRebased = clonePaintVectorsRebasingIds(
+    takeOuter,
     new Set(keepInner.map((v) => v.id)),
     'outer'
   )
@@ -1092,14 +1194,22 @@ function mergePaintOuterFromSource(
     ...(sourceSession.punchMasks ?? []).filter((m) => m.layer === 'container'),
     ...(targetSession.punchMasks ?? []).filter((m) => m.layer === 'content')
   ]
+  const targetAbove =
+    targetSession.contentAboveDecorationsPng ??
+    contentDecorationsForEditInner(targetSession)
   return {
     ...targetSession,
     containerPng: sourceSession.containerPng,
     containerDecorationsPng: sourceSession.containerDecorationsPng,
     contentPng: targetSession.contentPng,
-    contentDecorationsPng: targetSession.contentDecorationsPng,
+    contentDecorationsPng: compositeSessionPngs(targetSession.resolution, [
+      sourceBelow,
+      targetAbove
+    ]),
+    contentAboveDecorationsPng: targetAbove,
+    contentBelowDecorationsPng: sourceBelow ?? empty,
     decorationsPng: undefined,
-    vectors: [...keepInner, ...takeOuter],
+    vectors: [...keepInner, ...takeOuterRebased],
     punchMasks: punchMasks.length ? punchMasks : undefined
   }
 }
@@ -2409,6 +2519,8 @@ function blankPaintContentOverlay(session: PaintSession): PaintSession {
     ...session,
     contentPng: empty,
     contentDecorationsPng: empty,
+    contentAboveDecorationsPng: empty,
+    contentBelowDecorationsPng: empty,
     decorationsPng: undefined,
     contentBakedInDecorations: false
   }

@@ -9374,13 +9374,15 @@ export function IconPaintEditor({
    * Skip linkedOutsideText / contentBound — those stay as live Inner settings
    * outside so size/offset/shadow/text edits update without re-opening Paint.
    * When `layer` is set, only that paint stack is included.
+   * `baseFilter` limits which content/container roots are drawn (Apply Edit split).
    */
   const decorationsCanvas = (
     layer?: PaintLayerId,
     includeLinkedText = false,
     includeContentBound = false,
     /** Bake live Inner base under overlay so see-through holes reveal Outer outside Paint. */
-    includeContentBase = false
+    includeContentBase = false,
+    baseFilter: 'all' | 'above' | 'below' = 'all'
   ): HTMLCanvasElement => {
     const c = document.createElement('canvas')
     c.width = W; c.height = H
@@ -9427,16 +9429,21 @@ export function IconPaintEditor({
         }
       }
       const allSteps = (items: LineObj[]): DecorStep[] => items.map((l) => ({ kind: 'object' as const, l }))
-      const belowSteps = allSteps(belowRoots)
-      const aboveSteps = allSteps(aboveRoots)
+      const includeBelow = baseFilter === 'all' || baseFilter === 'below'
+      const includeAbove = baseFilter === 'all' || baseFilter === 'above'
+      const includeOverlay = baseFilter === 'all' || baseFilter === 'above'
+      const belowSteps = includeBelow ? allSteps(belowRoots) : []
+      const aboveSteps = includeAbove ? allSteps(aboveRoots) : []
       const tmp = takeCanvas(W, H)
       try {
         const t = tmp.getContext('2d')!
         for (const step of belowSteps) paintObjectStep(t, step.l)
-        if (includeContentBase && id === 'content') {
+        if (includeContentBase && includeOverlay && id === 'content') {
           t.drawImage(baseCanvas(id), 0, 0)
         }
-        t.drawImage(layerCanvas(id), 0, 0)
+        if (includeOverlay) {
+          t.drawImage(layerCanvas(id), 0, 0)
+        }
         for (const step of aboveSteps) paintObjectStep(t, step.l)
         x.drawImage(tmp, 0, 0)
       } finally {
@@ -14191,6 +14198,8 @@ export function IconPaintEditor({
         contentDecor = decorationsCanvas('content', false, false, false)
       }
     }
+    const contentAboveDecor = decorationsCanvas('content', linkedBake, contentBake, false, 'above')
+    const contentBelowDecor = decorationsCanvas('content', false, false, false, 'below')
     // Overlays only — live Outer/Inner settings stay outside Paint.
     await onSave(
       {
@@ -14208,6 +14217,8 @@ export function IconPaintEditor({
         decorationsPng: decorationsCanvas(undefined, linkedBake, contentBake).toDataURL('image/png'),
         containerDecorationsPng: containerDecor.toDataURL('image/png'),
         contentDecorationsPng: contentDecor.toDataURL('image/png'),
+        contentAboveDecorationsPng: contentAboveDecor.toDataURL('image/png'),
+        contentBelowDecorationsPng: contentBelowDecor.toDataURL('image/png'),
         contentSync,
         linkedTextInDecorations: linkedBake,
         contentBakedInDecorations: contentBake,
@@ -14378,11 +14389,20 @@ export function IconPaintEditor({
     layer: PaintLayerId,
     belowBase: boolean
   ) => {
+    const movingIds = new Set(moving.map((item) => item.id))
     for (const item of moving) {
       item.layer = layer
-      if (isLiveInnerVector(item)) item.belowBase = false
+      if (isLiveInnerVector(item)) {
+        item.belowBase = false
+        continue
+      }
+      // Roots of the moving subtree carry belowBase; nested children inherit via root.
+      const parentInMoving = !!(item.parentId && movingIds.has(item.parentId))
+      if (!parentInMoving) {
+        item.belowBase = belowBase
+      }
     }
-    dragged.belowBase = isLiveInnerVector(dragged) ? false : belowBase
+    if (!isLiveInnerVector(dragged)) dragged.belowBase = belowBase
   }
 
   const rootIndicesOnLayer = (
@@ -14806,7 +14826,11 @@ export function IconPaintEditor({
     const childIds = linesRef.current.filter((l) => l.parentId === group.id).map((l) => l.id)
     const next = linesRef.current
       .filter((l) => l.id !== group.id)
-      .map((l) => l.parentId === group.id ? { ...l, parentId: undefined } : l)
+      .map((l) =>
+        l.parentId === group.id
+          ? { ...l, parentId: undefined, belowBase: !!group.belowBase }
+          : l
+      )
     syncGroupBounds(next)
     commitLines(next)
     selectedIdRef.current = childIds[0] ?? null
