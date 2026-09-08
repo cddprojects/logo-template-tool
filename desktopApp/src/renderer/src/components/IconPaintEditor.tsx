@@ -378,6 +378,9 @@ interface LineObj {
   pts: Pt[]
   startCap: CapType
   endCap: CapType
+  /** Cap tip size in paint px (arrow / triangle / dot / square / bar). */
+  startCapSize?: number
+  endCapSize?: number
   dash: DashType
   thickness: number
   color: string
@@ -2727,9 +2730,21 @@ function endDir(poly: Pt[], atStart: boolean, minLen: number): Pt {
   return { x: d.x / len, y: d.y / len }
 }
 
-function drawCap(ctx: CanvasRenderingContext2D, at: Pt, dir: Pt, cap: CapType, color: string | CanvasGradient, t: number): void {
+function defaultCapSize(thickness: number): number {
+  return Math.round(Math.max(7, Math.max(0.5, thickness) * 3.2))
+}
+
+function drawCap(
+  ctx: CanvasRenderingContext2D,
+  at: Pt,
+  dir: Pt,
+  cap: CapType,
+  color: string | CanvasGradient,
+  t: number,
+  capSize?: number
+): void {
   if (cap === 'none') return
-  const s = Math.max(7, t * 3.2)
+  const s = Math.max(1, capSize ?? defaultCapSize(t))
   const ang = Math.atan2(dir.y, dir.x)
   ctx.save()
   ctx.fillStyle = color
@@ -4010,8 +4025,8 @@ function renderLineBody(ctx: CanvasRenderingContext2D, l: LineObj): void {
   }
   const n = poly.length
   const minLen = Math.max(6, t * 2)
-  drawCap(ctx, poly[0], endDir(poly, true, minLen), l.startCap, borderPaint, t)
-  drawCap(ctx, poly[n - 1], endDir(poly, false, minLen), l.endCap, borderPaint, t)
+  drawCap(ctx, poly[0], endDir(poly, true, minLen), l.startCap, borderPaint, t, l.startCapSize)
+  drawCap(ctx, poly[n - 1], endDir(poly, false, minLen), l.endCap, borderPaint, t, l.endCapSize)
 }
 
 function pointToSegDist(p: Pt, a: Pt, b: Pt): number {
@@ -5547,6 +5562,8 @@ export function IconPaintEditor({
   const [lineType, setLineType] = useState<LineType>('straight')
   const [startCap, setStartCap] = useState<CapType>('none')
   const [endCap, setEndCap] = useState<CapType>('arrow')
+  const [startCapSize, setStartCapSize] = useState(() => defaultCapSize(12))
+  const [endCapSize, setEndCapSize] = useState(() => defaultCapSize(12))
   const [lineDash, setLineDash] = useState<DashType>('solid')
   const [linePointCount, setLinePointCount] = useState(4)
   /** Drawn (freehand): optional fixed adjustable-point count. Empty = auto. */
@@ -7980,6 +7997,11 @@ export function IconPaintEditor({
     if (l.type === 'polyline' || l.type === 'free') setLinePointCount(l.pts.length)
     setStartCap(l.startCap)
     setEndCap(l.endCap)
+    {
+      const tw = lineBorderWidth(l) || l.thickness
+      setStartCapSize(l.startCapSize ?? defaultCapSize(tw))
+      setEndCapSize(l.endCapSize ?? defaultCapSize(tw))
+    }
     setLineDash(l.dash)
     setSize(lineBorderWidth(l) || l.thickness)
     setColor(l.color)
@@ -8570,6 +8592,8 @@ export function IconPaintEditor({
       nl = {
         id, type: lineType, pts, startCap, endCap, dash: lineDash, thickness: size, color,
         borderColor: color, borderWidth: size, borderRadius, layer,
+        ...(startCap !== 'none' ? { startCapSize } : {}),
+        ...(endCap !== 'none' ? { endCapSize } : {}),
         ...(lineType === 'drawn' ? { drawnCurve } : {})
       }
     }
@@ -16177,14 +16201,68 @@ export function IconPaintEditor({
                 label="Start"
                 value={startCap}
                 options={CAP_TYPES}
-                onChange={(v) => { setStartCap(v); if (selectedIdRef.current) updateSelected({ startCap: v }) }}
+                onChange={(v) => {
+                  setStartCap(v)
+                  if (v === 'none') {
+                    if (selectedIdRef.current) updateSelected({ startCap: v })
+                    return
+                  }
+                  const sz = startCapSize || defaultCapSize(size)
+                  setStartCapSize(sz)
+                  if (selectedIdRef.current) updateSelected({ startCap: v, startCapSize: sz })
+                }}
               />
+              {startCap !== 'none' && (
+                <label className="flex items-center gap-1.5 text-[11px] text-muted">
+                  <span className="uppercase tracking-wide text-[9px] text-muted/70">Start size</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={256}
+                    value={startCapSize}
+                    onChange={(e) => {
+                      const v = Math.max(1, Math.min(256, Number(e.target.value) || 1))
+                      setStartCapSize(v)
+                      if (selectedIdRef.current) updateSelected({ startCapSize: v })
+                    }}
+                    className="w-14 px-1.5 py-1 rounded bg-surface3 border border-border text-[11px] text-text focus:outline-none focus:border-accent"
+                    title="Start cap size"
+                  />
+                </label>
+              )}
               <LineSelect
                 label="End"
                 value={endCap}
                 options={CAP_TYPES}
-                onChange={(v) => { setEndCap(v); if (selectedIdRef.current) updateSelected({ endCap: v }) }}
+                onChange={(v) => {
+                  setEndCap(v)
+                  if (v === 'none') {
+                    if (selectedIdRef.current) updateSelected({ endCap: v })
+                    return
+                  }
+                  const sz = endCapSize || defaultCapSize(size)
+                  setEndCapSize(sz)
+                  if (selectedIdRef.current) updateSelected({ endCap: v, endCapSize: sz })
+                }}
               />
+              {endCap !== 'none' && (
+                <label className="flex items-center gap-1.5 text-[11px] text-muted">
+                  <span className="uppercase tracking-wide text-[9px] text-muted/70">End size</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={256}
+                    value={endCapSize}
+                    onChange={(e) => {
+                      const v = Math.max(1, Math.min(256, Number(e.target.value) || 1))
+                      setEndCapSize(v)
+                      if (selectedIdRef.current) updateSelected({ endCapSize: v })
+                    }}
+                    className="w-14 px-1.5 py-1 rounded bg-surface3 border border-border text-[11px] text-text focus:outline-none focus:border-accent"
+                    title="End cap size"
+                  />
+                </label>
+              )}
             </>
           )}
           <LineSelect

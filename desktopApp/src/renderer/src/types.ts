@@ -405,6 +405,9 @@ export interface PaintVector {
   pts: { x: number; y: number }[]
   startCap: string
   endCap: string
+  /** Cap tip size in paint px when start/end is not none. */
+  startCapSize?: number
+  endCapSize?: number
   dash: string
   thickness: number
   color: string
