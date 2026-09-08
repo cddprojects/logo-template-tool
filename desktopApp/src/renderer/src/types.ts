@@ -422,6 +422,8 @@ export interface PaintVector {
   weight?: number
   bold?: boolean
   italic?: boolean
+  /** Match outside letters underline (canvas-drawn). */
+  underline?: boolean
   lineHeight?: number
   letterSpacing?: number
   shadow?: boolean
@@ -639,6 +641,7 @@ export interface PaintContentSync {
     fontFamily: string
     fontWeight: string
     fontItalic: boolean
+    fontUnderline?: boolean
     fontSizeRatio: number
     letterSpacing: number
   }

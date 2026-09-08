@@ -370,7 +370,9 @@ export function syncOutsideLettersIntoPaintSession(
     (v.text ?? '') !== (letters.text ?? '') ||
     (v.fontFamily || '') !== (letters.fontFamily || '') ||
     Math.abs((v.fontSize ?? 0) - fontSize) > 0.5 ||
-    Math.abs((v.letterSpacing ?? 0) - letterSpacing) > 0.5
+    Math.abs((v.letterSpacing ?? 0) - letterSpacing) > 0.5 ||
+    !!v.italic !== !!letters.fontItalic ||
+    !!v.underline !== !!letters.fontUnderline
 
   const isOrphanLetterBakeStamp = (v: PaintVector): boolean =>
     v.type === 'stamp' &&
@@ -410,6 +412,7 @@ export function syncOutsideLettersIntoPaintSession(
       weight: w,
       bold: w >= 700,
       italic: !!letters.fontItalic,
+      underline: !!letters.fontUnderline,
       letterSpacing,
       lineHeight: v.lineHeight ?? 1.28
     }
@@ -432,6 +435,7 @@ export function syncOutsideLettersIntoPaintSession(
       weight: nextText.weight,
       bold: nextText.bold,
       italic: nextText.italic,
+      underline: nextText.underline,
       letterSpacing: nextText.letterSpacing,
       // Glyph-shaped holes cannot follow a different string without inventing
       // every B/O counter — clear them so live letters stay clean.

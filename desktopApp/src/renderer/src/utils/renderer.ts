@@ -456,7 +456,7 @@ export function strokeSpacedText(
 // Call this AFTER setting ctx.font and AFTER ctx.fillText / ctx.strokeText.
 // `drawX` = the x passed to fillText; `drawY` = the y passed to fillText.
 // `baselineMode` describes how textBaseline was set at the time of fillText.
-function drawTextUnderline(
+export function drawTextUnderline(
   ctx: CanvasRenderingContext2D,
   text: string,
   drawX: number,

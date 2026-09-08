@@ -139,6 +139,34 @@ function strokeSpacedText(
   })
 }
 
+/** Canvas has no native underline — match outside letters preview. */
+function drawPaintTextUnderline(
+  ctx: CanvasRenderingContext2D,
+  text: string,
+  drawX: number,
+  drawY: number,
+  fontSize: number,
+  color: string,
+  spacingPx = 0
+): void {
+  const savedBaseline = ctx.textBaseline
+  ctx.textBaseline = 'alphabetic'
+  const tm = measureSpacedText(ctx, text, spacingPx)
+  ctx.textBaseline = savedBaseline
+  const baselineY = drawY + (tm.fontBoundingBoxAscent ?? fontSize * 0.8)
+  const gap = Math.max(1, fontSize * 0.1)
+  const lineW = Math.max(1, fontSize * 0.07)
+  ctx.save()
+  ctx.strokeStyle = color
+  ctx.lineWidth = lineW
+  ctx.lineCap = 'butt'
+  ctx.beginPath()
+  ctx.moveTo(drawX, baselineY + gap)
+  ctx.lineTo(drawX + tm.width, baselineY + gap)
+  ctx.stroke()
+  ctx.restore()
+}
+
 function textFontStr(v: PaintVector): string {
   const weight = v.bold ? Math.max(700, v.weight ?? 400) : v.weight ?? 400
   return `${v.italic ? 'italic ' : 'normal '}${weight} ${v.fontSize ?? 48}px "${v.fontFamily ?? 'Inter'}", sans-serif`
@@ -281,8 +309,16 @@ function drawPaintGlyphs(
   ctx.textAlign = 'left'
   ctx.textBaseline = 'top'
   ctx.fillStyle = v.color.startsWith('linear-gradient') ? firstSolidColor(v.color) : v.color
+  const fs = v.fontSize ?? 48
+  const underlineColor = firstSolidColor(v.color)
   rows.forEach((r, i) => {
-    if (r) fillSpacedText(ctx, r, p.x + ox, p.y + i * lineH + oy, spacing)
+    if (!r) return
+    const x = p.x + ox
+    const y = p.y + i * lineH + oy
+    fillSpacedText(ctx, r, x, y, spacing)
+    if (v.underline) {
+      drawPaintTextUnderline(ctx, r, x, y, fs, underlineColor, spacing)
+    }
   })
   if (borderW > 0) {
     ctx.lineWidth = borderW

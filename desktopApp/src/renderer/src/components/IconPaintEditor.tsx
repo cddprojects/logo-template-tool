@@ -3,7 +3,7 @@ import {
   Brush, Eraser, PaintBucket, Pipette, Minus, Square, Circle, PenTool,
   Undo2, Redo2, X, Check, Trash2, Layers, Image as ImageIcon, Upload,
   BoxSelect, Copy, ClipboardPaste, MousePointer2, Ban, Type as TypeIcon,
-  Bold as BoldIcon, Italic as ItalicIcon,
+  Italic as ItalicIcon, Underline as UnderlineIcon,
   RotateCw, RotateCcw, FlipHorizontal2, FlipVertical2, Sparkles, GripVertical,
   Crop as CropIcon, Library, Pencil, ChevronDown, ChevronRight, Spline
 } from 'lucide-react'
@@ -11,7 +11,7 @@ import { FONT_FAMILY_GROUPS, FONT_WEIGHTS } from '../types'
 import type { PaintSaveResult, PaintVector, PaintLayerId, PaintSaveTargets, PaintVariantOption, OutsideTextSettings, OutsideContentSettings } from '../types'
 import { loadFont } from '../utils/fontLoader'
 import { ColorPickerPopup, isGradientColor, firstSolidColor, TransparentFillModeContext, TransparentFillToggle } from './Controls'
-import { resolveCanvasColor, roundedRect, measureSpacedText, fillSpacedText, strokeSpacedText } from '../utils/renderer'
+import { resolveCanvasColor, roundedRect, measureSpacedText, fillSpacedText, strokeSpacedText, drawTextUnderline } from '../utils/renderer'
 import { removeImageBackground, applySvgColor, drawSvgOnCanvas, renderLucideToSvg } from '../utils/iconUtils'
 import { PreviewStage } from './PreviewStage'
 import { IconPicker, PAINT_SVG_MIME, PAINT_LUCIDE_MIME } from './IconPicker'
@@ -417,6 +417,8 @@ interface LineObj {
   weight?: number
   bold?: boolean
   italic?: boolean
+  /** Match outside letters underline (canvas-drawn; not a CSS font style). */
+  underline?: boolean
   /** Line height as a multiplier of font size (default 1.28). */
   lineHeight?: number
   /** Extra space between glyphs in px (default 0). */
@@ -2259,6 +2261,7 @@ function lineFromOutsideText(
     weight,
     bold: weight >= 700,
     italic: !!settings.fontItalic,
+    underline: !!settings.fontUnderline,
     lineHeight: 1.28,
     letterSpacing,
     layer: 'content',
@@ -2276,7 +2279,7 @@ function textPanelStateFromLine(l: LineObj): {
   fontFamily: string
   fontSize: number
   fontWeightV: number
-  bold: boolean
+  underline: boolean
   italic: boolean
   letterSpacing: number
   color: string
@@ -2292,7 +2295,7 @@ function textPanelStateFromLine(l: LineObj): {
     fontFamily: l.fontFamily ?? 'Inter',
     fontSize: l.fontSize ?? 48,
     fontWeightV: l.weight ?? 400,
-    bold: !!l.bold,
+    underline: !!l.underline,
     italic: !!l.italic,
     letterSpacing: l.letterSpacing ?? 0,
     color: l.color,
@@ -2328,6 +2331,7 @@ function applyOutsideTextToLine(
     weight,
     bold: weight >= 700,
     italic: !!settings.fontItalic,
+    underline: !!settings.fontUnderline,
     letterSpacing,
     linkedOutsideText: link ? true : undefined,
     ...shadow
@@ -2464,7 +2468,18 @@ function renderText(ctx: CanvasRenderingContext2D, l: LineObj): void {
     target.textAlign = 'left'
     target.textBaseline = 'top'
     target.fillStyle = fillStyle
-    rows.forEach((r, i) => { if (r) fillSpacedText(target, r, p.x + ox, p.y + i * lineH + oy, spacing) })
+    const fs = l.fontSize ?? 48
+    const underlineColor =
+      typeof fillStyle === 'string' ? fillStyle : firstSolidColor(l.color)
+    rows.forEach((r, i) => {
+      if (!r) return
+      const x = p.x + ox
+      const y = p.y + i * lineH + oy
+      fillSpacedText(target, r, x, y, spacing)
+      if (l.underline) {
+        drawTextUnderline(target, r, x, y, fs, underlineColor, 'left', 'top', spacing)
+      }
+    })
   }
 
   const hideFill = isTransparentPaintColor(l.color)
@@ -3319,6 +3334,7 @@ function letterBakeStampToEditableText(l: LineObj, W: number, H: number): LineOb
     weight: l.weight ?? (l.bold ? 700 : 400),
     bold: l.bold ?? (l.weight ?? 400) >= 700,
     italic: !!l.italic,
+    underline: !!l.underline,
     letterSpacing: l.letterSpacing ?? 0,
     lineHeight: l.lineHeight ?? 1.28
   }
@@ -5584,7 +5600,7 @@ export function IconPaintEditor({
   outsideContentRef.current = outsideContent
   const [fontSize, setFontSize] = useState(96)
   const [fontWeightV, setFontWeightV] = useState(700)
-  const [bold, setBold] = useState(false)
+  const [underline, setUnderline] = useState(false)
   const [italic, setItalic] = useState(false)
   /** Line height multiplier (1.28 = default). */
   const [txtLineHeight, setTxtLineHeight] = useState(1.28)
@@ -6489,7 +6505,7 @@ export function IconPaintEditor({
         setFontFamily(panel.fontFamily)
         setFontSize(panel.fontSize)
         setFontWeightV(panel.fontWeightV)
-        setBold(panel.bold)
+        setUnderline(panel.underline)
         setItalic(panel.italic)
         setTxtLetterSpacing(panel.letterSpacing)
         setColor(panel.color)
@@ -8018,7 +8034,7 @@ export function IconPaintEditor({
         setFontFamily(l.fontFamily ?? 'Inter')
         setFontSize(l.fontSize ?? 48)
         setFontWeightV(l.weight ?? 400)
-        setBold(!!l.bold)
+        setUnderline(!!l.underline)
         setItalic(!!l.italic)
         setTxtLineHeight(l.lineHeight ?? 1.28)
         setTxtLetterSpacing(l.letterSpacing ?? 0)
@@ -8548,7 +8564,7 @@ export function IconPaintEditor({
       const nl: LineObj = {
         id, type: 'text', pts: [pt], startCap: 'none', endCap: 'none', dash: 'solid',
         thickness: size, color,
-        text: '', fontFamily, fontSize, weight: fontWeightV, bold, italic,
+        text: '', fontFamily, fontSize, weight: fontWeightV, bold: fontWeightV >= 700, italic, underline,
         lineHeight: txtLineHeight, letterSpacing: txtLetterSpacing,
         shadow: txtShadow, shadowColor: txtShadowColor, shadowBlur: txtShadowBlur,
         shadowOffsetX: txtShadowOX, shadowOffsetY: txtShadowOY, shadowSpread: txtShadowSpread,
@@ -15169,6 +15185,7 @@ export function IconPaintEditor({
         patch.fontWeight !== undefined ||
         patch.bold !== undefined ||
         patch.italic !== undefined ||
+        patch.underline !== undefined ||
         patch.letterSpacing !== undefined
       if (commit) updateSelected(patch)
       else updateSelectedLive(patch)
@@ -15207,7 +15224,7 @@ export function IconPaintEditor({
         setFontFamily(next.fontFamily ?? 'Inter')
         setFontSize(next.fontSize ?? 48)
         setFontWeightV(next.weight ?? 700)
-        setBold(!!next.bold)
+        setUnderline(!!next.underline)
         setItalic(!!next.italic)
         setTxtLetterSpacing(next.letterSpacing ?? 0)
         setColor(next.color)
@@ -15235,7 +15252,7 @@ export function IconPaintEditor({
     setFontFamily(next.fontFamily ?? 'Inter')
     setFontSize(next.fontSize ?? 48)
     setFontWeightV(next.weight ?? 700)
-    setBold(!!next.bold)
+    setUnderline(!!next.underline)
     setItalic(!!next.italic)
     setTxtLetterSpacing(next.letterSpacing ?? 0)
     setColor(next.color)
@@ -16087,18 +16104,22 @@ export function IconPaintEditor({
             Weight
             <select
               value={String(fontWeightV)}
-              onChange={(e) => { const v = Number(e.target.value); setFontWeightV(v); patchText({ weight: v }) }}
+              onChange={(e) => {
+                const v = Number(e.target.value)
+                setFontWeightV(v)
+                patchText({ weight: v, bold: v >= 700 })
+              }}
               className="px-2 py-1 rounded-md bg-surface3 border border-border text-[11px] text-text focus:outline-none focus:border-accent cursor-pointer"
             >
               {FONT_WEIGHTS.map((w) => <option key={w.value} value={w.value}>{w.label}</option>)}
             </select>
           </label>
           <button
-            onClick={() => { const v = !bold; setBold(v); patchText({ bold: v }) }}
-            title="Bold"
-            className={`w-8 h-8 shrink-0 rounded-lg flex items-center justify-center transition-colors ${bold ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'}`}
+            onClick={() => { const v = !underline; setUnderline(v); patchText({ underline: v }) }}
+            title="Underline"
+            className={`w-8 h-8 shrink-0 rounded-lg flex items-center justify-center transition-colors ${underline ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'}`}
           >
-            <BoldIcon size={15} />
+            <UnderlineIcon size={15} />
           </button>
           <button
             onClick={() => { const v = !italic; setItalic(v); patchText({ italic: v }) }}
@@ -16558,7 +16579,7 @@ export function IconPaintEditor({
             const probe: LineObj = { ...l, text: textValue || ' ' }
             const m = textMetrics(probe)
             const fs = (l.fontSize ?? fontSize) * sx
-            const weight = l.bold ? 'bold' : String(l.weight ?? fontWeightV)
+            const weight = String(l.weight ?? (l.bold ? 700 : fontWeightV))
             const solid = firstSolidColor(l.color)
             const c = objCenter(l)
             const rot = l.rot ?? 0
@@ -16656,6 +16677,7 @@ export function IconPaintEditor({
                     fontSize: fs,
                     fontWeight: weight as React.CSSProperties['fontWeight'],
                     fontStyle: l.italic ? 'italic' : 'normal',
+                    textDecoration: l.underline ? 'underline' : 'none',
                     lineHeight: l.lineHeight ?? txtLineHeight,
                     letterSpacing: `${(l.letterSpacing ?? txtLetterSpacing) * sx}px`,
                     color: solid.length === 9 ? solid.slice(0, 7) : solid,

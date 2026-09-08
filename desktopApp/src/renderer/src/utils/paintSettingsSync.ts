@@ -2373,7 +2373,8 @@ export function outsideTextAnchorPt(
     letterSpacing,
     lineHeight: 1.28,
     color: settings.textColor ?? '#ffffff',
-    linkedOutsideText: true
+    linkedOutsideText: true,
+    underline: !!settings.fontUnderline
   }
   const ink = textInkCenter(probe)
   if (!ink) return { x: cx - fontSize * 0.35, y: cy - fontSize * 0.4 }
@@ -2565,6 +2566,7 @@ export function buildPaintContentSync(opts: {
       fontFamily: linked.fontFamily ?? 'Inter',
       fontWeight: String(linked.weight ?? (linked.bold ? 700 : 400)),
       fontItalic: !!linked.italic,
+      fontUnderline: !!linked.underline,
       fontSizeRatio: clampSizeRatio(fs / drawArea),
       letterSpacing: paintPxToDesign(linked.letterSpacing ?? 0, res)
     }
@@ -2640,6 +2642,9 @@ export function applyPaintContentSyncToFaviconContent(
     next.fontFamily = sync.letters.fontFamily
     next.fontWeight = sync.letters.fontWeight
     next.fontItalic = sync.letters.fontItalic
+    if (sync.letters.fontUnderline !== undefined) {
+      next.fontUnderline = !!sync.letters.fontUnderline
+    }
     next.fontSizeRatio = sync.letters.fontSizeRatio
     next.letterSpacing = sync.letters.letterSpacing
   }
@@ -2716,6 +2721,9 @@ export function applyPaintContentSyncToIcon(
     next.fontFamily = sync.letters.fontFamily
     next.fontWeight = sync.letters.fontWeight
     next.fontItalic = sync.letters.fontItalic
+    if (sync.letters.fontUnderline !== undefined) {
+      next.fontUnderline = !!sync.letters.fontUnderline
+    }
     next.fontSizeRatio = sync.letters.fontSizeRatio
     next.letterSpacing = sync.letters.letterSpacing
   }
