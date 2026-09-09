@@ -37,7 +37,7 @@ let activeSave: Promise<void> | null = null
 let queuedSave: {
   data: unknown[]
   history: unknown
-  opts?: { keepalive?: boolean }
+  opts?: { keepalive?: boolean; allowEmpty?: boolean }
   resolvers: Array<(result: { success: boolean; error?: string }) => void>
 } | null = null
 
@@ -73,7 +73,10 @@ async function pumpWorkspaceSave(): Promise<void> {
     while (queuedSave) {
       const job = queuedSave
       queuedSave = null
-      const result = await saveWorkspace(job.data, job.history, job.opts)
+      const result = await saveWorkspace(job.data, job.history, {
+        ...job.opts,
+        allowEmpty: job.data.length === 0 || job.opts?.allowEmpty === true
+      })
       const payload = result.ok
         ? { success: true as const }
         : { success: false as const, error: result.error }
@@ -322,7 +325,7 @@ export function installWebApi(): void {
     saveVersions: async (
       data: unknown[],
       history?: unknown,
-      opts?: { keepalive?: boolean }
+      opts?: { keepalive?: boolean; allowEmpty?: boolean }
     ): Promise<{ success: boolean; error?: string }> => {
       // Always persist the latest known undo stack — never wipe server history
       // by omitting it when a caller only saves versions.

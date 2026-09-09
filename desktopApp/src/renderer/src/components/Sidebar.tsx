@@ -32,7 +32,7 @@ interface SidebarProps {
   onSelect: (id: string) => void
   onCreate: () => void
   onImport: () => void
-  onDelete: (id: string) => void
+  onDelete: (ids: string | string[]) => void
   onDuplicate: (id: string) => void
   onReorder: (fromId: string, toId: string) => void
   templateDropActive?: boolean
@@ -163,7 +163,7 @@ export function Sidebar({
 
   const confirmDelete = () => {
     if (!pendingDeleteIds?.length) return
-    pendingDeleteIds.forEach((id) => onDelete(id))
+    onDelete(pendingDeleteIds)
     setCheckedIds((prev) => {
       const next = new Set(prev)
       pendingDeleteIds.forEach((id) => next.delete(id))

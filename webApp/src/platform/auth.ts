@@ -254,11 +254,17 @@ export async function loadWorkspace(): Promise<
 export async function saveWorkspace(
   versions: unknown[],
   history?: unknown,
-  opts?: { keepalive?: boolean }
+  opts?: { keepalive?: boolean; allowEmpty?: boolean }
 ): Promise<{ ok: true } | { ok: false; error: string }> {
-  const body: { versions: unknown[]; history?: unknown } = { versions }
+  const body: {
+    versions: unknown[]
+    history?: unknown
+    allowEmpty?: boolean
+  } = { versions }
   // Omit history when undefined so the server keeps the previously stored undo stack.
   if (history !== undefined) body.history = history
+  // Explicit empty workspace (e.g. delete last version) — server rejects [] otherwise.
+  if (versions.length === 0 || opts?.allowEmpty) body.allowEmpty = true
   const result = await api<{ ok: boolean }>(
     '/api/workspace',
     {

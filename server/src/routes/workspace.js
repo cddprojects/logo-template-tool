@@ -10,23 +10,28 @@ function backupPath(file) {
 
 function readWorkspaceFile(file) {
   if (!fs.existsSync(file)) {
-    return { versions: [], history: null, updatedAt: null }
+    return { versions: [], history: null, updatedAt: null, cleared: false }
   }
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf-8'))
     const versions = Array.isArray(raw?.versions) ? raw.versions : []
     const history = raw?.history ?? null
     const updatedAt = typeof raw?.updatedAt === 'string' ? raw.updatedAt : null
-    return { versions, history, updatedAt }
+    const cleared = raw?.cleared === true
+    return { versions, history, updatedAt, cleared }
   } catch (e) {
     console.error('[workspace] failed to read', file, e)
-    return { versions: [], history: null, updatedAt: null }
+    return { versions: [], history: null, updatedAt: null, cleared: false }
   }
 }
 
-/** If versions were wiped, try undo-history snaps then the on-disk .bak file. */
+/**
+ * If versions were wiped accidentally, try undo-history snaps then the on-disk .bak.
+ * Skip when the client intentionally cleared the workspace (`cleared: true`).
+ */
 function recoverVersionsIfEmpty(data, file) {
   if (data.versions.length > 0) return data
+  if (data.cleared === true) return data
 
   const history = data.history
   if (history && typeof history === 'object') {
@@ -35,7 +40,7 @@ function recoverVersionsIfEmpty(data, file) {
       const state = past[i]?.state
       if (Array.isArray(state) && state.length > 0) {
         console.warn('[workspace] recovered versions from undo history for', path.basename(file))
-        return { ...data, versions: state }
+        return { ...data, versions: state, cleared: false }
       }
     }
     const future = Array.isArray(history.future) ? history.future : []
@@ -43,7 +48,7 @@ function recoverVersionsIfEmpty(data, file) {
       const state = future[i]?.state
       if (Array.isArray(state) && state.length > 0) {
         console.warn('[workspace] recovered versions from undo future for', path.basename(file))
-        return { ...data, versions: state }
+        return { ...data, versions: state, cleared: false }
       }
     }
   }
@@ -56,7 +61,8 @@ function recoverVersionsIfEmpty(data, file) {
       return {
         versions: fromBak.versions,
         history: data.history ?? fromBak.history,
-        updatedAt: fromBak.updatedAt
+        updatedAt: fromBak.updatedAt,
+        cleared: false
       }
     }
   }
@@ -85,24 +91,26 @@ export function workspaceRoutes(_db, dataDir) {
 
   router.get('/', (req, res) => {
     const file = workspaceFilePath(dataDir, req.user.id)
-    let { versions, history, updatedAt } = readWorkspace(file)
+    let { versions, history, updatedAt, cleared } = readWorkspace(file)
     // Persist an automatic recovery so the next save does not re-wipe data.
     if (versions.length > 0) {
       const raw = readWorkspaceFile(file)
-      if (raw.versions.length === 0) {
+      if (raw.versions.length === 0 && raw.cleared !== true) {
         try {
           writeWorkspace(file, {
             versions,
             history: history ?? raw.history,
-            updatedAt: new Date().toISOString()
+            updatedAt: new Date().toISOString(),
+            cleared: false
           })
           updatedAt = new Date().toISOString()
+          cleared = false
         } catch (e) {
           console.error('[workspace] failed to persist recovery', file, e)
         }
       }
     }
-    res.json({ versions, history, updatedAt })
+    res.json({ versions, history, updatedAt, cleared: cleared === true })
   })
 
   router.put('/', (req, res) => {
@@ -113,7 +121,9 @@ export function workspaceRoutes(_db, dataDir) {
     }
     const file = workspaceFilePath(dataDir, req.user.id)
     const existing = readWorkspaceFile(file)
-    if (versions.length === 0 && existing.versions.length > 0) {
+    const allowEmpty = req.body?.allowEmpty === true
+    // Block accidental empty overwrites, but allow deliberate clears (delete all).
+    if (versions.length === 0 && existing.versions.length > 0 && !allowEmpty) {
       res.status(409).json({
         error: 'Refusing to overwrite a non-empty workspace with zero versions'
       })
@@ -127,7 +137,9 @@ export function workspaceRoutes(_db, dataDir) {
     const payload = {
       versions,
       history: history ?? null,
-      updatedAt
+      updatedAt,
+      // So GET does not resurrect deleted versions from undo history / .bak.
+      cleared: versions.length === 0
     }
     try {
       writeWorkspace(file, payload)

@@ -18,7 +18,7 @@ declare global {
       saveVersions: (
         data: unknown[],
         history?: unknown,
-        opts?: { keepalive?: boolean }
+        opts?: { keepalive?: boolean; allowEmpty?: boolean }
       ) => Promise<{ success: boolean; error?: string }>
       fetchGoogleFont: (familyName: string, customCssUrl?: string) => Promise<{
         ok: boolean

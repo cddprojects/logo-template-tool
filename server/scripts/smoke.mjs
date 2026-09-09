@@ -117,6 +117,30 @@ try {
     throw new Error('workspace round-trip failed')
   }
 
+  const wsClearDenied = await fetch('http://127.0.0.1:8799/api/workspace', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ versions: [] })
+  })
+  if (wsClearDenied.status !== 409) {
+    throw new Error('empty workspace without allowEmpty should be 409')
+  }
+
+  const wsClear = await fetch('http://127.0.0.1:8799/api/workspace', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ versions: [], allowEmpty: true, history: null })
+  })
+  if (!wsClear.ok) throw new Error('empty workspace with allowEmpty failed: ' + (await wsClear.text()))
+
+  const wsGetCleared = await fetch('http://127.0.0.1:8799/api/workspace', {
+    headers: { Cookie: cookie }
+  })
+  const clearedWs = await wsGetCleared.json()
+  if (clearedWs.versions?.length) {
+    throw new Error('cleared workspace resurrected versions on GET')
+  }
+
   const user = await fetch('http://127.0.0.1:8799/api/users', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Cookie: cookie },

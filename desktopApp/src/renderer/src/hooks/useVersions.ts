@@ -616,12 +616,12 @@ export function useVersions(options?: {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const persist = useCallback((next: Version[]) => {
+  const persist = useCallback((_next: Version[]) => {
     if (!loadedRef.current || !serverHydratedRef.current) return
     dirtySinceHydrateRef.current = true
     if (saveTimer.current) clearTimeout(saveTimer.current)
     // Always flush the latest versionsRef when the timer fires — not the
-    // possibly-stale `next` captured when an older debounce was scheduled.
+    // possibly-stale snapshot captured when an older debounce was scheduled.
     saveTimer.current = setTimeout(() => {
       saveTimer.current = null
       void window.api.saveVersions(versionsRef.current, serializeHistory()).then((result) => {
@@ -657,8 +657,11 @@ export function useVersions(options?: {
     curTimeRef.current = Date.now()
     versionsRef.current = newState
     save(newState)
+    // Structural edits (create/delete/reorder/import): flush immediately on web so a
+    // quick refresh cannot beat the 400ms debounce — and empty deletes need allowEmpty.
+    if (isWebRuntime()) flushPersist()
     refreshMeta()
-  }, [save, refreshMeta])
+  }, [save, refreshMeta, flushPersist])
 
   // All CRUD callbacks read versionsRef.current instead of closing over `versions`,
   // giving them stable identities that only change when `save` changes (= never).
@@ -805,9 +808,29 @@ export function useVersions(options?: {
     (id: string) => {
       const current = versionsRef.current
       const target = current.find((v) => v.id === id)
-      commit(current.filter((v) => v.id !== id), `Delete "${target?.name ?? 'version'}"`)
+      if (!target) return
+      commit(
+        current.filter((v) => v.id !== id),
+        `Delete "${target.name ?? 'version'}"`
+      )
     },
     [commit]
+  )
+
+  const deleteVersions = useCallback(
+    (ids: string[]) => {
+      if (!ids.length) return
+      if (ids.length === 1) {
+        deleteVersion(ids[0]!)
+        return
+      }
+      const idSet = new Set(ids)
+      const current = versionsRef.current
+      const next = current.filter((v) => !idSet.has(v.id))
+      if (next.length === current.length) return
+      commit(next, `Delete ${current.length - next.length} versions`)
+    },
+    [commit, deleteVersion]
   )
 
   const duplicateVersion = useCallback(
@@ -911,6 +934,7 @@ export function useVersions(options?: {
     importTemplateVersion,
     updateVersion,
     deleteVersion,
+    deleteVersions,
     duplicateVersion,
     reorderVersions,
     undo,

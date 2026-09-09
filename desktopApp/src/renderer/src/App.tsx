@@ -93,7 +93,7 @@ export default function App(): JSX.Element {
 
   const {
     versions, loaded, createVersion, importImageVersion, importTemplateVersion, updateVersion,
-    deleteVersion, duplicateVersion, reorderVersions,
+    deleteVersions, duplicateVersion, reorderVersions,
     undo, redo, canUndo, canRedo, undoLabel, redoLabel,
     history, historyIndex, jumpTo
   } = useVersions({
@@ -367,10 +367,13 @@ export default function App(): JSX.Element {
     }
   }
 
-  const handleDelete = (id: string) => {
-    deleteVersion(id)
-    if (selectedId === id) {
-      const remaining = versions.filter((v) => v.id !== id)
+  const handleDelete = (ids: string | string[]) => {
+    const list = (Array.isArray(ids) ? ids : [ids]).filter(Boolean)
+    if (!list.length) return
+    deleteVersions(list)
+    if (selectedId && list.includes(selectedId)) {
+      const idSet = new Set(list)
+      const remaining = versions.filter((v) => !idSet.has(v.id))
       setSelectedId(remaining[0]?.id ?? null)
     }
   }
