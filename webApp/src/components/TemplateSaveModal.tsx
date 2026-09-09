@@ -28,6 +28,8 @@ export function TemplateSaveModal({ version, onClose }: TemplateSaveModalProps):
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [sortKey, setSortKey] = useState<TemplateSortKey>(() => loadTemplateSortPreference())
 
+  const versionNameKey = (version.name || 'Untitled').trim().toLowerCase()
+
   const refresh = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -37,8 +39,19 @@ export function TemplateSaveModal({ version, onClose }: TemplateSaveModalProps):
       setError(result.error)
       return
     }
-    setTemplates(result.templates.filter((t) => t.isOwn))
-  }, [])
+    const own = result.templates.filter((t) => t.isOwn)
+    setTemplates(own)
+    // Same-name library entry → default to replace/overwrite; user can unselect to save as new.
+    const matches = own.filter((t) => t.name.trim().toLowerCase() === versionNameKey)
+    if (!matches.length) {
+      setSelectedId(null)
+      return
+    }
+    matches.sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))
+    const best = matches[0]
+    setSelectedId(best.id)
+    setName(best.name)
+  }, [versionNameKey])
 
   useEffect(() => {
     void refresh()
@@ -79,8 +92,15 @@ export function TemplateSaveModal({ version, onClose }: TemplateSaveModalProps):
   }
 
   const selectTemplate = (t: ServerTemplate) => {
-    setSelectedId((prev) => (prev === t.id ? null : t.id))
-    setName(t.name)
+    setSelectedId((prev) => {
+      if (prev === t.id) {
+        // Unselect → save as new; keep the current name field (usually the version name).
+        setName(version.name || 'Untitled')
+        return null
+      }
+      setName(t.name)
+      return t.id
+    })
   }
 
   return (
@@ -112,7 +132,7 @@ export function TemplateSaveModal({ version, onClose }: TemplateSaveModalProps):
           </label>
           <p className="text-[10px] text-muted">
             {selectedId
-              ? 'Updating the selected template below.'
+              ? 'Updating the selected template below. Click it again to unselect and save as new instead.'
               : 'Saving as a new template. Click an existing template below to replace it instead.'}
           </p>
         </div>
@@ -142,6 +162,7 @@ export function TemplateSaveModal({ version, onClose }: TemplateSaveModalProps):
             <ul className="space-y-0.5">
               {sortedList.map((t) => {
                 const selected = selectedId === t.id
+                const nameMatch = t.name.trim().toLowerCase() === versionNameKey
                 return (
                   <li key={t.id}>
                     <button
@@ -152,7 +173,12 @@ export function TemplateSaveModal({ version, onClose }: TemplateSaveModalProps):
                       }`}
                     >
                       <div className="min-w-0 flex-1">
-                        <p className="truncate text-xs font-medium text-text">{t.name}</p>
+                        <p className="truncate text-xs font-medium text-text">
+                          {t.name}
+                          {nameMatch && !selected && (
+                            <span className="ml-1.5 text-[10px] font-normal text-muted">(same name)</span>
+                          )}
+                        </p>
                         <p className="truncate text-[10px] text-muted">
                           Modified {t.updatedAt?.slice(0, 10)} · Created {t.createdAt?.slice(0, 10)}
                         </p>
