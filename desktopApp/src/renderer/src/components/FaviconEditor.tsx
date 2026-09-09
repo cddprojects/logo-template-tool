@@ -29,14 +29,16 @@ import {
   switchFaviconContentType,
   updateIconStashAfterSave,
   unsyncLogoConfig,
-  type ApplyToAllOptions
+  type ApplyToAllOptions,
+  type ApplyToAllResult,
+  applyConfigsEqual
 } from '../utils/paintSettingsSync'
 import { faviconContentToIconConfig } from './LogoEditor'
 import { contentTypeFromIconForFavicon, FAVICON_CONTENT_TYPE_OPTIONS, unwrapSvgPath } from '../utils/contentTypeSync'
 import { sanitizePaintSessionProxies, syncOutsideLettersIntoPaintSession } from '../utils/paintDecorations'
 import { CanvaPromptPanel } from './CanvaPromptPanel'
 import { resolveCanvaAppName } from '../utils/canvaPrompt'
-import { ApplyToAllBar } from './ApplyToAllBar'
+import { ApplyToAllBar, type ApplyToAllFlash } from './ApplyToAllBar'
 
 const MAX_VARIANTS = Infinity
 
@@ -127,6 +129,7 @@ interface FaviconEditorProps {
   onLogoChange?: (variants: AssetVariant<LogoConfig>[]) => void
   onOpenSettings: () => void
   isActive?: boolean
+  onNotify?: (msg: string, type?: 'error' | 'success' | 'info') => void
 }
 
 export function FaviconEditor({
@@ -136,13 +139,15 @@ export function FaviconEditor({
   onChange,
   onLogoChange,
   onOpenSettings,
-  isActive = true
+  isActive = true,
+  onNotify
 }: FaviconEditorProps): JSX.Element {
   const [activeId, setActiveId] = useState(variants[0]?.id ?? '')
   const [editingLabel, setEditingLabel] = useState<string | null>(null)
   const [labelInput, setLabelInput] = useState('')
   const [styleClipboard, setStyleClipboard] = useState<FaviconConfig | null>(null)
-  const [appliedToAll, setAppliedToAll] = useState(false)
+  const [appliedToAllFlash, setAppliedToAllFlash] = useState<ApplyToAllFlash>('idle')
+  const appliedFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const dragIndexRef = useRef<number | null>(null)
   const variantsRef = useRef(variants)
   const logoVariantsRef = useRef(logoVariants)
@@ -613,7 +618,7 @@ export function FaviconEditor({
   }
 
   /** Apply checkbox selection from the active favicon onto every other variant. */
-  const applySelectedToAll = (opts: ApplyToAllOptions) => {
+  const applySelectedToAll = async (opts: ApplyToAllOptions): Promise<ApplyToAllResult | void> => {
     if (!config || !active) return
     if (!opts.favicon && !opts.logo) return
 
@@ -625,25 +630,32 @@ export function FaviconEditor({
     const contentSelected = opts.shape || opts.color || opts.edit
     const sourceTwinId = matchingLogoVariant?.id
     const activeFavId = active.id
+    let favChanged = false
+    let logoChanged = false
 
     const sourceFavicon = config
-    const mergedByLabel = new Map(
-      variants.map((variant) => [
-        variant.label,
-        variant.id === activeFavId
-          ? sourceFavicon
-          : applyFaviconToAllOptions(sourceFavicon, variant.config, opts)
-      ])
+    const mergedEntries = await Promise.all(
+      variants.map(async (variant) => {
+        const merged =
+          variant.id === activeFavId
+            ? sourceFavicon
+            : await applyFaviconToAllOptions(sourceFavicon, variant.config, opts)
+        if (variant.id !== activeFavId && !applyConfigsEqual(merged, variant.config)) {
+          favChanged = true
+        }
+        return [variant.label, merged] as const
+      })
     )
+    const mergedByLabel = new Map(mergedEntries)
 
-    if (applyFavicons) {
+    if (applyFavicons && favChanged) {
       onChange(
         variants.map((variant) => {
           if (variant.id === activeFavId) return variant
-          return {
-            ...variant,
-            config: mergedByLabel.get(variant.label) ?? variant.config
-          }
+          const config = mergedByLabel.get(variant.label) ?? variant.config
+          return applyConfigsEqual(config, variant.config)
+            ? variant
+            : { ...variant, config }
         })
       )
     }
@@ -656,12 +668,12 @@ export function FaviconEditor({
       const withShell = (cfg: LogoConfig): LogoConfig =>
         sourceLogo ? applyLogoShellToAllOptions(sourceLogo, cfg, opts) : cfg
 
-      onLogoChange(
-        logoVariants.map((lv) => {
+      const nextLogos = await Promise.all(
+        logoVariants.map(async (lv) => {
           const isTwin = !!sourceTwinId && lv.id === sourceTwinId
           let next = lv.config
           // Unsync before content copy so twin/other logos do not stay linked.
-          if (contentSelected) {
+          if (contentSelected && (next.iconLinked ?? true)) {
             next = unsyncLogoConfig(next)
           }
           next = withShell(next)
@@ -677,31 +689,38 @@ export function FaviconEditor({
             baseIcon,
             mergedFav
           )
-          return {
-            ...lv,
-            config: {
-              ...next,
-              iconLinked: false,
-              iconSyncBroken: false,
-              syncedIconSnapshot: null,
-              syncedIcon: null,
-              icon: applyIconToAllOptions(sourceForLogo, baseIcon, opts)
-            }
+          const icon = await applyIconToAllOptions(sourceForLogo, baseIcon, opts)
+          const nextConfig = {
+            ...next,
+            iconLinked: false,
+            iconSyncBroken: false,
+            syncedIconSnapshot: null,
+            syncedIcon: null,
+            icon
           }
+          if (!applyConfigsEqual(nextConfig, lv.config)) logoChanged = true
+          return applyConfigsEqual(nextConfig, lv.config)
+            ? lv
+            : { ...lv, config: nextConfig }
         })
       )
+      if (logoChanged) onLogoChange(nextLogos)
     } else if (applyFavicons && contentSelected && onLogoChange) {
       // Favicon-only: freeze every linked logo so sync does not pull updates.
-      onLogoChange(
-        logoVariants.map((lv) => ({
-          ...lv,
-          config: unsyncLogoConfig(lv.config)
-        }))
-      )
+      const nextLogos = logoVariants.map((lv) => {
+        if (!(lv.config.iconLinked ?? true)) return lv
+        logoChanged = true
+        return { ...lv, config: unsyncLogoConfig(lv.config) }
+      })
+      if (logoChanged) onLogoChange(nextLogos)
     }
 
-    setAppliedToAll(true)
-    window.setTimeout(() => setAppliedToAll(false), 1600)
+    const result: ApplyToAllResult =
+      favChanged || logoChanged ? 'applied' : 'already'
+    if (appliedFlashTimerRef.current) clearTimeout(appliedFlashTimerRef.current)
+    setAppliedToAllFlash(result)
+    appliedFlashTimerRef.current = setTimeout(() => setAppliedToAllFlash('idle'), 1600)
+    return result
   }
 
   // Drag-to-reorder variants.
@@ -736,7 +755,11 @@ export function FaviconEditor({
       else await exportFaviconIco(config, versionName, label, nameOpts)
       setExporting('done:' + format)
       setTimeout(() => setExporting(null), 1500)
-    } catch { setExporting(null) }
+    } catch (err) {
+      setExporting(null)
+      const msg = err instanceof Error ? err.message : String(err)
+      onNotify?.(`Export failed: ${msg}`, 'error')
+    }
   }
 
   if (!config) return <div className="flex-1 flex items-center justify-center text-muted text-sm">No variants</div>
@@ -926,7 +949,7 @@ export function FaviconEditor({
         </div>
         {(variants.length > 1 || logoVariants.length > 1) && (
           <ApplyToAllBar
-            applied={appliedToAll}
+            flash={appliedToAllFlash}
             onApply={applySelectedToAll}
             showFavicon={variants.length > 1}
             showLogo={logoVariants.length > 1}

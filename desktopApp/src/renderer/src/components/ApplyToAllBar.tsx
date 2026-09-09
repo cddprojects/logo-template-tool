@@ -1,12 +1,18 @@
 import React, { useState } from 'react'
-import { CheckCircle2, ClipboardCopy } from 'lucide-react'
-import type { ApplyToAllOptions } from '../utils/paintSettingsSync'
+import { CheckCircle2, ClipboardCopy, Info } from 'lucide-react'
+import type { ApplyToAllOptions, ApplyToAllResult } from '../utils/paintSettingsSync'
 import { applyToAllOptionsActive } from '../utils/paintSettingsSync'
+
+export type ApplyToAllFlash = 'idle' | 'applied' | 'already'
 
 interface ApplyToAllBarProps {
   /** Called with the current checkbox selection. */
-  onApply: (opts: ApplyToAllOptions) => void
-  /** Brief success flash label. */
+  onApply: (
+    opts: ApplyToAllOptions
+  ) => ApplyToAllResult | boolean | void | Promise<ApplyToAllResult | boolean | void>
+  /** Brief feedback after Apply. */
+  flash?: ApplyToAllFlash
+  /** @deprecated Prefer `flash`. */
   applied?: boolean
   title?: string
   /** Show Favicon target checkbox (default true). */
@@ -22,6 +28,7 @@ interface ApplyToAllBarProps {
  */
 export function ApplyToAllBar({
   onApply,
+  flash,
   applied = false,
   title = 'Copy selected parts of this variant onto every other variant',
   showFavicon = true,
@@ -45,6 +52,8 @@ export function ApplyToAllBar({
     logo: showLogo ? logo : false
   }
   const canApply = applyToAllOptionsActive(opts)
+  const status: ApplyToAllFlash =
+    flash ?? (applied ? 'applied' : 'idle')
 
   return (
     <div
@@ -64,7 +73,7 @@ export function ApplyToAllBar({
         </label>
         <label
           className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap"
-          title="Fill, border, and shadow colours only — not Paint objects"
+          title="Fill, border, shadow, and remapped image/SVG/Canva colours when those modes are in use — not Paint objects"
         >
           <input
             type="checkbox"
@@ -144,15 +153,29 @@ export function ApplyToAllBar({
       <button
         type="button"
         disabled={!canApply}
-        onClick={() => onApply(opts)}
+        onClick={() => {
+          void Promise.resolve(onApply(opts))
+        }}
         className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-          applied
+          status === 'applied'
             ? 'border-success/60 bg-success/10 text-success'
-            : 'border-border bg-surface3 text-muted hover:text-text hover:border-muted'
+            : status === 'already'
+              ? 'border-accent/50 bg-accent/10 text-accent'
+              : 'border-border bg-surface3 text-muted hover:text-text hover:border-muted'
         }`}
       >
-        {applied ? <CheckCircle2 size={11} /> : <ClipboardCopy size={11} />}
-        {applied ? 'Applied' : 'Apply to all'}
+        {status === 'applied' ? (
+          <CheckCircle2 size={11} />
+        ) : status === 'already' ? (
+          <Info size={11} />
+        ) : (
+          <ClipboardCopy size={11} />
+        )}
+        {status === 'applied'
+          ? 'Applied'
+          : status === 'already'
+            ? 'Already applied'
+            : 'Apply to all'}
       </button>
     </div>
   )

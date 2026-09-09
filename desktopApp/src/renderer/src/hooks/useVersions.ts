@@ -402,7 +402,11 @@ function parsePersistedHistory(raw: unknown): PersistedUndoHistory | null {
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
-export function useVersions() {
+export function useVersions(options?: {
+  onPersistError?: (message: string) => void
+}) {
+  const onPersistErrorRef = useRef(options?.onPersistError)
+  onPersistErrorRef.current = options?.onPersistError
   const [versions, setVersionsState] = useState<Version[]>([])
   const [loaded, setLoaded] = useState(false)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -479,6 +483,7 @@ export function useVersions() {
     void window.api.saveVersions(versionsRef.current, serializeHistory(), keepalive).then((result) => {
       if (result && result.success === false) {
         console.error('[versions] flush save failed:', result.error)
+        onPersistErrorRef.current?.(result.error || 'Failed to save workspace')
       } else if (result?.success !== false) {
         dirtySinceHydrateRef.current = false
       }
@@ -613,6 +618,7 @@ export function useVersions() {
       void window.api.saveVersions(next, serializeHistory()).then((result) => {
         if (result && result.success === false) {
           console.error('[versions] save failed:', result.error)
+          onPersistErrorRef.current?.(result.error || 'Failed to save workspace')
         } else if (result?.success !== false) {
           dirtySinceHydrateRef.current = false
         }

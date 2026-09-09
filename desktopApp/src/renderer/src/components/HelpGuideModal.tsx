@@ -200,8 +200,8 @@ function SetupGuide(): JSX.Element {
     <div className="space-y-5">
       <Section title="Where to configure">
         <p>
-          Open <span className="text-text">Settings</span> from the gear icon in the top bar
-          (labelled “AI Settings”). Keys are stored on this computer only.
+          Open <span className="text-text">Gemini API key</span> from the gear icon in the top bar.
+          The key is stored on this computer only.
         </p>
       </Section>
 

@@ -81,12 +81,24 @@ class EditorErrorBoundary extends Component<{ children: React.ReactNode; onReset
 }
 
 export default function App(): JSX.Element {
+  type ToastType = 'error' | 'success' | 'info'
+  const [toast, setToast] = useState<{ msg: string; type: ToastType; id: number } | null>(null)
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const showToast = useCallback((msg: string, type: ToastType = 'info', durationMs = 5000) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    setToast({ msg, type, id: Date.now() })
+    toastTimerRef.current = setTimeout(() => setToast(null), durationMs)
+  }, [])
+
   const {
     versions, loaded, createVersion, importImageVersion, importTemplateVersion, updateVersion,
     deleteVersion, duplicateVersion, reorderVersions,
     undo, redo, canUndo, canRedo, undoLabel, redoLabel,
     history, historyIndex, jumpTo
-  } = useVersions()
+  } = useVersions({
+    onPersistError: (message) => showToast(message, 'error')
+  })
 
   const [selectedId, setSelectedId] = useState<string | null>(() => versions[0]?.id ?? null)
 
@@ -202,17 +214,6 @@ export default function App(): JSX.Element {
   const [groupExporting, setGroupExporting] = useState(false)
   const [showGroupExport, setShowGroupExport] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
-
-  // ── Toast notifications ───────────────────────────────────────────────────
-  type ToastType = 'error' | 'success' | 'info'
-  const [toast, setToast] = useState<{ msg: string; type: ToastType; id: number } | null>(null)
-  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-  const showToast = useCallback((msg: string, type: ToastType = 'info', durationMs = 5000) => {
-    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
-    setToast({ msg, type, id: Date.now() })
-    toastTimerRef.current = setTimeout(() => setToast(null), durationMs)
-  }, [])
 
   const handleGroupExport = useCallback(async (opts: GroupExportOptions) => {
     // Use the ref so we never read `selected` before it is declared below.
@@ -559,7 +560,7 @@ export default function App(): JSX.Element {
                     )}
                     <button
                       onClick={() => setShowSettings(true)}
-                      title="AI Settings"
+                      title="Gemini API key"
                       className="w-8 h-8 rounded-lg flex items-center justify-center text-muted hover:text-text hover:bg-surface3 transition-colors"
                     >
                       <Settings size={14} />
@@ -588,6 +589,7 @@ export default function App(): JSX.Element {
                         onChange={handleLogosChange}
                         onFaviconChange={handleFaviconsChange}
                         onOpenSettings={() => setShowSettings(true)}
+                        onNotify={showToast}
                         isActive={activeTab === 'logo'}
                       />
                     </div>
@@ -599,6 +601,7 @@ export default function App(): JSX.Element {
                         onChange={handleFaviconsChange}
                         onLogoChange={handleLogosChange}
                         onOpenSettings={() => setShowSettings(true)}
+                        onNotify={showToast}
                         isActive={activeTab === 'favicon'}
                       />
                     </div>
