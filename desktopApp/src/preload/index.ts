@@ -34,6 +34,11 @@ const api = {
   ): Promise<{ success: boolean; filePath?: string; error?: string }> =>
     ipcRenderer.invoke('export-template', version),
 
+  updateAllTemplates: (
+    versions: unknown[]
+  ): Promise<{ success: boolean; written?: number; migratedOrphans?: number; updated?: number; created?: number; error?: string }> =>
+    ipcRenderer.invoke('update-all-templates', versions),
+
   openTemplatesFolder: (): Promise<{ success: boolean; path?: string }> =>
     ipcRenderer.invoke('open-templates-folder'),
 

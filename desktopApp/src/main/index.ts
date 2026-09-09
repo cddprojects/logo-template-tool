@@ -718,26 +718,103 @@ ipcMain.on('window-maximize', () => {
 ipcMain.on('window-close', () => BrowserWindow.getFocusedWindow()?.close())
 
 
+function igTemplateFileName(name: unknown): string {
+  const safe = String(name ?? 'template').replace(/[^a-z0-9_\-. ]/gi, '-')
+  return `${safe}.igtemplate`
+}
+
+function writeIgTemplateFile(version: Record<string, unknown>): string {
+  const filename = igTemplateFileName(version.name)
+  const filePath = join(templatesDir, filename)
+  const tmpl = {
+    schemaVersion: 1,
+    name: version.name,
+    description: version.description,
+    logos: version.logos,
+    favicons: version.favicons
+  }
+  writeFileSync(filePath, JSON.stringify(tmpl, null, 2), 'utf-8')
+  const reg = getRegistry()
+  reg.add(filename)
+  saveRegistry(reg)
+  return filePath
+}
+
+/** Upgrade legacy single logo/favicon templates to the current array schema. */
+function normalizeIgTemplateFile(raw: Record<string, unknown>): Record<string, unknown> {
+  const logos =
+    Array.isArray(raw.logos) && raw.logos.length > 0
+      ? raw.logos
+      : raw.logo
+        ? [{ id: 'logo_legacy', label: 'Dark', config: raw.logo }]
+        : []
+  const favicons =
+    Array.isArray(raw.favicons) && raw.favicons.length > 0
+      ? raw.favicons
+      : raw.favicon
+        ? [{ id: 'fav_legacy', label: 'Dark', config: raw.favicon }]
+        : []
+  return {
+    schemaVersion: 1,
+    name: raw.name,
+    description: raw.description ?? '',
+    logos,
+    favicons
+  }
+}
+
 // IPC: Export a version as a .igtemplate file into data/templates/
 ipcMain.handle('export-template', (_, version: Record<string, unknown>) => {
   try {
     ensureDataDir()
-    const name = String(version.name ?? 'template').replace(/[^a-z0-9_\-. ]/gi, '-')
-    const filename = `${name}.igtemplate`
-    const filePath = join(templatesDir, filename)
-    const tmpl = {
-      schemaVersion: 1,
-      name: version.name,
-      description: version.description,
-      logos: version.logos,
-      favicons: version.favicons
-    }
-    writeFileSync(filePath, JSON.stringify(tmpl, null, 2), 'utf-8')
-    // Register it immediately so re-importing the same file is a no-op
-    const reg = getRegistry()
-    reg.add(filename)
-    saveRegistry(reg)
+    const filePath = writeIgTemplateFile(version)
     return { success: true, filePath }
+  } catch (err) {
+    return { success: false, error: String(err) }
+  }
+})
+
+/**
+ * Rewrite .igtemplate files from the current versions list, then upgrade any
+ * other templates still sitting in the folder on the old schema.
+ */
+ipcMain.handle('update-all-templates', (_, versions: unknown) => {
+  try {
+    ensureDataDir()
+    const list = Array.isArray(versions) ? versions : []
+    let written = 0
+    const writtenNames = new Set<string>()
+    for (const item of list) {
+      if (!item || typeof item !== 'object') continue
+      const version = item as Record<string, unknown>
+      const filename = igTemplateFileName(version.name)
+      writeIgTemplateFile(version)
+      writtenNames.add(filename)
+      written++
+    }
+
+    let migratedOrphans = 0
+    for (const filename of readdirSync(templatesDir)) {
+      if (!filename.endsWith('.igtemplate') || writtenNames.has(filename)) continue
+      const filePath = join(templatesDir, filename)
+      try {
+        const raw = JSON.parse(readFileSync(filePath, 'utf-8')) as Record<string, unknown>
+        const next = normalizeIgTemplateFile(raw)
+        const before = JSON.stringify(raw)
+        const after = JSON.stringify(next)
+        if (before !== after) {
+          writeFileSync(filePath, JSON.stringify(next, null, 2), 'utf-8')
+          migratedOrphans++
+        }
+        const reg = getRegistry()
+        reg.add(filename)
+        saveRegistry(reg)
+      } catch {
+        /* skip unreadable files */
+      }
+    }
+
+    return { success: true, written, migratedOrphans }
   } catch (err) {
     return { success: false, error: String(err) }
   }

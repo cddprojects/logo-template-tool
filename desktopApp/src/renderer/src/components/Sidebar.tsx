@@ -10,7 +10,8 @@ import {
   Search,
   X,
   GripVertical,
-  Upload
+  Upload,
+  RefreshCw
 } from './Icons'
 import { ConfirmDialog } from './ConfirmDialog'
 import { TemplateSortSelect } from './TemplateSortSelect'
@@ -59,6 +60,9 @@ export function Sidebar({
   const [bulkAction, setBulkAction] = useState<BulkAction>('')
   const [bulkBusy, setBulkBusy] = useState(false)
   const [pendingDeleteIds, setPendingDeleteIds] = useState<string[] | null>(null)
+  const [pendingUpdateTemplates, setPendingUpdateTemplates] = useState(false)
+  const [updateTemplatesBusy, setUpdateTemplatesBusy] = useState(false)
+  const [updateTemplatesNote, setUpdateTemplatesNote] = useState<string | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
 
   const dragIdRef = useRef<string | null>(null)
@@ -128,6 +132,30 @@ export function Sidebar({
     await exportVersion(v)
   }
 
+  const handleUpdateOneTemplate = async (e: React.MouseEvent, v: Version) => {
+    e.stopPropagation()
+    if (exportingId || updateTemplatesBusy) return
+    setExportingId(v.id)
+    setUpdateTemplatesNote(null)
+    try {
+      const result = await window.api.updateAllTemplates([v])
+      if (!result?.success) {
+        setUpdateTemplatesNote(result?.error || `Failed to update “${v.name}”`)
+        return
+      }
+      setUpdateTemplatesNote(
+        isWebApp
+          ? `Updated template “${v.name}” in your library`
+          : `Updated “${v.name}.igtemplate”`
+      )
+      window.setTimeout(() => setUpdateTemplatesNote(null), 4000)
+    } catch (err) {
+      setUpdateTemplatesNote(String(err))
+    } finally {
+      setExportingId(null)
+    }
+  }
+
   const requestDelete = (ids: string[]) => {
     if (!ids.length) return
     setPendingDeleteIds(ids)
@@ -184,6 +212,37 @@ export function Sidebar({
     window.api.openTemplatesFolder()
   }
 
+  const runUpdateAllTemplates = async () => {
+    if (!versions.length || updateTemplatesBusy) return
+    setPendingUpdateTemplates(false)
+    setUpdateTemplatesBusy(true)
+    setUpdateTemplatesNote(null)
+    try {
+      const result = await window.api.updateAllTemplates(versions)
+      if (!result?.success) {
+        setUpdateTemplatesNote(result?.error || 'Failed to update templates')
+        return
+      }
+      const written = result.written ?? ((result.updated ?? 0) + (result.created ?? 0))
+      const orphanBits =
+        result.migratedOrphans && result.migratedOrphans > 0
+          ? ` · upgraded ${result.migratedOrphans} other file${result.migratedOrphans === 1 ? '' : 's'}`
+          : ''
+      const webBits =
+        isWebApp && (result.updated != null || result.created != null)
+          ? ` (${result.updated ?? 0} updated, ${result.created ?? 0} created)`
+          : ''
+      setUpdateTemplatesNote(
+        `Updated ${written} template${written === 1 ? '' : 's'}${webBits}${orphanBits}`
+      )
+      window.setTimeout(() => setUpdateTemplatesNote(null), 5000)
+    } catch (err) {
+      setUpdateTemplatesNote(String(err))
+    } finally {
+      setUpdateTemplatesBusy(false)
+    }
+  }
+
   return (
     <>
       <aside
@@ -207,6 +266,18 @@ export function Sidebar({
               <Upload size={13} />
             </button>
             <button
+              onClick={() => setPendingUpdateTemplates(true)}
+              disabled={!versions.length || updateTemplatesBusy}
+              title={
+                isWebApp
+                  ? 'Update all .igtemplate entries in your library from the versions list (current schema)'
+                  : 'Rewrite all .igtemplate files from the versions list (and upgrade leftover template files)'
+              }
+              className="w-6 h-6 rounded flex items-center justify-center text-muted hover:text-white hover:bg-accent transition-colors disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-muted"
+            >
+              <RefreshCw size={13} className={updateTemplatesBusy ? 'animate-spin' : ''} />
+            </button>
+            <button
               onClick={onCreate}
               title="New version"
               className="w-6 h-6 rounded flex items-center justify-center text-muted hover:text-white hover:bg-accent transition-colors"
@@ -215,6 +286,12 @@ export function Sidebar({
             </button>
           </div>
         </div>
+
+        {updateTemplatesNote && (
+          <div className="mx-2 mt-2 px-2 py-1.5 rounded-md border border-border bg-surface2 text-[10px] text-text-dim leading-snug">
+            {updateTemplatesNote}
+          </div>
+        )}
 
         {templateDropActive && (
           <div className="mx-2 mt-2 px-2 py-1.5 rounded-md border border-dashed border-accent/60 bg-accent/10 text-[10px] text-accent text-center">
@@ -412,6 +489,18 @@ export function Sidebar({
                       <Copy size={10} />
                     </button>
                     <button
+                      onClick={(e) => { void handleUpdateOneTemplate(e, v) }}
+                      title={
+                        isWebApp
+                          ? 'Update this version’s template in your library (current schema)'
+                          : 'Rewrite this version’s .igtemplate file (current schema)'
+                      }
+                      disabled={exportingId === v.id || updateTemplatesBusy}
+                      className="w-5 h-5 rounded flex items-center justify-center text-muted hover:text-accent hover:bg-surface3 disabled:opacity-40"
+                    >
+                      <RefreshCw size={10} className={exportingId === v.id ? 'animate-spin' : ''} />
+                    </button>
+                    <button
                       onClick={(e) => {
                         e.stopPropagation()
                         requestDelete([v.id])
@@ -455,6 +544,20 @@ export function Sidebar({
           destructive
           onConfirm={confirmDelete}
           onClose={() => setPendingDeleteIds(null)}
+        />
+      )}
+
+      {pendingUpdateTemplates && (
+        <ConfirmDialog
+          title="Update all templates?"
+          message={
+            isWebApp
+              ? `Rewrite your library templates from all ${versions.length} version${versions.length === 1 ? '' : 's'} in the list (current schema). Matching names are updated; missing ones are created.`
+              : `Rewrite .igtemplate files from all ${versions.length} version${versions.length === 1 ? '' : 's'} in the list, and upgrade any other old template files in the templates folder.`
+          }
+          confirmLabel="Update templates"
+          onConfirm={() => { void runUpdateAllTemplates() }}
+          onClose={() => setPendingUpdateTemplates(false)}
         />
       )}
     </>

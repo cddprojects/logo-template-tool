@@ -26,6 +26,14 @@ declare global {
         error?: string
       }>
       exportTemplate: (version: unknown) => Promise<{ success: boolean; filePath?: string; error?: string }>
+      updateAllTemplates: (versions: unknown[]) => Promise<{
+        success: boolean
+        written?: number
+        migratedOrphans?: number
+        updated?: number
+        created?: number
+        error?: string
+      }>
       openTemplatesFolder: () => Promise<{ success: boolean; path?: string }>
       onTemplateImported: (cb: (version: unknown) => void) => void
       onVersionsReloaded: (cb: (versions: unknown[]) => void) => void

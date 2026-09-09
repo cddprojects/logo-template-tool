@@ -12,6 +12,8 @@ import { buildStoreZip } from './zip'
 import { iconifyFetch, iconifySearch } from './iconify'
 import {
   createTemplate,
+  updateTemplate,
+  listTemplates,
   getAuthUser,
   loadWorkspace,
   logout,
@@ -330,6 +332,59 @@ export function installWebApi(): void {
         })
         if (!result.ok) return { success: false, error: result.error }
         return { success: true, filePath: result.template.id }
+      } catch (e) {
+        return { success: false, error: String(e) }
+      }
+    },
+
+    updateAllTemplates: async (
+      versions: unknown[]
+    ): Promise<{
+      success: boolean
+      written?: number
+      migratedOrphans?: number
+      updated?: number
+      created?: number
+      error?: string
+    }> => {
+      try {
+        const listed = await listTemplates()
+        if (!listed.ok) return { success: false, error: listed.error }
+        const ownByName = new Map(
+          listed.templates
+            .filter((t) => t.isOwn)
+            .map((t) => [t.name.trim().toLowerCase(), t] as const)
+        )
+        let updated = 0
+        let created = 0
+        for (const item of versions) {
+          if (!item || typeof item !== 'object') continue
+          const v = item as {
+            name?: string
+            description?: string
+            logos?: unknown
+            favicons?: unknown
+          }
+          const name = (v.name ?? 'Untitled').trim() || 'Untitled'
+          const payload = {
+            name,
+            description: v.description ?? '',
+            logos: v.logos ?? [],
+            favicons: v.favicons ?? []
+          }
+          const existing = ownByName.get(name.toLowerCase())
+          if (existing) {
+            const result = await updateTemplate(existing.id, payload)
+            if (!result.ok) return { success: false, error: result.error }
+            updated++
+          } else {
+            const result = await createTemplate(payload)
+            if (!result.ok) return { success: false, error: result.error }
+            ownByName.set(name.toLowerCase(), result.template)
+            created++
+          }
+        }
+        return { success: true, written: updated + created, updated, created, migratedOrphans: 0 }
       } catch (e) {
         return { success: false, error: String(e) }
       }
