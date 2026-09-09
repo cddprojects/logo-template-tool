@@ -16,6 +16,9 @@ RUN npm ci --omit=dev
 
 # Final image: official nginx:alpine (proven Coolify/Traefik path) + Node 22 binary for API
 FROM nginx:alpine
+# Coolify injects SOURCE_COMMIT on Docker builds.
+ARG SOURCE_COMMIT=unknown
+ARG BUILD_TIME=unknown
 RUN apk add --no-cache tini wget
 
 COPY --from=node:22-alpine /usr/local/ /usr/local/
@@ -32,6 +35,8 @@ ENV DATA_DIR=/data
 ENV API_PORT=8787
 ENV NODE_ENV=production
 ENV COOKIE_SECURE=true
+ENV BUILD_COMMIT=$SOURCE_COMMIT
+ENV BUILD_TIME=$BUILD_TIME
 
 # SQLite DB + template files live under /data.
 # Do NOT declare VOLUME here — anonymous Docker volumes are recreated on many

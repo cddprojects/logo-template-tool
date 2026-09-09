@@ -1,8 +1,12 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 
 const MAX_HISTORY = 50
-/** Web workspace JSON includes full version snaps — keep persisted undo smaller than desktop. */
-const MAX_PERSISTED_HISTORY_WEB = 15
+/**
+ * Web workspace PUT includes full version snaps (paint PNGs). Persisting many undo
+ * snaps multiplies payload size and routinely times out — then refresh looks like
+ * “autosave is broken”. Keep undo in-memory for the tab only on web.
+ */
+const MAX_PERSISTED_HISTORY_WEB = 0
 
 function isWebRuntime(): boolean {
   return typeof window !== 'undefined' && !!(window as Window & { __WEB__?: boolean }).__WEB__
@@ -459,16 +463,18 @@ export function useVersions(options?: {
 
   const applyHistory = useCallback((raw: unknown) => {
     const restored = parsePersistedHistory(raw)
-    if (restored) {
+    if (restored && !isWebRuntime()) {
       pastRef.current = restored.past
       futureRef.current = restored.future
       curLabelRef.current = restored.currentLabel
       curTimeRef.current = restored.currentTime
     } else {
+      // Web: start a fresh in-tab undo stack (server history is not rehydrated —
+      // old workspaces may still contain huge snaps that would freeze the tab).
       pastRef.current = []
       futureRef.current = []
-      curLabelRef.current = 'Opened project'
-      curTimeRef.current = Date.now()
+      curLabelRef.current = restored?.currentLabel || 'Opened project'
+      curTimeRef.current = restored?.currentTime || Date.now()
     }
     refreshMeta()
   }, [refreshMeta])

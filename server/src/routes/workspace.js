@@ -74,15 +74,68 @@ function readWorkspace(file) {
   return recoverVersionsIfEmpty(readWorkspaceFile(file), file)
 }
 
+/**
+ * Undo snaps embed full version trees (paint PNGs). Persisting them multiplies
+ * payload size and routinely OOMs Node during JSON.stringify / writeFile.
+ * Keep labels only — in-tab undo still lives in the browser.
+ */
+function slimHistory(history) {
+  if (history == null) return null
+  if (typeof history !== 'object') return null
+  return {
+    v: 1,
+    past: [],
+    future: [],
+    currentLabel:
+      typeof history.currentLabel === 'string' ? history.currentLabel : 'Opened project',
+    currentTime: Number(history.currentTime) || Date.now()
+  }
+}
+
+/** Compact atomic write — pretty-print was blowing memory on paint-heavy workspaces. */
 function writeWorkspace(file, payload) {
+  const dir = path.dirname(file)
+  fs.mkdirSync(dir, { recursive: true })
+
   if (fs.existsSync(file)) {
     try {
-      fs.copyFileSync(file, backupPath(file))
+      const stat = fs.statSync(file)
+      // Skip .bak for very large files (copy alone can OOM / fill disk).
+      if (stat.size < 40 * 1024 * 1024) {
+        fs.copyFileSync(file, backupPath(file))
+      } else {
+        console.warn(
+          '[workspace] skipping .bak copy — file too large:',
+          path.basename(file),
+          `(${Math.round(stat.size / (1024 * 1024))}MB)`
+        )
+      }
     } catch (e) {
       console.error('[workspace] failed to write backup', backupPath(file), e)
     }
   }
-  fs.writeFileSync(file, JSON.stringify(payload, null, 2), 'utf-8')
+
+  let json
+  try {
+    json = JSON.stringify(payload)
+  } catch (e) {
+    const err = new Error(`JSON.stringify failed: ${e}`)
+    err.cause = e
+    throw err
+  }
+
+  const tmp = `${file}.${process.pid}.${Date.now()}.tmp`
+  try {
+    fs.writeFileSync(tmp, json, 'utf-8')
+    fs.renameSync(tmp, file)
+  } catch (e) {
+    try {
+      if (fs.existsSync(tmp)) fs.unlinkSync(tmp)
+    } catch {
+      // ignore
+    }
+    throw e
+  }
 }
 
 export function workspaceRoutes(_db, dataDir) {
@@ -99,7 +152,7 @@ export function workspaceRoutes(_db, dataDir) {
         try {
           writeWorkspace(file, {
             versions,
-            history: history ?? raw.history,
+            history: slimHistory(history ?? raw.history),
             updatedAt: new Date().toISOString(),
             cleared: false
           })
@@ -110,7 +163,13 @@ export function workspaceRoutes(_db, dataDir) {
         }
       }
     }
-    res.json({ versions, history, updatedAt, cleared: cleared === true })
+    // Never send multi-MB undo snaps back to the browser.
+    res.json({
+      versions,
+      history: slimHistory(history),
+      updatedAt,
+      cleared: cleared === true
+    })
   })
 
   router.put('/', (req, res) => {
@@ -130,13 +189,13 @@ export function workspaceRoutes(_db, dataDir) {
       return
     }
     const updatedAt = new Date().toISOString()
-    // Keep the previous undo stack when the client omits `history` (versions-only save).
+    // Client may still send huge undo snaps — always slim before write.
     const history = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'history')
-      ? req.body.history
-      : existing.history
+      ? slimHistory(req.body.history)
+      : slimHistory(existing.history)
     const payload = {
       versions,
-      history: history ?? null,
+      history,
       updatedAt,
       // So GET does not resurrect deleted versions from undo history / .bak.
       cleared: versions.length === 0
@@ -145,7 +204,11 @@ export function workspaceRoutes(_db, dataDir) {
       writeWorkspace(file, payload)
       res.json({ ok: true, updatedAt })
     } catch (e) {
-      res.status(500).json({ error: 'Failed to save workspace', detail: String(e) })
+      console.error('[workspace] failed to save', path.basename(file), e)
+      res.status(500).json({
+        error: 'Failed to save workspace',
+        detail: String(e?.message || e)
+      })
     }
   })
 

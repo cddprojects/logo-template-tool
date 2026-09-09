@@ -25,13 +25,24 @@ app.use(
     credentials: true
   })
 )
-app.use(express.json({ limit: '50mb' }))
+app.use(express.json({ limit: '100mb' }))
 app.use(cookieParser())
+
+app.use((err, _req, res, next) => {
+  if (err?.type === 'entity.too.large') {
+    res.status(413).json({ error: 'Workspace payload too large' })
+    return
+  }
+  next(err)
+})
 
 app.get('/api/health', (_req, res) => {
   const store = describeDataStore(dataDir)
   res.json({
     ok: true,
+    // Set at image build time (Coolify/Docker ARG) so you can confirm the live commit.
+    buildCommit: process.env.BUILD_COMMIT || null,
+    buildTime: process.env.BUILD_TIME || null,
     dataDir: store.dataDir,
     persistent: {
       database: store.dbExists,

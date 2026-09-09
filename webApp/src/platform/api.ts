@@ -73,10 +73,16 @@ async function pumpWorkspaceSave(): Promise<void> {
     while (queuedSave) {
       const job = queuedSave
       queuedSave = null
-      const result = await saveWorkspace(job.data, job.history, {
+      const opts = {
         ...job.opts,
         allowEmpty: job.data.length === 0 || job.opts?.allowEmpty === true
-      })
+      }
+      let result = await saveWorkspace(job.data, job.history, opts)
+      // One retry for transient timeouts / network blips (common with large paint workspaces).
+      if (!result.ok && /timed out|network|Failed to fetch|TypeError/i.test(result.error)) {
+        console.warn('[web] workspace save retry after:', result.error)
+        result = await saveWorkspace(job.data, job.history, { ...opts, keepalive: false })
+      }
       const payload = result.ok
         ? { success: true as const }
         : { success: false as const, error: result.error }
