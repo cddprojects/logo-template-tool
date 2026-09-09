@@ -74,8 +74,9 @@ function UseGuide(): JSX.Element {
           </li>
           <li>
             Logo ↔ favicon sync needs exact matching variant names. Renaming either side breaks sync but keeps
-            the favicon design currently shown by the logo; later favicon changes no longer affect that frozen icon.
-            Use <span className="text-text">From favicon</span> / <span className="text-text">From logo</span> to copy while unsynced
+            the favicon design as <span className="text-text">Frozen favicon</span>; click that control to keep
+            it as an editable custom icon. <span className="text-text">From favicon</span> copies a twin when
+            names match, or the first favicon if they don’t, so you are never stuck without a twin name.
           </li>
           <li>
             <span className="text-text">Apply to all</span> copies selected parts of the active

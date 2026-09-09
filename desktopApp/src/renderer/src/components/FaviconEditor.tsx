@@ -924,12 +924,12 @@ export function FaviconEditor({
           </button>
         )}
         </div>
-        {variants.length > 1 && (
+        {(variants.length > 1 || logoVariants.length > 1) && (
           <ApplyToAllBar
             applied={appliedToAll}
             onApply={applySelectedToAll}
-            showFavicon
-            showLogo={logoVariants.length > 0}
+            showFavicon={variants.length > 1}
+            showLogo={logoVariants.length > 1}
             title="Copy selected parts of this favicon to the chosen apps’ variants"
           />
         )}

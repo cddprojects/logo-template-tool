@@ -219,6 +219,8 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
 
   // Sync only applies when iconLinked AND an exact-name favicon twin exists.
   const canSyncWithFavicon = !!matchingFaviconVariant
+  /** Copy / bake source when unsynced — exact-name twin, else first favicon so users are never stuck. */
+  const faviconSourceForCopy = matchingFaviconVariant ?? faviconVariants?.[0]
   const isSyncedWithFavicon = !!(safeConfig?.iconLinked && canSyncWithFavicon)
   const isShowingFrozenSync = !!(
     safeConfig &&
@@ -558,8 +560,9 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   }, [onChange, onFaviconChange, isSyncedWithFavicon, matchingFaviconVariant, safeConfig, effectiveIcon])
 
   const copyIconFromFavicon = useCallback(() => {
-    if (!safeConfig || !matchingFaviconVariant?.config) return
-    const fav = matchingFaviconVariant.config
+    const source = matchingFaviconVariant ?? faviconVariants?.[0]
+    if (!safeConfig || !source?.config) return
+    const fav = source.config
     let nextIcon: IconConfig = {
       ...faviconContentToIconConfig(fav.content, safeConfig.icon, fav),
       paintSession: fav.paintSession ?? null
@@ -593,7 +596,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       syncedIconSnapshot: null,
       syncedIcon: null
     })
-  }, [safeConfig, matchingFaviconVariant, updateConfig])
+  }, [safeConfig, matchingFaviconVariant, faviconVariants, updateConfig])
 
   // Apply a patch to EVERY variant (used for "same text on all variants").
   const updateAllVariants = useCallback(
@@ -753,6 +756,20 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       iconSyncBroken: false,
       syncedIconSnapshot: null,
       syncedIcon: null
+    })
+  }, [safeConfig, updateConfig])
+
+  /** Leave frozen-favicon mode by baking the snapshot into an editable custom icon. */
+  const keepFrozenAsCustom = useCallback(() => {
+    if (!safeConfig) return
+    const frozen =
+      safeConfig.syncedIconSnapshot ?? safeConfig.syncedIcon ?? safeConfig.icon
+    updateConfig({
+      iconLinked: false,
+      iconSyncBroken: false,
+      syncedIconSnapshot: null,
+      syncedIcon: null,
+      icon: structuredClone(frozen)
     })
   }, [safeConfig, updateConfig])
 
@@ -1063,12 +1080,12 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
           </button>
         )}
         </div>
-        {variants.length > 1 && (
+        {(variants.length > 1 || faviconVariants.length > 1) && (
           <ApplyToAllBar
             applied={appliedToAll}
             onApply={applySelectedToAll}
-            showFavicon={faviconVariants.length > 0}
-            showLogo
+            showFavicon={faviconVariants.length > 1}
+            showLogo={variants.length > 1}
             title={
               isSyncedWithFavicon
                 ? 'Copy selected parts of this synced favicon/logo to the chosen apps’ variants'
@@ -1250,8 +1267,14 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                 <button
                   type="button"
                   onClick={copyIconFromFavicon}
-                  disabled={!matchingFaviconVariant}
-                  title="Copy favicon with the exact same variant name into this logo (works when unsynced)"
+                  disabled={!faviconSourceForCopy}
+                  title={
+                    matchingFaviconVariant
+                      ? `Copy favicon “${matchingFaviconVariant.label}” into this logo (unsyncs)`
+                      : faviconSourceForCopy
+                        ? `No exact-name twin — copy favicon “${faviconSourceForCopy.label}” into this logo (unsyncs)`
+                        : 'Add a favicon variant first'
+                  }
                   className="flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                 >
                   <ArrowDownToLine size={10} /> From favicon
@@ -1264,10 +1287,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                       return
                     }
                     if (isShowingFrozenSync) {
-                      updateConfig({
-                        iconSyncBroken: false,
-                        syncedIconSnapshot: null
-                      })
+                      keepFrozenAsCustom()
                       return
                     }
                     if (!canSyncWithFavicon || !matchingFaviconVariant) return
@@ -1288,10 +1308,12 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                     safeConfig.iconLinked
                       ? 'Unlink — use a custom logo icon'
                       : isShowingFrozenSync
-                        ? 'Return to the original logo icon'
+                        ? 'Keep this frozen look as an editable custom icon'
                       : canSyncWithFavicon
                         ? `Sync with favicon “${matchingFaviconVariant!.label}” (exact name match)`
-                        : 'Needs a favicon variant with the exact same name'
+                        : faviconSourceForCopy
+                          ? 'Rename this logo variant to match a favicon name to sync, or use From favicon'
+                          : 'Needs a favicon variant with the exact same name'
                   }
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-medium transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
                     isSyncedWithFavicon || isShowingFrozenSync
