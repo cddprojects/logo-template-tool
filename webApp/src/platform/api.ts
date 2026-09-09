@@ -32,6 +32,14 @@ const versionsReloadedListeners: Listener<unknown[]>[] = []
 let cachedWorkspace: { versions: unknown[]; history: unknown } | null = null
 /** Resolves once the in-flight auth workspace fetch finishes (success or failure). */
 let workspaceReady: Promise<void> = Promise.resolve()
+/** Serialize PUTs and always write the latest queued payload (avoid out-of-order overwrites). */
+let activeSave: Promise<void> | null = null
+let queuedSave: {
+  data: unknown[]
+  history: unknown
+  opts?: { keepalive?: boolean }
+  resolvers: Array<(result: { success: boolean; error?: string }) => void>
+} | null = null
 
 export function waitForWorkspace(): Promise<void> {
   return workspaceReady
@@ -57,6 +65,28 @@ function scheduleWorkspaceReload(): void {
   workspaceReady = reloadWorkspaceForListeners().catch((err) => {
     console.error('[web] workspace reload failed:', err)
   })
+}
+
+async function pumpWorkspaceSave(): Promise<void> {
+  if (activeSave) return
+  activeSave = (async () => {
+    while (queuedSave) {
+      const job = queuedSave
+      queuedSave = null
+      const result = await saveWorkspace(job.data, job.history, job.opts)
+      const payload = result.ok
+        ? { success: true as const }
+        : { success: false as const, error: result.error }
+      if (!result.ok) {
+        console.error('[web] failed to save workspace to server:', result.error)
+      }
+      job.resolvers.forEach((resolve) => resolve(payload))
+    }
+  })().finally(() => {
+    activeSave = null
+    if (queuedSave) void pumpWorkspaceSave()
+  })
+  await activeSave
 }
 
 async function fetchGoogleFont(
@@ -296,20 +326,28 @@ export function installWebApi(): void {
     ): Promise<{ success: boolean; error?: string }> => {
       // Always persist the latest known undo stack — never wipe server history
       // by omitting it when a caller only saves versions.
-      const nextHistory = history !== undefined ? history : cachedWorkspace?.history
-      if (history !== undefined && cachedWorkspace) {
-        cachedWorkspace = { ...cachedWorkspace, history }
-      } else if (history !== undefined) {
-        cachedWorkspace = { versions: data, history }
-      } else if (cachedWorkspace) {
-        cachedWorkspace = { ...cachedWorkspace, versions: data }
-      }
-      const result = await saveWorkspace(data, nextHistory, opts)
-      if (!result.ok) {
-        console.error('[web] failed to save workspace to server:', result.error)
-        return { success: false, error: result.error }
-      }
-      return { success: true }
+      const nextHistory =
+        history !== undefined ? history : (cachedWorkspace?.history ?? null)
+      // Keep versions + history in sync so later loads / coalesced saves see both.
+      cachedWorkspace = { versions: data, history: nextHistory }
+
+      return await new Promise<{ success: boolean; error?: string }>((resolve) => {
+        if (queuedSave) {
+          queuedSave.data = data
+          queuedSave.history = nextHistory
+          // Latest caller wins for transport hints (pagehide may request keepalive).
+          queuedSave.opts = opts
+          queuedSave.resolvers.push(resolve)
+        } else {
+          queuedSave = {
+            data,
+            history: nextHistory,
+            opts,
+            resolvers: [resolve]
+          }
+        }
+        void pumpWorkspaceSave()
+      })
     },
 
     fetchGoogleFont,

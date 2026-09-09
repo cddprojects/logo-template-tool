@@ -46,6 +46,21 @@ export function setAuthUser(user: AuthUser | null): void {
 const API_FETCH_TIMEOUT_MS = 8000
 /** Workspace payloads include undo history (full version snaps) and can be large. */
 const WORKSPACE_FETCH_TIMEOUT_MS = 60000
+/**
+ * Chromium rejects `fetch({ keepalive: true })` when the body is over ~64KiB.
+ * Workspace JSON with paint PNGs is almost always larger — only use keepalive
+ * under this budget; otherwise fall back to a normal request.
+ */
+const KEEP_ALIVE_MAX_BYTES = 60_000
+
+function requestBodyByteLength(body: BodyInit | null | undefined): number {
+  if (body == null) return 0
+  if (typeof body === 'string') return new TextEncoder().encode(body).length
+  if (typeof Blob !== 'undefined' && body instanceof Blob) return body.size
+  if (body instanceof ArrayBuffer) return body.byteLength
+  if (ArrayBuffer.isView(body)) return body.byteLength
+  return KEEP_ALIVE_MAX_BYTES + 1
+}
 
 async function api<T>(
   path: string,
@@ -57,15 +72,19 @@ async function api<T>(
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
   try {
     const { headers: initHeaders, signal: _ignoredSignal, ...restInit } = init ?? {}
+    const wantKeepalive = opts?.keepalive === true
+    const keepalive =
+      wantKeepalive && requestBodyByteLength(restInit.body ?? null) <= KEEP_ALIVE_MAX_BYTES
     const res = await fetch(path, {
       credentials: 'include',
       ...restInit,
-      keepalive: opts?.keepalive ?? false,
+      keepalive,
       headers: {
         'Content-Type': 'application/json',
         ...(initHeaders ?? {})
       },
-      signal: controller.signal
+      // Keepalive unload requests must not be tied to a page-lifetime abort timer.
+      signal: keepalive ? undefined : controller.signal
     })
     const text = await res.text()
     let body: unknown = null

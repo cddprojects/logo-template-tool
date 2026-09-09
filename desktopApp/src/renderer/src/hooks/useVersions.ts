@@ -473,14 +473,17 @@ export function useVersions(options?: {
     refreshMeta()
   }, [refreshMeta])
 
-  const flushPersist = useCallback(() => {
+  const flushPersist = useCallback((opts?: { keepalive?: boolean }) => {
     if (saveTimer.current) {
       clearTimeout(saveTimer.current)
       saveTimer.current = null
     }
     if (!loadedRef.current || !serverHydratedRef.current) return
-    const keepalive = isWebRuntime() ? { keepalive: true } : undefined
-    void window.api.saveVersions(versionsRef.current, serializeHistory(), keepalive).then((result) => {
+    // Keepalive is only useful on true unload and only for tiny bodies; tab-hide
+    // must use a normal PUT so large paint workspaces still save.
+    const saveOpts =
+      isWebRuntime() && opts?.keepalive ? { keepalive: true } : undefined
+    void window.api.saveVersions(versionsRef.current, serializeHistory(), saveOpts).then((result) => {
       if (result && result.success === false) {
         console.error('[versions] flush save failed:', result.error)
         onPersistErrorRef.current?.(result.error || 'Failed to save workspace')
@@ -583,9 +586,10 @@ export function useVersions(options?: {
       })
     })
 
-    // Web: flush pending workspace+history before the tab is discarded so undo
-    // survives refresh / close within the login session.
-    const onPageHide = () => flushPersist()
+    // Web: flush pending workspace before the tab is backgrounded / discarded.
+    // Visibility hide uses a normal request (page still alive). pagehide may try
+    // keepalive for tiny payloads; large bodies fall back to a normal PUT.
+    const onPageHide = () => flushPersist({ keepalive: true })
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') flushPersist()
     }
@@ -602,8 +606,11 @@ export function useVersions(options?: {
         saveTimer.current = null
       }
       if (loadedRef.current && serverHydratedRef.current) {
-        const keepalive = isWebRuntime() ? { keepalive: true } : undefined
-        void window.api.saveVersions(versionsRef.current, serializeHistory(), keepalive)
+        void window.api.saveVersions(
+          versionsRef.current,
+          serializeHistory(),
+          isWebRuntime() ? { keepalive: true } : undefined
+        )
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -613,9 +620,11 @@ export function useVersions(options?: {
     if (!loadedRef.current || !serverHydratedRef.current) return
     dirtySinceHydrateRef.current = true
     if (saveTimer.current) clearTimeout(saveTimer.current)
+    // Always flush the latest versionsRef when the timer fires — not the
+    // possibly-stale `next` captured when an older debounce was scheduled.
     saveTimer.current = setTimeout(() => {
       saveTimer.current = null
-      void window.api.saveVersions(next, serializeHistory()).then((result) => {
+      void window.api.saveVersions(versionsRef.current, serializeHistory()).then((result) => {
         if (result && result.success === false) {
           console.error('[versions] save failed:', result.error)
           onPersistErrorRef.current?.(result.error || 'Failed to save workspace')
