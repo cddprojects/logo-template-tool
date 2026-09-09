@@ -46,6 +46,7 @@ import {
   ShapeGrid,
   FontSelect,
   WeightSelect,
+  FontStyleRow,
   NumberInputRow,
   OuterCategoryTabs,
   ExportNameStyleToggle,
@@ -1203,21 +1204,12 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             <ToggleRow label="Same text on all variants" value={safeConfig.textShared ?? false} onChange={toggleTitleShared} />
             <FontSelect label="Font" value={safeConfig.fontFamily} onChange={(v) => updateConfig({ fontFamily: v })} />
             <WeightSelect label="Weight" value={safeConfig.fontWeight} onChange={(v) => updateConfig({ fontWeight: v })} />
-            <div className="flex items-center gap-2 py-1.5 min-w-0">
-              <label className="text-xs text-muted w-20 min-w-[5rem] shrink-0">Style</label>
-              <div className="flex gap-1">
-                <button
-                  onClick={() => updateConfig({ fontItalic: !(safeConfig.fontItalic ?? false) })}
-                  title="Italic"
-                  className={`w-8 h-7 rounded text-xs font-medium italic transition-colors ${(safeConfig.fontItalic ?? false) ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'}`}
-                >I</button>
-                <button
-                  onClick={() => updateConfig({ fontUnderline: !(safeConfig.fontUnderline ?? false) })}
-                  title="Underline"
-                  className={`w-8 h-7 rounded text-xs font-medium underline transition-colors ${(safeConfig.fontUnderline ?? false) ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'}`}
-                >U</button>
-              </div>
-            </div>
+            <FontStyleRow
+              italic={!!(safeConfig.fontItalic ?? false)}
+              underline={!!(safeConfig.fontUnderline ?? false)}
+              onItalicChange={(v) => updateConfig({ fontItalic: v })}
+              onUnderlineChange={(v) => updateConfig({ fontUnderline: v })}
+            />
             <SliderRow label="Size" value={safeConfig.fontSize} min={10} max={120} onChange={(v) => updateConfig({ fontSize: v })} unit="px" />
             <SliderRow label="Text spacing" value={safeConfig.letterSpacing ?? 0} min={-10} max={40} onChange={(v) => updateConfig({ letterSpacing: v })} unit="px" />
             <ColorRow label="Color" value={safeConfig.textColor} onChange={(v) => updateConfig({ textColor: v })} />
@@ -1238,21 +1230,12 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             <ToggleRow label="Same subtitle on all variants" value={safeConfig.secondaryTextShared ?? false} onChange={toggleSubtitleShared} />
             <FontSelect label="Font" value={safeConfig.secondaryFontFamily} onChange={(v) => updateConfig({ secondaryFontFamily: v })} />
             <WeightSelect label="Weight" value={safeConfig.secondaryFontWeight} onChange={(v) => updateConfig({ secondaryFontWeight: v })} />
-            <div className="flex items-center gap-2 py-1.5 min-w-0">
-              <label className="text-xs text-muted w-20 min-w-[5rem] shrink-0">Style</label>
-              <div className="flex gap-1">
-                <button
-                  onClick={() => updateConfig({ secondaryFontItalic: !(safeConfig.secondaryFontItalic ?? false) })}
-                  title="Italic"
-                  className={`w-8 h-7 rounded text-xs font-medium italic transition-colors ${(safeConfig.secondaryFontItalic ?? false) ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'}`}
-                >I</button>
-                <button
-                  onClick={() => updateConfig({ secondaryFontUnderline: !(safeConfig.secondaryFontUnderline ?? false) })}
-                  title="Underline"
-                  className={`w-8 h-7 rounded text-xs font-medium underline transition-colors ${(safeConfig.secondaryFontUnderline ?? false) ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'}`}
-                >U</button>
-              </div>
-            </div>
+            <FontStyleRow
+              italic={!!(safeConfig.secondaryFontItalic ?? false)}
+              underline={!!(safeConfig.secondaryFontUnderline ?? false)}
+              onItalicChange={(v) => updateConfig({ secondaryFontItalic: v })}
+              onUnderlineChange={(v) => updateConfig({ secondaryFontUnderline: v })}
+            />
             <SliderRow label="Size" value={safeConfig.secondaryFontSize} min={8} max={80} onChange={(v) => updateConfig({ secondaryFontSize: v })} unit="px" />
             <SliderRow label="Text spacing" value={safeConfig.secondaryLetterSpacing ?? 0} min={-10} max={40} onChange={(v) => updateConfig({ secondaryLetterSpacing: v })} unit="px" />
             <ColorRow label="Color" value={safeConfig.secondaryTextColor} onChange={(v) => updateConfig({ secondaryTextColor: v })} />
@@ -1379,21 +1362,12 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                     <TextRow label="Text" value={safeConfig.icon.text ?? ''} placeholder="A" onChange={(v) => setIcon({ text: v })} />
                     <FontSelect label="Font" value={safeConfig.icon.fontFamily ?? 'Inter'} onChange={(v) => setIcon({ fontFamily: v })} />
                     <WeightSelect label="Weight" value={safeConfig.icon.fontWeight ?? '700'} onChange={(v) => setIcon({ fontWeight: v })} />
-                    <div className="flex items-center gap-2 py-1.5 min-w-0">
-                      <label className="text-xs text-muted w-20 min-w-[5rem] shrink-0">Style</label>
-                      <div className="flex gap-1">
-                        <button
-                          onClick={() => setIcon({ fontItalic: !(safeConfig.icon.fontItalic ?? false) })}
-                          title="Italic"
-                          className={`w-8 h-7 rounded text-xs font-medium italic transition-colors ${(safeConfig.icon.fontItalic ?? false) ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'}`}
-                        >I</button>
-                        <button
-                          onClick={() => setIcon({ fontUnderline: !(safeConfig.icon.fontUnderline ?? false) })}
-                          title="Underline"
-                          className={`w-8 h-7 rounded text-xs font-medium underline transition-colors ${(safeConfig.icon.fontUnderline ?? false) ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'}`}
-                        >U</button>
-                      </div>
-                    </div>
+                    <FontStyleRow
+                      italic={!!(safeConfig.icon.fontItalic ?? false)}
+                      underline={!!(safeConfig.icon.fontUnderline ?? false)}
+                      onItalicChange={(v) => setIcon({ fontItalic: v })}
+                      onUnderlineChange={(v) => setIcon({ fontUnderline: v })}
+                    />
                     <SliderRow label="Size %" value={Math.round((safeConfig.icon.fontSizeRatio ?? 0.52) * 100)} min={20} max={90} onChange={(v) => setIcon({ fontSizeRatio: v / 100 })} unit="%" />
                     <SliderRow label="Text spacing" value={safeConfig.icon.letterSpacing ?? 0} min={-10} max={40} onChange={(v) => setIcon({ letterSpacing: v })} unit="px" />
                     <ColorRow label="Color" value={safeConfig.icon.textColor ?? '#ffffff'} onChange={(v) => setIcon({ textColor: v })} />

@@ -150,35 +150,38 @@ export const TransparentFillModeContext = React.createContext<{
 export function TransparentFillToggle({
   mode,
   onChange,
-  showLabel = true
+  showLabel = true,
+  compact = false
 }: {
   mode: TransparentFillMode
   onChange: (mode: TransparentFillMode) => void
   showLabel?: boolean
+  /** Side-panel rows: short ST / PH labels. */
+  compact?: boolean
 }): JSX.Element {
   return (
-    <div className="flex items-center gap-1.5 min-w-0">
-      {showLabel && <span className="text-[11px] text-muted shrink-0">Transparent</span>}
-      <div className="flex items-center rounded-lg border border-border overflow-hidden">
+    <div className={`flex items-center gap-1.5 min-w-0 ${compact ? 'justify-end' : ''}`}>
+      {showLabel && !compact && <span className="text-[11px] text-muted shrink-0">Transparent</span>}
+      <div className="flex items-center rounded-lg border border-border overflow-hidden shrink-0">
         <button
           type="button"
           onClick={() => onChange('see-through')}
-          title="Hide this fill so layers below show through"
+          title="Hide this fill so layers below show through (See-through)"
           className={`px-2 py-1 text-[11px] font-medium transition-colors ${
             mode === 'see-through' ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
           }`}
         >
-          See-through
+          {compact ? 'ST' : 'See-through'}
         </button>
         <button
           type="button"
           onClick={() => onChange('punch')}
-          title="Cut a hole through every layer below this fill. Layers above still show."
+          title="Cut a hole through every layer below this fill. Layers above still show. (Punch hole)"
           className={`px-2 py-1 text-[11px] font-medium transition-colors ${
             mode === 'punch' ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
           }`}
         >
-          Punch hole
+          {compact ? 'PH' : 'Punch hole'}
         </button>
       </div>
       <span className="relative group/punchinfo inline-flex items-center shrink-0">
@@ -189,7 +192,7 @@ export function TransparentFillToggle({
         />
         <span
           role="tooltip"
-          className="pointer-events-none absolute left-1/2 bottom-full z-50 mb-1.5 w-56 -translate-x-1/2 rounded-md border border-border bg-surface px-2.5 py-2 text-[10px] leading-snug text-text opacity-0 shadow-lg transition-opacity group-hover/punchinfo:opacity-100"
+          className="pointer-events-none absolute right-0 bottom-full z-50 mb-1.5 w-56 rounded-md border border-border bg-surface px-2.5 py-2 text-[10px] leading-snug text-text opacity-0 shadow-lg transition-opacity group-hover/punchinfo:opacity-100"
         >
           Punch holes are cleared if you change the text or shape. Moving, rotating, or scaling the same object keeps them.
         </span>
@@ -354,8 +357,7 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
   const activeTab = solidOnly ? 'solid' : tab
   const punchCtx = React.useContext(TransparentFillModeContext)
   const showPunchToggle = !!punchCtx && activeTab === 'solid' && isZeroAlphaHex(solidHex)
-  const POPUP_H = (activeTab === 'solid' ? (solidOnly ? 72 : 100) : activeTab === 'linear' ? 248 : 272) +
-    (showPunchToggle ? 36 : 0)
+  const POPUP_H = (activeTab === 'solid' ? (solidOnly ? 72 : 100) : activeTab === 'linear' ? 248 : 272)
   const left = Math.min(rect.left, window.innerWidth - POPUP_W - 8)
   const topBelow = rect.bottom + 6
   const top = topBelow + POPUP_H > window.innerHeight - 8 ? rect.top - POPUP_H - 6 : topBelow
@@ -433,10 +435,17 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
               className="flex-1 min-w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs font-mono focus:outline-none focus:border-accent"
               maxLength={9}
             />
+            {showPunchToggle && punchCtx && (
+              <div className="ml-auto shrink-0">
+                <TransparentFillToggle
+                  mode={punchCtx.mode}
+                  onChange={punchCtx.setMode}
+                  showLabel={false}
+                  compact
+                />
+              </div>
+            )}
           </div>
-          {showPunchToggle && punchCtx && (
-            <TransparentFillToggle mode={punchCtx.mode} onChange={punchCtx.setMode} showLabel={false} />
-          )}
         </div>
       )}
 
@@ -640,8 +649,7 @@ export function ColorRow({ label, value, onChange, solidOnly = false }: ColorRow
 
   return (
     <Row label={label}>
-      <div className="flex flex-col gap-1.5 min-w-0">
-      <div className="flex items-center gap-2 min-w-0">
+      <div className="flex items-center gap-2 min-w-0 w-full">
         {/* Swatch — shows gradient or solid color, opens popup */}
         <button
           ref={swatchRef}
@@ -683,6 +691,17 @@ export function ColorRow({ label, value, onChange, solidOnly = false }: ColorRow
           />
         )}
 
+        {showPunchToggle && punchCtx && (
+          <div className="ml-auto shrink-0">
+            <TransparentFillToggle
+              mode={punchCtx.mode}
+              onChange={punchCtx.setMode}
+              showLabel={false}
+              compact
+            />
+          </div>
+        )}
+
         {open && anchorRect && (
           <ColorPickerPopup
             value={effectiveValue}
@@ -693,9 +712,48 @@ export function ColorRow({ label, value, onChange, solidOnly = false }: ColorRow
           />
         )}
       </div>
-      {showPunchToggle && punchCtx && (
-        <TransparentFillToggle mode={punchCtx.mode} onChange={punchCtx.setMode} showLabel={false} />
-      )}
+    </Row>
+  )
+}
+
+// ── Font italic / underline ────────────────────────────────────────────────────
+
+interface FontStyleRowProps {
+  italic: boolean
+  underline: boolean
+  onItalicChange: (v: boolean) => void
+  onUnderlineChange: (v: boolean) => void
+}
+
+export function FontStyleRow({
+  italic,
+  underline,
+  onItalicChange,
+  onUnderlineChange
+}: FontStyleRowProps): JSX.Element {
+  return (
+    <Row label="Style">
+      <div className="flex gap-1">
+        <button
+          type="button"
+          onClick={() => onItalicChange(!italic)}
+          title="Italic"
+          className={`w-8 h-7 rounded text-xs font-medium italic transition-colors ${
+            italic ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+          }`}
+        >
+          I
+        </button>
+        <button
+          type="button"
+          onClick={() => onUnderlineChange(!underline)}
+          title="Underline"
+          className={`w-8 h-7 rounded text-xs font-medium underline transition-colors ${
+            underline ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+          }`}
+        >
+          U
+        </button>
       </div>
     </Row>
   )

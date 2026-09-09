@@ -5,7 +5,7 @@ import { FAVICON_SHAPE_OPTIONS, faviconOuterCategory, DEFAULT_ICON_CONFIG } from
 import { bakeFaviconPaintContentLayer, renderFavicon, faviconInnerDrawSize } from '../utils/renderer'
 import { exportFaviconPng, exportFaviconSvg, exportFaviconIco, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
-import { Section, ColorRow, TransparentFillModeContext, SliderRow, ToggleRow, SelectRow, FontSelect, WeightSelect, TextRow, TextareaRow, ShapeGrid, NumberInputRow, AiImageGenPanel, RemoveBgButton, OuterCategoryTabs, ExportNameStyleToggle, ImageRecolorControls } from './Controls'
+import { Section, ColorRow, TransparentFillModeContext, SliderRow, ToggleRow, SelectRow, FontSelect, WeightSelect, FontStyleRow, TextRow, TextareaRow, ShapeGrid, NumberInputRow, AiImageGenPanel, RemoveBgButton, OuterCategoryTabs, ExportNameStyleToggle, ImageRecolorControls } from './Controls'
 import { IconPicker } from './IconPicker'
 import { PreviewStage } from './PreviewStage'
 import { StylePanelResizeHandle } from './StylePanelResizeHandle'
@@ -1178,21 +1178,12 @@ export function FaviconEditor({
                 <TextRow label="Text" value={config.content.text} placeholder="A" onChange={(v) => setContent({ text: v })} />
                 <FontSelect label="Font" value={config.content.fontFamily} onChange={(v) => setContent({ fontFamily: v })} />
                 <WeightSelect label="Weight" value={config.content.fontWeight} onChange={(v) => setContent({ fontWeight: v })} />
-                <div className="flex items-center gap-2 py-1.5 min-w-0">
-                  <label className="text-xs text-muted w-20 min-w-[5rem] shrink-0">Style</label>
-                  <div className="flex gap-1">
-                    <button
-                      onClick={() => setContent({ fontItalic: !(config.content.fontItalic ?? false) })}
-                      title="Italic"
-                      className={`w-8 h-7 rounded text-xs font-medium italic transition-colors ${(config.content.fontItalic ?? false) ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'}`}
-                    >I</button>
-                    <button
-                      onClick={() => setContent({ fontUnderline: !(config.content.fontUnderline ?? false) })}
-                      title="Underline"
-                      className={`w-8 h-7 rounded text-xs font-medium underline transition-colors ${(config.content.fontUnderline ?? false) ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'}`}
-                    >U</button>
-                  </div>
-                </div>
+                <FontStyleRow
+                  italic={!!(config.content.fontItalic ?? false)}
+                  underline={!!(config.content.fontUnderline ?? false)}
+                  onItalicChange={(v) => setContent({ fontItalic: v })}
+                  onUnderlineChange={(v) => setContent({ fontUnderline: v })}
+                />
                 <SliderRow label="Size %" value={Math.round(config.content.fontSizeRatio * 100)} min={20} max={contentSizeMax} onChange={(v) => setContent({ fontSizeRatio: v / 100 })} unit="%" />
                 <SliderRow label="Text spacing" value={config.content.letterSpacing ?? 0} min={-10} max={40} onChange={(v) => setContent({ letterSpacing: v })} unit="px" />
                 <ColorRow label="Color" value={config.content.textColor} onChange={(v) => setContent({ textColor: v })} />
