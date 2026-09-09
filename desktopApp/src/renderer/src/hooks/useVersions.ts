@@ -335,6 +335,38 @@ function migrateVersion(raw: Record<string, unknown>): Version {
   }
 }
 
+/**
+ * Ensure a version name is unique among `taken` (case-insensitive).
+ * First keeps the name; further collisions become "Name (2)", "Name (3)", …
+ */
+function uniqueVersionName(desired: string, taken: Iterable<string>): string {
+  const used = new Set(
+    [...taken].map((n) => n.trim().toLowerCase()).filter(Boolean)
+  )
+  const trimmed = desired.trim() || 'Untitled'
+  if (!used.has(trimmed.toLowerCase())) return trimmed
+  const stem = trimmed.replace(/\s*\((\d+)\)$/, '').trim() || trimmed
+  let n = 2
+  while (used.has(`${stem} (${n})`.toLowerCase())) n++
+  return `${stem} (${n})`
+}
+
+/** First occurrence keeps its name; later duplicates get (2), (3), … */
+function disambiguateVersionNames(list: Version[]): Version[] {
+  const used: string[] = []
+  let changed = false
+  const next = list.map((v) => {
+    const name = uniqueVersionName(v.name || 'Untitled', used)
+    used.push(name)
+    if (name !== v.name) {
+      changed = true
+      return { ...v, name }
+    }
+    return v
+  })
+  return changed ? next : list
+}
+
 function migrateSnap(raw: unknown): Snap | null {
   if (!raw || typeof raw !== 'object') return null
   const snap = raw as { state?: unknown; label?: unknown; time?: unknown }
@@ -479,12 +511,15 @@ export function useVersions() {
       if (cancelled) return
       serverHydratedRef.current = true
       dirtySinceHydrateRef.current = false
-      setVersionsState(migrated)
-      versionsRef.current = migrated
+      const unique = disambiguateVersionNames(migrated)
+      setVersionsState(unique)
+      versionsRef.current = unique
       loadedRef.current = true
       setLoaded(true)
       window.clearTimeout(loadTimeout)
       restoreHistoryLater(historyRaw)
+      // Persist renamed duplicates so the list stays unique after reload.
+      if (unique !== migrated) persist(unique)
     }
 
     window.api.loadVersions().then(async (raw) => {
@@ -510,7 +545,12 @@ export function useVersions() {
       const version = migrateVersion(raw as Record<string, unknown>)
       setVersionsState((prev) => {
         if (prev.some((v) => v.id === version.id)) return prev
-        const next = [...prev, version]
+        const name = uniqueVersionName(
+          version.name || 'Untitled',
+          prev.map((v) => v.name)
+        )
+        const nextVersion = name === version.name ? version : { ...version, name }
+        const next = [...prev, nextVersion]
         versionsRef.current = next
         if (loadedRef.current) persist(next)
         return next
@@ -524,13 +564,15 @@ export function useVersions() {
       }
       const list = Array.isArray(raw) ? raw : []
       const migrated = list.map(migrateVersion)
+      const unique = disambiguateVersionNames(migrated)
       serverHydratedRef.current = true
       dirtySinceHydrateRef.current = false
       loadedRef.current = true
-      setVersionsState(migrated)
-      versionsRef.current = migrated
+      setVersionsState(unique)
+      versionsRef.current = unique
       setLoaded(true)
       window.clearTimeout(loadTimeout)
+      if (unique !== migrated) persist(unique)
       void window.api.loadUndoHistory().then(restoreHistoryLater).catch((err) => {
         console.error('[versions] reload history failed:', err)
       })
@@ -611,16 +653,17 @@ export function useVersions() {
   const createVersion = useCallback(
     (name: string, description: string): Version => {
       const current = versionsRef.current
+      const uniqueName = uniqueVersionName(name, current.map((v) => v.name))
       const version: Version = {
         id: `v_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-        name,
+        name: uniqueName,
         description,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
-        logos: [makeLogoVariant(name)],
-        favicons: [makeFaviconVariant(name)]
+        logos: [makeLogoVariant(uniqueName)],
+        favicons: [makeFaviconVariant(uniqueName)]
       }
-      commit([...current, version], `Create "${name}"`)
+      commit([...current, version], `Create "${uniqueName}"`)
       return version
     },
     [commit]
@@ -632,7 +675,8 @@ export function useVersions() {
   const importImageVersion = useCallback(
     (name: string, imageDataUrl: string): Version => {
       const current = versionsRef.current
-      const favVariant = makeFaviconVariant(name)
+      const uniqueName = uniqueVersionName(name, current.map((v) => v.name))
+      const favVariant = makeFaviconVariant(uniqueName)
       favVariant.config = {
         ...favVariant.config,
         outerShape: 'none',
@@ -644,7 +688,7 @@ export function useVersions() {
           imageSizeRatio: 1
         }
       }
-      const logoVariant = makeLogoVariant(name)
+      const logoVariant = makeLogoVariant(uniqueName)
       logoVariant.config = {
         ...logoVariant.config,
         iconLinked: false,
@@ -658,14 +702,14 @@ export function useVersions() {
       }
       const version: Version = {
         id: `v_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-        name,
+        name: uniqueName,
         description: 'Imported image',
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         logos: [logoVariant],
         favicons: [favVariant]
       }
-      commit([...current, version], `Import "${name}"`)
+      commit([...current, version], `Import "${uniqueName}"`)
       return version
     },
     [commit]
@@ -677,8 +721,13 @@ export function useVersions() {
       const version = migrateVersion(
         versionFromIgTemplate(data, fallbackName) as Record<string, unknown>
       )
-      commit([...current, version], `Import "${version.name}"`)
-      return version
+      const uniqueName = uniqueVersionName(
+        version.name || fallbackName || 'Untitled',
+        current.map((v) => v.name)
+      )
+      const named = uniqueName === version.name ? version : { ...version, name: uniqueName }
+      commit([...current, named], `Import "${named.name}"`)
+      return named
     },
     [commit]
   )
@@ -687,8 +736,15 @@ export function useVersions() {
     (id: string, updates: Partial<Version>, actionLabel?: string) => {
       const current = versionsRef.current
       const prevVersion = current.find((v) => v.id === id)
+      const patch = { ...updates }
+      if (typeof patch.name === 'string') {
+        patch.name = uniqueVersionName(
+          patch.name,
+          current.filter((v) => v.id !== id).map((v) => v.name)
+        )
+      }
       const newState = current.map((v) =>
-        v.id === id ? { ...v, ...updates, updatedAt: new Date().toISOString() } : v
+        v.id === id ? { ...v, ...patch, updatedAt: new Date().toISOString() } : v
       )
       const nextVersion = newState.find((v) => v.id === id)
       // Keep the ref in sync immediately so back-to-back updates (e.g. paint
@@ -744,10 +800,14 @@ export function useVersions() {
       const current = versionsRef.current
       const source = current.find((v) => v.id === id)
       if (!source) return null
+      const uniqueName = uniqueVersionName(
+        source.name || 'Untitled',
+        current.map((v) => v.name)
+      )
       const copy: Version = {
         ...source,
         id: `v_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-        name: `${source.name} (copy)`,
+        name: uniqueName,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       }
