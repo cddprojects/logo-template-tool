@@ -10392,7 +10392,6 @@ export function IconPaintEditor({
     { key: 'brush', icon: <Brush size={16} />, label: 'Brush' },
     { key: 'eraser', icon: <Eraser size={16} />, label: 'Eraser' },
     { key: 'fill', icon: <PaintBucket size={16} />, label: 'Fill' },
-    { key: 'match', icon: <Tags size={16} />, label: 'Match — assign Color 1–5 marks on the Inner uploaded image' },
     { key: 'eyedropper', icon: <Pipette size={16} />, label: 'Pick colour' },
     { key: 'line', icon: <Minus size={16} />, label: 'Line' },
     { key: 'text', icon: <TypeIcon size={16} />, label: 'Text' },
@@ -10664,29 +10663,18 @@ export function IconPaintEditor({
       <div className="h-11 flex items-center gap-3 px-4 flex-nowrap overflow-x-auto">
         {/* Tools */}
         <div className="flex items-center gap-1 shrink-0">
-          {TOOLS.map((t) => {
-            const matchDisabled = t.key === 'match' && !imageMatchTarget
-            return (
+          {TOOLS.map((t) => (
             <button
               key={t.key}
-              onClick={() => {
-                if (matchDisabled) return
-                setTool(t.key)
-              }}
-              title={
-                matchDisabled
-                  ? 'Match — select only the Inner uploaded image'
-                  : t.label
-              }
-              disabled={matchDisabled}
+              onClick={() => setTool(t.key)}
+              title={t.label}
               className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
                 tool === t.key ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
-              } disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-muted`}
+              }`}
             >
               {t.icon}
             </button>
-            )
-          })}
+          ))}
 
           {/* Polygon shapes group */}
           <div className="relative">
@@ -11270,6 +11258,17 @@ export function IconPaintEditor({
           {imageMatchTarget && (
             <>
               <div className="w-px h-6 bg-border shrink-0" />
+              <button
+                type="button"
+                title="Match — assign Color 1–5 marks on this image (click sections; click again to unmark)"
+                onClick={() => setTool((t) => (t === 'match' ? 'pointer' : 'match'))}
+                className={`h-8 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium shrink-0 transition-colors ${
+                  tool === 'match' ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+                }`}
+              >
+                <Tags size={14} />
+                Match
+              </button>
               <span className="text-[10px] text-muted shrink-0" title="Same as Style → Image colours">
                 Color 1–5
               </span>
