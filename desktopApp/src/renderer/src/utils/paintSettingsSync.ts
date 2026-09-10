@@ -2770,24 +2770,26 @@ export function buildPaintContentSync(opts: {
     opts.contentOverlay &&
     canvasHasOpaquePaint(opts.contentOverlay)
   ) {
-    const innerComposite = document.createElement('canvas')
-    innerComposite.width = res
-    innerComposite.height = res
-    const ix = innerComposite.getContext('2d')
-    if (ix) {
-      if (opts.contentBase) ix.drawImage(opts.contentBase, 0, 0)
-      ix.drawImage(opts.contentOverlay, 0, 0)
-      const color = sampleDominantOpaqueColor(innerComposite)
-      if (color) sync.fillColor = color
-    }
-    // Heavy Inner Fill often paints over a baked content border; clear the live
-    // border so it does not reappear as an outline outside Paint.
-    // Also drop the content overlay when it largely covers the live Inner — hand
-    // the colour to live settings (same as Outer Fill → clearOuterOverlay) so
-    // Apply→Colour cannot paste a full-face contentPng that looks like Outer bg.
-    if (opts.contentBase) {
-      const cover = overlayCoverRatio(opts.contentBase, opts.contentOverlay)
-      if (cover >= 0.35) {
+    // Near-complete coverage → hand colour to live settings and drop the overlay
+    // (same idea as Outer Fill → clearOuterOverlay). Partial fills must keep
+    // contentPng: a background flood that leaves an enclosed island would otherwise
+    // set live fillColor / clear the overlay and paint that island on Save.
+    const cover = opts.contentBase
+      ? overlayCoverRatio(opts.contentBase, opts.contentOverlay)
+      : 1
+    const FULL_INNER_COVER = 0.95
+    if (cover >= FULL_INNER_COVER) {
+      const innerComposite = document.createElement('canvas')
+      innerComposite.width = res
+      innerComposite.height = res
+      const ix = innerComposite.getContext('2d')
+      if (ix) {
+        if (opts.contentBase) ix.drawImage(opts.contentBase, 0, 0)
+        ix.drawImage(opts.contentOverlay, 0, 0)
+        const color = sampleDominantOpaqueColor(innerComposite)
+        if (color) sync.fillColor = color
+      }
+      if (opts.contentBase) {
         sync.clearContentBorder = true
         sync.clearContentOverlay = true
       }

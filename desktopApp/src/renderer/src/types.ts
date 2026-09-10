@@ -676,10 +676,9 @@ export interface PaintContentSync {
    */
   clearContentBorder?: boolean
   /**
-   * True when Inner Fill was a solid recolour of live content — clear the
-   * content overlay so live fillColor / textColor owns the colour (same idea
-   * as clearOuterOverlay). Leaving a full-face contentPng makes Apply→Colour
-   * look like it recolored the Outer background.
+   * True when Inner Fill covered nearly all live content (≥ ~95%) — clear the
+   * content overlay so live fillColor owns the colour. Partial fills (enclosed
+   * islands left unpainted) keep contentPng instead.
    */
   clearContentOverlay?: boolean
 }
