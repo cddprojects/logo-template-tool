@@ -101,20 +101,27 @@ export function runDataBackup(dataDir, liveDb = null) {
 
   copyDirIfExists(workspaceDir, path.join(destDir, 'workspace'))
   copyDirIfExists(templatesDir, path.join(destDir, 'templates'))
+  const { workspaceAssetsDir } = getDataPaths(dataDir)
+  copyDirIfExists(workspaceAssetsDir, path.join(destDir, 'workspace-assets'))
 
   const manifest = {
     stamp,
     createdAt: new Date().toISOString(),
     dbBytes: fs.existsSync(backupDbPath) ? fs.statSync(backupDbPath).size : 0,
     workspaceFiles: countFiles(path.join(destDir, 'workspace'), '.json'),
-    templateFiles: countFiles(path.join(destDir, 'templates'), '.igtemplate')
+    templateFiles: countFiles(path.join(destDir, 'templates'), '.igtemplate'),
+    assetFiles: countFiles(path.join(destDir, 'workspace-assets'))
   }
   fs.writeFileSync(path.join(destDir, 'manifest.json'), JSON.stringify(manifest, null, 2))
   fs.writeFileSync(completeFile, stamp)
 
   pruneOldBackups(root, getBackupConfig().retainWeeks)
 
-  console.log('[backup] saved', destDir, `(workspace ${manifest.workspaceFiles}, templates ${manifest.templateFiles})`)
+  console.log(
+    '[backup] saved',
+    destDir,
+    `(workspace ${manifest.workspaceFiles}, templates ${manifest.templateFiles}, assets ${manifest.assetFiles})`
+  )
   return { ok: true, skipped: false, destDir, stamp, manifest }
 }
 

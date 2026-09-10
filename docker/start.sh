@@ -2,7 +2,7 @@
 set -eu
 
 DATA_ROOT="${DATA_DIR:-/data}"
-mkdir -p "${DATA_ROOT}/templates" /run/nginx /var/log/nginx
+mkdir -p "${DATA_ROOT}/templates" "${DATA_ROOT}/workspace" "${DATA_ROOT}/workspace-assets" /run/nginx /var/log/nginx
 
 echo "[start] DATA_DIR=${DATA_ROOT}"
 if [ -f "${DATA_ROOT}/app.sqlite" ]; then

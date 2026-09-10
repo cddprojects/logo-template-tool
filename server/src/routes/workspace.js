@@ -3,6 +3,14 @@ import fs from 'fs'
 import path from 'path'
 import { requireAuth } from '../auth.js'
 import { workspaceFilePath } from '../db.js'
+import {
+  extractAssetsFromValue,
+  rehydrateAssetsInValue,
+  putAssetFromDataUrl,
+  putAssetFromBuffer,
+  assetExists,
+  removeUserAssets
+} from '../workspaceAssets.js'
 
 function backupPath(file) {
   return `${file}.bak`
@@ -138,9 +146,57 @@ function writeWorkspace(file, payload) {
   }
 }
 
+const HASH_RE = /^[a-f0-9]{64}$/i
+
 export function workspaceRoutes(_db, dataDir) {
   const router = Router()
   router.use(requireAuth(_db))
+
+  router.put('/assets/:hash', (req, res) => {
+      const hash = String(req.params.hash || '').toLowerCase()
+      if (!HASH_RE.test(hash)) {
+        res.status(400).json({ error: 'hash must be sha256 hex' })
+        return
+      }
+      try {
+        const userId = req.user.id
+        if (assetExists(dataDir, userId, hash)) {
+          res.json({ ok: true, hash, existed: true })
+          return
+        }
+        let result
+        if (typeof req.body?.dataUrl === 'string') {
+          result = putAssetFromDataUrl(dataDir, userId, req.body.dataUrl)
+        } else if (typeof req.body?.base64 === 'string') {
+          const buf = Buffer.from(req.body.base64, 'base64')
+          result = putAssetFromBuffer(dataDir, userId, req.body.mime, buf, 'b64')
+        } else if (typeof req.body?.text === 'string') {
+          result = putAssetFromBuffer(
+            dataDir,
+            userId,
+            req.body.mime || 'image/svg+xml',
+            Buffer.from(req.body.text, 'utf8'),
+            'utf8'
+          )
+        } else {
+          res.status(400).json({ error: 'Provide dataUrl, base64, or text' })
+          return
+        }
+        if (result.hash !== hash) {
+          res.status(400).json({
+            error: 'Hash mismatch',
+            expected: hash,
+            actual: result.hash
+          })
+          return
+        }
+        res.json({ ok: true, hash, ref: result.ref, bytes: result.bytes, existed: false })
+      } catch (e) {
+        console.error('[workspace-assets] upload failed', e)
+        res.status(500).json({ error: 'Failed to store asset', detail: String(e?.message || e) })
+      }
+    })
+
 
   router.get('/', (req, res) => {
     const file = workspaceFilePath(dataDir, req.user.id)
@@ -150,12 +206,19 @@ export function workspaceRoutes(_db, dataDir) {
       const raw = readWorkspaceFile(file)
       if (raw.versions.length === 0 && raw.cleared !== true) {
         try {
+          // Extract any legacy inline blobs before writing recovery.
+          const extracted = extractAssetsFromValue(
+            dataDir,
+            req.user.id,
+            structuredClone(versions)
+          )
           writeWorkspace(file, {
-            versions,
+            versions: extracted.value,
             history: slimHistory(history ?? raw.history),
             updatedAt: new Date().toISOString(),
             cleared: false
           })
+          versions = extracted.value
           updatedAt = new Date().toISOString()
           cleared = false
         } catch (e) {
@@ -163,9 +226,10 @@ export function workspaceRoutes(_db, dataDir) {
         }
       }
     }
-    // Never send multi-MB undo snaps back to the browser.
+    // Expand asset refs so the renderer receives the same data: URLs as before.
+    const hydrated = rehydrateAssetsInValue(dataDir, req.user.id, structuredClone(versions))
     res.json({
-      versions,
+      versions: hydrated,
       history: slimHistory(history),
       updatedAt,
       cleared: cleared === true
@@ -193,16 +257,26 @@ export function workspaceRoutes(_db, dataDir) {
     const history = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'history')
       ? slimHistory(req.body.history)
       : slimHistory(existing.history)
-    const payload = {
-      versions,
-      history,
-      updatedAt,
-      // So GET does not resurrect deleted versions from undo history / .bak.
-      cleared: versions.length === 0
-    }
+
     try {
+      // Defense in depth: extract any remaining inline data: blobs (old clients /
+      // missed fields). Prefer client-side upload first so the PUT stays small.
+      const extracted = extractAssetsFromValue(dataDir, req.user.id, structuredClone(versions))
+      const payload = {
+        versions: extracted.value,
+        history,
+        updatedAt,
+        cleared: versions.length === 0
+      }
       writeWorkspace(file, payload)
-      res.json({ ok: true, updatedAt })
+      if (versions.length === 0) {
+        try {
+          removeUserAssets(dataDir, req.user.id)
+        } catch (e) {
+          console.warn('[workspace] failed to clear assets on empty save', e)
+        }
+      }
+      res.json({ ok: true, updatedAt, assets: extracted.refs.size })
     } catch (e) {
       console.error('[workspace] failed to save', path.basename(file), e)
       res.status(500).json({

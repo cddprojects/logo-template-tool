@@ -2,7 +2,7 @@ import { Router } from 'express'
 import fs from 'fs'
 import { nanoid } from 'nanoid'
 import { hashPassword, publicUser, requireAdmin, requireAuth } from '../auth.js'
-import { workspaceFilePath } from '../db.js'
+import { workspaceFilePath, workspaceAssetsUserDir } from '../db.js'
 
 function getUser(db, id) {
   return db.prepare('SELECT id, email, role, created_at FROM users WHERE id = ?').get(id)
@@ -120,6 +120,10 @@ export function usersRoutes(db, dataDir) {
     try {
       const workspace = workspaceFilePath(dataDir, id)
       if (fs.existsSync(workspace)) fs.unlinkSync(workspace)
+      const bak = `${workspace}.bak`
+      if (fs.existsSync(bak)) fs.unlinkSync(bak)
+      const assets = workspaceAssetsUserDir(dataDir, id)
+      if (fs.existsSync(assets)) fs.rmSync(assets, { recursive: true, force: true })
     } catch {
       // ignore
     }

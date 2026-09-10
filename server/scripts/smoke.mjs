@@ -141,6 +141,56 @@ try {
     throw new Error('cleared workspace resurrected versions on GET')
   }
 
+  // Asset externalization: upload a data-URL blob, then save a slim workspace ref.
+  const tinyPng =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+  const crypto = await import('crypto')
+  const pngBytes = Buffer.from(tinyPng.split(',')[1], 'base64')
+  const assetHash = crypto.createHash('sha256').update(pngBytes).digest('hex')
+  const assetPut = await fetch(`http://127.0.0.1:8799/api/workspace/assets/${assetHash}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ dataUrl: tinyPng })
+  })
+  if (!assetPut.ok) throw new Error('asset upload failed: ' + (await assetPut.text()))
+
+  const withAsset = [
+    {
+      id: 'v_smoke_asset',
+      name: 'AssetSmoke',
+      description: '',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      logos: [
+        {
+          id: 'logo1',
+          label: 'Logo',
+          config: {
+            icon: {
+              imageDataUrl: tinyPng
+            }
+          }
+        }
+      ],
+      favicons: []
+    }
+  ]
+  const wsPutAsset = await fetch('http://127.0.0.1:8799/api/workspace', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie },
+    body: JSON.stringify({ versions: withAsset })
+  })
+  if (!wsPutAsset.ok) throw new Error('workspace asset put failed: ' + (await wsPutAsset.text()))
+
+  const wsGetAsset = await fetch('http://127.0.0.1:8799/api/workspace', {
+    headers: { Cookie: cookie }
+  })
+  const assetWs = await wsGetAsset.json()
+  const restoredUrl = assetWs.versions?.[0]?.logos?.[0]?.config?.icon?.imageDataUrl
+  if (restoredUrl !== tinyPng) {
+    throw new Error('workspace asset rehydrate failed: ' + String(restoredUrl).slice(0, 80))
+  }
+
   const user = await fetch('http://127.0.0.1:8799/api/users', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Cookie: cookie },

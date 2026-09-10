@@ -256,15 +256,26 @@ export async function saveWorkspace(
   history?: unknown,
   opts?: { keepalive?: boolean; allowEmpty?: boolean }
 ): Promise<{ ok: true } | { ok: false; error: string }> {
+  let slimVersions = versions
+  try {
+    // Upload paint/image blobs separately so the workspace PUT stays under
+    // Cloudflare's request size limit; GET rehydrates refs back to data: URLs.
+    const { externalizeWorkspaceVersions } = await import('./workspaceAssets')
+    slimVersions = await externalizeWorkspaceVersions(versions)
+  } catch (e) {
+    console.error('[web] asset externalize failed:', e)
+    return { ok: false, error: e instanceof Error ? e.message : String(e) }
+  }
+
   const body: {
     versions: unknown[]
     history?: unknown
     allowEmpty?: boolean
-  } = { versions }
+  } = { versions: slimVersions }
   // Omit history when undefined so the server keeps the previously stored undo stack.
   if (history !== undefined) body.history = history
   // Explicit empty workspace (e.g. delete last version) — server rejects [] otherwise.
-  if (versions.length === 0 || opts?.allowEmpty) body.allowEmpty = true
+  if (slimVersions.length === 0 || opts?.allowEmpty) body.allowEmpty = true
   const result = await api<{ ok: boolean }>(
     '/api/workspace',
     {
