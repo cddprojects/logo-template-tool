@@ -50,7 +50,7 @@ import {
   type HoleFillMode
 } from '../../utils/paintHoles'
 
-export type Tool = 'pointer' | 'brush' | 'eraser' | 'fill' | 'eyedropper' | 'line' | 'shape' | 'freepoly' | 'polygon' | 'select' | 'text' | 'reshape'
+export type Tool = 'pointer' | 'brush' | 'eraser' | 'fill' | 'eyedropper' | 'line' | 'shape' | 'freepoly' | 'polygon' | 'select' | 'text' | 'reshape' | 'match'
 
 /** Paint-style brush / eraser tip shapes. */
 export type BrushTip = 'round' | 'square' | 'slash' | 'backslash' | 'spray'
@@ -435,6 +435,19 @@ export interface LineObj {
   contentBound?: boolean
   /** Saved hierarchy placeholder for live Inner (no raster). */
   contentProxySlot?: boolean
+  /** Stamp bitmap was sectionally edited — bake on Save (see PaintVector.rasterEdited). */
+  rasterEdited?: boolean
+  /** Original pixels for Match / Color 1–5 (contentBound uploaded image). */
+  imageSourceDataUrl?: string
+  imageUseOriginalColors?: boolean
+  imagePalette?: string[]
+  imageColor1?: string
+  imageColor2?: string
+  imageColor3?: string
+  imageColor4?: string
+  imageColor5?: string
+  /** Match map PNG (red = 0–5), same size as imageSourceDataUrl. */
+  colorMarkPng?: string
   /** Tight unwarped source rect in canvas space (TL + size). */
   reshapeSrc?: { x: number; y: number; w: number; h: number }
   /** Destination quad in canvas space: TL, TR, BR, BL. */

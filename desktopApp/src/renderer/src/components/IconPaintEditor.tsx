@@ -42,7 +42,8 @@ import {
   Pencil,
   ChevronDown,
   ChevronRight,
-  Spline
+  Spline,
+  Tags
 } from 'lucide-react'
 import { FONT_FAMILY_GROUPS, FONT_WEIGHTS } from '../types'
 import type {
@@ -80,6 +81,13 @@ import {
   normalizeLinkedTextVectors,
   persistContentProxyVectors
 } from '../utils/paintSettingsSync'
+import {
+  enrichImageProxyWithMatch,
+  fillMarkedSectionsOnImageProxy,
+  isInnerUploadedImageProxy,
+  matchClickOnImageProxy,
+  setImageProxySlotColor
+} from '../utils/imageColorMatch'
 import { reshapeIsApplied } from '../utils/paintReshape'
 import {
   reuseCanvas,
@@ -373,6 +381,8 @@ export function IconPaintEditor({
   const preserveOuterOverlayRef = useRef(false)
 
   const [tool, setTool] = useState<Tool>('pointer')
+  /** Active Color 1–5 slot for Match tool (Inner uploaded image only). */
+  const [matchSlot, setMatchSlot] = useState(1)
   const toolRef = useRef<Tool>('pointer')
   toolRef.current = tool
   const [brushTip, setBrushTip] = useState<BrushTip>('round')
@@ -1441,6 +1451,19 @@ export function IconPaintEditor({
             seededProxy = lineFromContentProxy(crop, outsideAll, W, innerDraw)
             restored = [...restored, seededProxy]
           }
+          if (
+            seededProxy &&
+            (outsideAll.contentType === 'image' || !!outsideAll.imageSourceDataUrl)
+          ) {
+            seededProxy = await enrichImageProxyWithMatch(seededProxy, outsideAll)
+            restored = restored.map((l) => (l.id === seededProxy!.id ? seededProxy! : l))
+            if (seededProxy.imageDataUrl) {
+              ensureStampImage(seededProxy.imageDataUrl, () => {
+                redrawLinesRef.current()
+                drawHandles()
+              })
+            }
+          }
           // Live Inner settings stay outside — clear base so we don't double-draw.
           baseCt.clearRect(0, 0, W, H)
           setTxtShadow(!!seededProxy.shadow)
@@ -1449,7 +1472,7 @@ export function IconPaintEditor({
           setTxtShadowOX(seededProxy.shadowOffsetX ?? 0)
           setTxtShadowOY(seededProxy.shadowOffsetY ?? 3)
           setTxtShadowSpread(seededProxy.shadowSpread ?? 0)
-          ensureStampImage(crop.dataUrl, () => {
+          ensureStampImage(seededProxy.imageDataUrl || crop.dataUrl, () => {
             redrawLinesRef.current()
             drawHandles()
           })
@@ -4611,9 +4634,14 @@ export function IconPaintEditor({
         if (data[i + 3] <= 8) return false
         return Math.abs(data[i] - tr) + Math.abs(data[i + 1] - tg) + Math.abs(data[i + 2] - tb) <= 40
       })
+      let opaqueN = 0
+      let filledN = 0
       for (let p = 0; p < width * height; p++) {
-        if (!region[p]) continue
         const i = p * 4
+        if (data[i + 3] <= 8) continue
+        opaqueN++
+        if (!region[p]) continue
+        filledN++
         const srcA = data[i + 3]
         data[i] = fr
         data[i + 1] = fg
@@ -4622,22 +4650,29 @@ export function IconPaintEditor({
         data[i + 3] = Math.round((srcA * fa) / 255)
         changed = true
       }
+      if (!changed) return null
+      ctx.putImageData(imageData, 0, 0)
+      const imageDataUrl = canvas.toDataURL('image/png')
+      ensureStampImage(imageDataUrl, () => redrawLinesRef.current())
+      // Near-complete stamp recolour may sync live fillColor; partial fills must
+      // keep islands and bake the raster on Save (do not set proxy.color to fill).
+      const nearComplete = opaqueN > 0 && filledN / opaqueN >= 0.95
+      const keepMarks = !!item.colorMarkPng
+      return {
+        ...item,
+        imageDataUrl,
+        imageSourceDataUrl: keepMarks ? imageDataUrl : item.imageSourceDataUrl,
+        ...(nearComplete && !keepMarks ? { color: fill } : {}),
+        // Keep contentBound + marks for Save sync; bake only when no Match map.
+        rasterEdited: keepMarks ? !!item.rasterEdited : true,
+        imageUseOriginalColors: keepMarks ? false : item.imageUseOriginalColors,
+        sourceSvgMarkup: undefined,
+        sourceStampSize: undefined,
+        keepStrokeOnResize: undefined
+      }
     } else {
       // Transparent padding / counters: do not paint the stamp.
       return null
-    }
-
-    if (!changed) return null
-    ctx.putImageData(imageData, 0, 0)
-    const imageDataUrl = canvas.toDataURL('image/png')
-    ensureStampImage(imageDataUrl, () => redrawLinesRef.current())
-    return {
-      ...item,
-      imageDataUrl,
-      color: fill,
-      sourceSvgMarkup: undefined,
-      sourceStampSize: undefined,
-      keepStrokeOnResize: undefined
     }
   }
 
@@ -9097,6 +9132,33 @@ export function IconPaintEditor({
     // shape/stamp/text must not swallow Outer background / border / shadow fills.
     // Overlay cuts on live Inner are handled by floodFill (inner is in the sample,
     // not a wall); do not abort when the click lands on the cut itself.
+    if (tool === 'match') {
+      void (async () => {
+        const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
+        if (
+          !sel ||
+          !isInnerUploadedImageProxy(sel) ||
+          selectedLayerIdsRef.current.size > 1 ||
+          !objectOwnsFillClick(sel, pt)
+        ) {
+          return
+        }
+        const local = unmapObjDisplayPt(pt, sel)
+        const next = await matchClickOnImageProxy(sel, local, matchSlot)
+        if (!next) return
+        commitLines(linesRef.current.map((l) => (l.id === next.id ? next : l)))
+        if (next.imageDataUrl) {
+          ensureStampImage(next.imageDataUrl, () => {
+            redrawLinesRef.current()
+            drawHandles()
+          })
+        }
+        pushHistory()
+        redrawLines()
+        drawHandles()
+      })()
+      return
+    }
     if (tool === 'fill') {
       // See-through on an existing punch hole (object or free stamp): demote
       // punchThrough first so Fill is not a no-op when Outer shows through.
@@ -9105,7 +9167,82 @@ export function IconPaintEditor({
         // Hole under the click on a layer but demote missed (soft edge): still try
         // object Fill so punched sections convert / refill instead of no-op.
       }
-      if (fillSelectedObjectLayer(pt)) return
+      void (async () => {
+        const hit = topmostPaintHit((item) => {
+          if (!isPaintHitVisible(item) || !isInnerUploadedImageProxy(item)) return false
+          return objectOwnsFillClick(item, pt)
+        })
+        const sel =
+          hit ??
+          linesRef.current.find(
+            (l) =>
+              l.id === selectedIdRef.current &&
+              isInnerUploadedImageProxy(l) &&
+              objectOwnsFillClick(l, pt)
+          )
+        if (sel) {
+          const local = unmapObjDisplayPt(pt, sel)
+          const marked = await fillMarkedSectionsOnImageProxy(sel, local, pixelColor(color))
+          if (marked) {
+            commitLines(
+              linesRef.current.map((l) => (l.id === marked.item.id ? marked.item : l))
+            )
+            if (marked.item.imageDataUrl) {
+              ensureStampImage(marked.item.imageDataUrl, () => {
+                redrawLinesRef.current()
+                drawHandles()
+              })
+            }
+            pushHistory()
+            redrawLines()
+            drawHandles()
+            return
+          }
+        }
+        if (fillSelectedObjectLayer(pt)) return
+        const targetsNow = targetCtxs()
+        if (!targetsNow.length) return
+        if (fillAllOpaque) {
+          for (const id of [...layerOrderRef.current].reverse().filter(layerIsEditable)) {
+            const ctx = layerCanvas(id).getContext('2d')
+            if (ctx) recolorAllOpaque(ctx, baseCanvas(id), id)
+          }
+        } else {
+          let id = floodFillTargetLayer(pt.x, pt.y)
+          const clickOwnsObject = linesRef.current.some(
+            (item) =>
+              !item.punchMask &&
+              isPaintHitVisible(item) &&
+              objectOwnsFillClick(item, pt)
+          )
+          const clickOnContentHole =
+            punchHoleAt('content', pt.x, pt.y) ||
+            pointInEnclosedObjectHole('content', pt.x, pt.y)
+          if (
+            id === 'container' &&
+            layerIsEditable('content') &&
+            (clickOwnsObject ||
+              clickOnContentHole ||
+              vectorAlphaAt('content', pt.x, pt.y) > 8)
+          ) {
+            const ownsContainerObject = linesRef.current.some(
+              (item) =>
+                vectorLayerOf(item) === 'container' &&
+                !item.punchMask &&
+                isPaintHitVisible(item) &&
+                objectOwnsFillClick(item, pt)
+            )
+            if (!ownsContainerObject) id = 'content'
+          }
+          if (id) {
+            const ctx = layerCanvas(id).getContext('2d')
+            if (ctx) floodFill(ctx, pt.x, pt.y, baseCanvas(id), id)
+          }
+        }
+        redrawLines()
+        pushHistory()
+      })()
+      return
     }
 
     const targets = targetCtxs()
@@ -9113,51 +9250,6 @@ export function IconPaintEditor({
     // Brush can run with add-paint targeting even when only one layer is checked.
     if (tool === 'brush' && !addPaintCtxs().length) return
 
-    if (tool === 'fill') {
-      // Base overlays only when no object layer owns the tool.
-      if (fillAllOpaque) {
-        for (const id of [...layerOrderRef.current].reverse().filter(layerIsEditable)) {
-          const ctx = layerCanvas(id).getContext('2d')
-          if (ctx) recolorAllOpaque(ctx, baseCanvas(id), id)
-        }
-      } else {
-        let id = floodFillTargetLayer(pt.x, pt.y)
-        // Inner object ink / punch holes sit on top of Outer. Prefer content so
-        // See-through / hole refill never rewrites live Outer colour on Save.
-        const clickOwnsObject = linesRef.current.some(
-          (item) =>
-            !item.punchMask &&
-            isPaintHitVisible(item) &&
-            objectOwnsFillClick(item, pt)
-        )
-        const clickOnContentHole =
-          punchHoleAt('content', pt.x, pt.y) ||
-          pointInEnclosedObjectHole('content', pt.x, pt.y)
-        if (
-          id === 'container' &&
-          layerIsEditable('content') &&
-          (clickOwnsObject ||
-            clickOnContentHole ||
-            vectorAlphaAt('content', pt.x, pt.y) > 8)
-        ) {
-          const ownsContainerObject = linesRef.current.some(
-            (item) =>
-              vectorLayerOf(item) === 'container' &&
-              !item.punchMask &&
-              isPaintHitVisible(item) &&
-              objectOwnsFillClick(item, pt)
-          )
-          if (!ownsContainerObject) id = 'content'
-        }
-        if (id) {
-          const ctx = layerCanvas(id).getContext('2d')
-          if (ctx) floodFill(ctx, pt.x, pt.y, baseCanvas(id), id)
-        }
-      }
-      redrawLines()
-      pushHistory()
-      return
-    }
     if (tool === 'polygon') {
       // The second click of a double-click has detail >= 2. Skip adding a vertex
       // so finishing with double-click does not leave a stray last point.
@@ -9262,7 +9354,8 @@ export function IconPaintEditor({
       const seeThrough = objectHasSeeThroughHole(item)
       const modifiedProxy =
         !!item.contentBound &&
-        (seeThrough ||
+        (!!item.rasterEdited ||
+          seeThrough ||
           !!item.punchThrough ||
           hasPunchCoverage(item.id) ||
           !!item.paintStrokes?.length ||
@@ -10299,6 +10392,7 @@ export function IconPaintEditor({
     { key: 'brush', icon: <Brush size={16} />, label: 'Brush' },
     { key: 'eraser', icon: <Eraser size={16} />, label: 'Eraser' },
     { key: 'fill', icon: <PaintBucket size={16} />, label: 'Fill' },
+    { key: 'match', icon: <Tags size={16} />, label: 'Match — assign Color 1–5 marks on the Inner uploaded image' },
     { key: 'eyedropper', icon: <Pipette size={16} />, label: 'Pick colour' },
     { key: 'line', icon: <Minus size={16} />, label: 'Line' },
     { key: 'text', icon: <TypeIcon size={16} />, label: 'Text' },
@@ -10360,6 +10454,14 @@ export function IconPaintEditor({
   const editingShape = selectedObj ? selectedObj.type === 'shape' : tool === 'shape'
   const editingStamp = selectedObj?.type === 'stamp'
   const editingContentProxy = !!(selectedObj?.contentBound && editingStamp)
+  const imageMatchTarget = !!(
+    selectedObj &&
+    isInnerUploadedImageProxy(selectedObj) &&
+    selectedLayerIds.size <= 1
+  )
+  useEffect(() => {
+    if (tool === 'match' && !imageMatchTarget) setTool('pointer')
+  }, [tool, imageMatchTarget])
   const fillableCtx = editingPoly || editingShape
   /** Text / stamp / group ignore the general stroke Size slider. */
   const selectionUsesStrokeSlider = (l: LineObj | null | undefined): boolean => {
@@ -10562,18 +10664,29 @@ export function IconPaintEditor({
       <div className="h-11 flex items-center gap-3 px-4 flex-nowrap overflow-x-auto">
         {/* Tools */}
         <div className="flex items-center gap-1 shrink-0">
-          {TOOLS.map((t) => (
+          {TOOLS.map((t) => {
+            const matchDisabled = t.key === 'match' && !imageMatchTarget
+            return (
             <button
               key={t.key}
-              onClick={() => setTool(t.key)}
-              title={t.label}
+              onClick={() => {
+                if (matchDisabled) return
+                setTool(t.key)
+              }}
+              title={
+                matchDisabled
+                  ? 'Match — select only the Inner uploaded image'
+                  : t.label
+              }
+              disabled={matchDisabled}
               className={`w-8 h-8 rounded-lg flex items-center justify-center transition-colors ${
                 tool === t.key ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
-              }`}
+              } disabled:opacity-30 disabled:cursor-not-allowed disabled:hover:text-muted`}
             >
               {t.icon}
             </button>
-          ))}
+            )
+          })}
 
           {/* Polygon shapes group */}
           <div className="relative">
@@ -11152,8 +11265,80 @@ export function IconPaintEditor({
           ))}
         </div>
       ) : editingContentProxy && selectedObj ? (
-        <div className="flex items-center gap-2.5 px-4 h-11 flex-nowrap shrink-0">
+        <div className="flex items-center gap-2.5 px-4 h-11 flex-nowrap shrink-0 overflow-x-auto">
           <span className="text-[11px] font-semibold text-text shrink-0">Inner content</span>
+          {imageMatchTarget && (
+            <>
+              <div className="w-px h-6 bg-border shrink-0" />
+              <span className="text-[10px] text-muted shrink-0" title="Same as Style → Image colours">
+                Color 1–5
+              </span>
+              {([1, 2, 3, 4, 5] as const).map((slot) => {
+                const key = `imageColor${slot}` as
+                  | 'imageColor1'
+                  | 'imageColor2'
+                  | 'imageColor3'
+                  | 'imageColor4'
+                  | 'imageColor5'
+                const hex =
+                  (selectedObj[key] || '').trim() ||
+                  selectedObj.imagePalette?.[slot - 1] ||
+                  '#888888'
+                const active = tool === 'match' && matchSlot === slot
+                return (
+                  <button
+                    key={slot}
+                    type="button"
+                    title={`Color ${slot}${tool === 'match' ? ' — Match target' : ' — click to edit'}`}
+                    onClick={() => {
+                      if (tool === 'match') {
+                        setMatchSlot(slot)
+                        return
+                      }
+                      // Swatch change via native color input below
+                    }}
+                    className={`relative flex items-center gap-1 shrink-0 rounded-lg border px-1 py-0.5 transition-colors ${
+                      active ? 'border-accent bg-accent/15' : 'border-border bg-surface3'
+                    }`}
+                  >
+                    <span className="text-[9px] text-muted w-3 text-center">{slot}</span>
+                    <input
+                      type="color"
+                      value={hex.slice(0, 7)}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => {
+                        const v = e.target.value
+                        void (async () => {
+                          const next = await setImageProxySlotColor(selectedObj, slot, v)
+                          if (!next) return
+                          commitLines(
+                            linesRef.current.map((l) => (l.id === next.id ? next : l))
+                          )
+                          if (next.imageDataUrl) {
+                            ensureStampImage(next.imageDataUrl, () => {
+                              redrawLinesRef.current()
+                              drawHandles()
+                            })
+                          }
+                          setTool((t) => (t === 'match' ? t : t))
+                          pushHistory()
+                          redrawLines()
+                          drawHandles()
+                        })()
+                      }}
+                      className="w-6 h-6 rounded cursor-pointer border border-border/50 bg-transparent"
+                    />
+                  </button>
+                )
+              })}
+              {tool === 'match' && (
+                <span className="text-[10px] text-muted shrink-0">
+                  Click sections to assign Color {matchSlot} · click again to unmark
+                </span>
+              )}
+            </>
+          )}
+          <div className="w-px h-6 bg-border shrink-0" />
           <span className="text-[10px] text-muted shrink-0">
             Drag to move · corner handles to resize
           </span>

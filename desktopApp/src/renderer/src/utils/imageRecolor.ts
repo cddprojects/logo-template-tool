@@ -318,11 +318,214 @@ export async function resolveImageDataUrl(fields: {
   imageColor3?: string
   imageColor4?: string
   imageColor5?: string
+  imageColorMarkPng?: string
 }): Promise<string> {
   const src = fields.imageDataUrl ?? ''
   if (!src) return ''
   if (fields.imageUseOriginalColors !== false) return src
+  const mark = await decodeColorMarkPng(fields.imageColorMarkPng)
+  if (mark && mark.marks.some((v) => v > 0)) {
+    const colors = [
+      fields.imageColor1 || fields.imagePalette?.[0] || '',
+      fields.imageColor2 || fields.imagePalette?.[1] || '',
+      fields.imageColor3 || fields.imagePalette?.[2] || '',
+      fields.imageColor4 || fields.imagePalette?.[3] || '',
+      fields.imageColor5 || fields.imagePalette?.[4] || ''
+    ]
+    return applyColorMarksRecolor(src, mark.marks, mark.w, mark.h, colors)
+  }
   const palette = fields.imagePalette ?? []
   if (!palette.length) return src
   return applyImagePaletteRecolor(src, palette, imageReplacementColors(fields))
+}
+
+export type ColorMarkMap = { marks: Uint8Array; w: number; h: number }
+
+/** Encode mark ids 0–5 into the red channel of an opaque PNG. */
+export function encodeColorMarkPng(marks: Uint8Array, w: number, h: number): string {
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, w)
+  canvas.height = Math.max(1, h)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return ''
+  const img = ctx.createImageData(canvas.width, canvas.height)
+  const n = Math.min(marks.length, canvas.width * canvas.height)
+  for (let p = 0; p < n; p++) {
+    const i = p * 4
+    const m = marks[p] & 0xff
+    img.data[i] = m
+    img.data[i + 1] = 0
+    img.data[i + 2] = 0
+    img.data[i + 3] = 255
+  }
+  ctx.putImageData(img, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
+export async function decodeColorMarkPng(
+  dataUrl: string | null | undefined
+): Promise<ColorMarkMap | null> {
+  if (!dataUrl) return null
+  const img = await loadCachedImage(dataUrl)
+  if (!img || !img.width || !img.height) return null
+  const canvas = document.createElement('canvas')
+  canvas.width = img.width
+  canvas.height = img.height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return null
+  ctx.drawImage(img, 0, 0)
+  const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  const marks = new Uint8Array(canvas.width * canvas.height)
+  for (let p = 0; p < marks.length; p++) {
+    const m = data[p * 4]
+    marks[p] = m >= 1 && m <= MAX_PALETTE ? m : 0
+  }
+  return { marks, w: canvas.width, h: canvas.height }
+}
+
+/**
+ * Assign each opaque pixel to the nearest palette slot (1–5). Transparent → 0.
+ */
+export async function buildDefaultColorMarks(
+  dataUrl: string,
+  palette: string[]
+): Promise<ColorMarkMap | null> {
+  if (!dataUrl || !palette.length) return null
+  const img = await loadCachedImage(dataUrl)
+  if (!img || !img.width || !img.height) return null
+  const w = img.width
+  const h = img.height
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return null
+  ctx.drawImage(img, 0, 0)
+  const { data } = ctx.getImageData(0, 0, w, h)
+  const fromRgb: [number, number, number][] = []
+  for (const hex of palette.slice(0, MAX_PALETTE)) {
+    const rgb = parseHex(hex)
+    if (rgb) fromRgb.push(rgb)
+  }
+  if (!fromRgb.length) return null
+  const marks = new Uint8Array(w * h)
+  for (let p = 0; p < w * h; p++) {
+    const i = p * 4
+    if (data[i + 3] < 40) {
+      marks[p] = 0
+      continue
+    }
+    const pixel: [number, number, number] = [data[i], data[i + 1], data[i + 2]]
+    let best = 0
+    let bestDist = rgbDist(pixel, fromRgb[0])
+    for (let s = 1; s < fromRgb.length; s++) {
+      const d = rgbDist(pixel, fromRgb[s])
+      if (d < bestDist) {
+        bestDist = d
+        best = s
+      }
+    }
+    marks[p] = (best + 1) as number
+  }
+  return { marks, w, h }
+}
+
+/** Recolor marked pixels to Color 1–5; unmarked pixels keep the source. */
+export async function applyColorMarksRecolor(
+  dataUrl: string,
+  marks: Uint8Array,
+  w: number,
+  h: number,
+  colors: string[]
+): Promise<string> {
+  if (!dataUrl || !marks.length) return dataUrl
+  const img = await loadCachedImage(dataUrl)
+  if (!img) return dataUrl
+  const canvas = document.createElement('canvas')
+  canvas.width = img.width
+  canvas.height = img.height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return dataUrl
+  ctx.drawImage(img, 0, 0)
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  const data = imageData.data
+  const toRgb: ([number, number, number] | null)[] = []
+  for (let s = 0; s < MAX_PALETTE; s++) {
+    toRgb.push(parseHex(colors[s] || '') )
+  }
+  const mw = w
+  const mh = h
+  const sameSize = mw === canvas.width && mh === canvas.height
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      const i = (y * canvas.width + x) * 4
+      if (data[i + 3] === 0) continue
+      let mark = 0
+      if (sameSize) {
+        mark = marks[y * mw + x] ?? 0
+      } else {
+        const mx = Math.min(mw - 1, Math.floor((x / canvas.width) * mw))
+        const my = Math.min(mh - 1, Math.floor((y / canvas.height) * mh))
+        mark = marks[my * mw + mx] ?? 0
+      }
+      if (mark < 1 || mark > MAX_PALETTE) continue
+      const rgb = toRgb[mark - 1]
+      if (!rgb) continue
+      data[i] = rgb[0]
+      data[i + 1] = rgb[1]
+      data[i + 2] = rgb[2]
+    }
+  }
+  ctx.putImageData(imageData, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
+/** Flood a connected same-colour region on the source bitmap (for Match / Fill). */
+export async function floodImageRegionMask(
+  dataUrl: string,
+  localX: number,
+  localY: number,
+  colorTol = 40
+): Promise<{ region: Uint8Array; w: number; h: number; seedRgb: [number, number, number] } | null> {
+  const img = await loadCachedImage(dataUrl)
+  if (!img || !img.width || !img.height) return null
+  const w = img.width
+  const h = img.height
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return null
+  ctx.drawImage(img, 0, 0)
+  const { data } = ctx.getImageData(0, 0, w, h)
+  const px = Math.max(0, Math.min(w - 1, Math.floor(localX)))
+  const py = Math.max(0, Math.min(h - 1, Math.floor(localY)))
+  const idx = (py * w + px) * 4
+  if (data[idx + 3] <= 8) return null
+  const tr = data[idx], tg = data[idx + 1], tb = data[idx + 2]
+  const region = new Uint8Array(w * h)
+  const stack: number[] = [px, py]
+  region[py * w + px] = 1
+  while (stack.length) {
+    const y = stack.pop()!
+    const x = stack.pop()!
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      const nx = x + dx
+      const ny = y + dy
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+      const p = ny * w + nx
+      if (region[p]) continue
+      const i = p * 4
+      if (data[i + 3] <= 8) continue
+      if (
+        Math.abs(data[i] - tr) + Math.abs(data[i + 1] - tg) + Math.abs(data[i + 2] - tb) >
+        colorTol
+      ) {
+        continue
+      }
+      region[p] = 1
+      stack.push(nx, ny)
+    }
+  }
+  return { region, w, h, seedRgb: [tr, tg, tb] }
 }

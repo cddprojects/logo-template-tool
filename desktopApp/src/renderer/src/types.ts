@@ -129,6 +129,11 @@ export interface IconConfig {
   imageColor3: string
   imageColor4: string
   imageColor5: string
+  /**
+   * Optional Paint Match map (PNG, red channel = 0 unmarked / 1–5 Color slot).
+   * Same pixel size as imageDataUrl. Used instead of nearest-palette remap when set.
+   */
+  imageColorMarkPng?: string
   // Container / background shape drawn behind the icon content
   containerEnabled: boolean
   containerShape: ShapeType
@@ -299,6 +304,11 @@ export interface FaviconContent {
   imageColor3: string
   imageColor4: string
   imageColor5: string
+  /**
+   * Optional Paint Match map (PNG, red channel = 0 unmarked / 1–5 Color slot).
+   * Same pixel size as imageDataUrl.
+   */
+  imageColorMarkPng?: string
   // canva prompt settings (no rendered inner content)
   canvaBusinessType: CanvaBusinessType
   canvaDesignType: CanvaDesignType
@@ -478,6 +488,22 @@ export interface PaintVector {
    * contentBound on re-enter.
    */
   contentProxySlot?: boolean
+  /**
+   * Stamp pixels were edited in Paint (sectional Fill / etc.). Must bake on Save
+   * — do not strip imageDataUrl and sync live fillColor, or enclosed islands
+   * left unpainted get remapped with the fill colour.
+   */
+  rasterEdited?: boolean
+  /** Original pixels for Match / Color 1–5 (contentBound uploaded image). */
+  imageSourceDataUrl?: string
+  imageUseOriginalColors?: boolean
+  imagePalette?: string[]
+  imageColor1?: string
+  imageColor2?: string
+  imageColor3?: string
+  imageColor4?: string
+  imageColor5?: string
+  colorMarkPng?: string
   /** Tight unwarped source rect in canvas space (TL + size). */
   reshapeSrc?: { x: number; y: number; w: number; h: number }
   /** Destination quad in canvas space: TL, TR, BR, BL. */
@@ -539,6 +565,18 @@ export interface OutsideContentSettings extends OutsideTextSettings {
   sizeRatio?: number
   /** Primary fill for the active non-letter content type. */
   fillColor?: string
+  /** Inner content type when opening Paint (for Match tool gating). */
+  contentType?: ContentType | string
+  /** Original uploaded image (before palette remap) for Match / Color 1–5. */
+  imageSourceDataUrl?: string
+  imageUseOriginalColors?: boolean
+  imagePalette?: string[]
+  imageColor1?: string
+  imageColor2?: string
+  imageColor3?: string
+  imageColor4?: string
+  imageColor5?: string
+  imageColorMarkPng?: string
 }
 
 /**
@@ -647,6 +685,17 @@ export interface PaintContentSync {
   }
   /** Primary fill for the active content type. */
   fillColor?: string
+  /** Image Color 1–5 + Match map from Paint (Inner uploaded image). */
+  imageUseOriginalColors?: boolean
+  imagePalette?: string[]
+  imageColor1?: string
+  imageColor2?: string
+  imageColor3?: string
+  imageColor4?: string
+  imageColor5?: string
+  imageColorMarkPng?: string
+  /** When Match edited the Inner image, persist the stamp-crop source bitmap. */
+  imageDataUrl?: string
   /** Size ratio for the active content type (0–1+). */
   sizeRatio?: number
   /** Inner content shadow (design 256-scale), from linked text / contentBound proxy. */

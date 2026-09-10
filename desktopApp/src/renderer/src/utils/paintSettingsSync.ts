@@ -2423,6 +2423,16 @@ export function outsideContentFromFavicon(content: FaviconContent): OutsideConte
     offsetY: content.offsetY ?? 0,
     sizeRatio: faviconSizeRatio(content),
     fillColor: faviconFillColor(content),
+    contentType: content.type,
+    imageSourceDataUrl: content.type === 'image' ? content.imageDataUrl : undefined,
+    imageUseOriginalColors: content.imageUseOriginalColors,
+    imagePalette: content.imagePalette,
+    imageColor1: content.imageColor1,
+    imageColor2: content.imageColor2,
+    imageColor3: content.imageColor3,
+    imageColor4: content.imageColor4,
+    imageColor5: content.imageColor5,
+    imageColorMarkPng: content.imageColorMarkPng,
     contentShadowEnabled: !!content.contentShadowEnabled,
     contentShadowColor: content.contentShadowColor ?? '#00000080',
     contentShadowBlur: content.contentShadowBlur ?? 8,
@@ -2451,6 +2461,16 @@ export function outsideContentFromIcon(icon: IconConfig): OutsideContentSettings
     offsetY: toDesign(icon.offsetY ?? 0),
     sizeRatio: iconSizeRatio(icon),
     fillColor: iconPrimaryFill(icon),
+    contentType: icon.sourceType,
+    imageSourceDataUrl: icon.sourceType === 'image' ? icon.imageDataUrl : undefined,
+    imageUseOriginalColors: icon.imageUseOriginalColors,
+    imagePalette: icon.imagePalette,
+    imageColor1: icon.imageColor1,
+    imageColor2: icon.imageColor2,
+    imageColor3: icon.imageColor3,
+    imageColor4: icon.imageColor4,
+    imageColor5: icon.imageColor5,
+    imageColorMarkPng: icon.imageColorMarkPng,
     contentShadowEnabled: !!icon.contentShadowEnabled,
     contentShadowColor: icon.contentShadowColor ?? '#00000080',
     contentShadowBlur: toDesign(icon.contentShadowBlur ?? 8),
@@ -2863,7 +2883,23 @@ export function buildPaintContentSync(opts: {
     sync.offsetX = paintPxToDesign(cx - res / 2, res)
     sync.offsetY = paintPxToDesign(cy - res / 2, res)
     sync.sizeRatio = clampSizeRatio(Math.max(w, h) / drawArea)
-    if (proxy.color) sync.fillColor = proxy.color
+    // Partial stamp fills set rasterEdited and must not push fillColor — that
+    // remaps the whole live image (including enclosed islands left unpainted).
+    if (proxy.color && !proxy.rasterEdited) sync.fillColor = proxy.color
+    if (proxy.imageSourceDataUrl || proxy.colorMarkPng || proxy.imagePalette?.length) {
+      if (proxy.imageUseOriginalColors !== undefined) {
+        sync.imageUseOriginalColors = proxy.imageUseOriginalColors
+      }
+      if (proxy.imagePalette) sync.imagePalette = [...proxy.imagePalette]
+      if (proxy.imageColor1 !== undefined) sync.imageColor1 = proxy.imageColor1
+      if (proxy.imageColor2 !== undefined) sync.imageColor2 = proxy.imageColor2
+      if (proxy.imageColor3 !== undefined) sync.imageColor3 = proxy.imageColor3
+      if (proxy.imageColor4 !== undefined) sync.imageColor4 = proxy.imageColor4
+      if (proxy.imageColor5 !== undefined) sync.imageColor5 = proxy.imageColor5
+      if (proxy.colorMarkPng !== undefined) sync.imageColorMarkPng = proxy.colorMarkPng
+      // Marks are stamp-crop sized — keep imageDataUrl aligned with that bitmap.
+      if (proxy.imageSourceDataUrl) sync.imageDataUrl = proxy.imageSourceDataUrl
+    }
     Object.assign(sync, shadowSyncFromVector(proxy, res, drawArea))
     return sync
   }
@@ -2957,6 +2993,27 @@ export function applyPaintContentSyncToFaviconContent(
     }
   }
 
+  if (sync.imagePalette || sync.imageColorMarkPng !== undefined || sync.imageColor1 !== undefined) {
+    if (next.type === 'image' || sync.imageColorMarkPng || sync.imagePalette) {
+      if (next.type !== 'image' && (sync.imageColorMarkPng || sync.imagePalette)) {
+        // Keep type; only apply when already image
+      }
+      if (next.type === 'image') {
+        if (sync.imageUseOriginalColors !== undefined) {
+          next.imageUseOriginalColors = sync.imageUseOriginalColors
+        }
+        if (sync.imagePalette) next.imagePalette = sync.imagePalette
+        if (sync.imageColor1 !== undefined) next.imageColor1 = sync.imageColor1
+        if (sync.imageColor2 !== undefined) next.imageColor2 = sync.imageColor2
+        if (sync.imageColor3 !== undefined) next.imageColor3 = sync.imageColor3
+        if (sync.imageColor4 !== undefined) next.imageColor4 = sync.imageColor4
+        if (sync.imageColor5 !== undefined) next.imageColor5 = sync.imageColor5
+        if (sync.imageColorMarkPng !== undefined) next.imageColorMarkPng = sync.imageColorMarkPng
+        if (sync.imageDataUrl) next.imageDataUrl = sync.imageDataUrl
+      }
+    }
+  }
+
   if (sync.sizeRatio !== undefined && !sync.letters) {
     const r = clampSizeRatio(sync.sizeRatio)
     switch (next.type) {
@@ -3034,6 +3091,22 @@ export function applyPaintContentSyncToIcon(
         break
       default:
         break
+    }
+  }
+
+  if (sync.imagePalette || sync.imageColorMarkPng !== undefined || sync.imageColor1 !== undefined) {
+    if (next.sourceType === 'image') {
+      if (sync.imageUseOriginalColors !== undefined) {
+        next.imageUseOriginalColors = sync.imageUseOriginalColors
+      }
+      if (sync.imagePalette) next.imagePalette = sync.imagePalette
+      if (sync.imageColor1 !== undefined) next.imageColor1 = sync.imageColor1
+      if (sync.imageColor2 !== undefined) next.imageColor2 = sync.imageColor2
+      if (sync.imageColor3 !== undefined) next.imageColor3 = sync.imageColor3
+      if (sync.imageColor4 !== undefined) next.imageColor4 = sync.imageColor4
+      if (sync.imageColor5 !== undefined) next.imageColor5 = sync.imageColor5
+      if (sync.imageColorMarkPng !== undefined) next.imageColorMarkPng = sync.imageColorMarkPng
+      if (sync.imageDataUrl) next.imageDataUrl = sync.imageDataUrl
     }
   }
 
