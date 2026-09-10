@@ -448,6 +448,8 @@ export interface LineObj {
   imageColor5?: string
   /** Match map PNG (red = 0–5), same size as imageSourceDataUrl. */
   colorMarkPng?: string
+  /** Stable Match region ids (R + G*256). */
+  colorRegionPng?: string
   /** Tight unwarped source rect in canvas space (TL + size). */
   reshapeSrc?: { x: number; y: number; w: number; h: number }
   /** Destination quad in canvas space: TL, TR, BR, BL. */

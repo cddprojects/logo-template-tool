@@ -134,6 +134,11 @@ export interface IconConfig {
    * Same pixel size as imageDataUrl. Used instead of nearest-palette remap when set.
    */
   imageColorMarkPng?: string
+  /**
+   * Stable region partition for Match (PNG, R + G*256 = region id).
+   * Adjacent regions stay separate even when they share a Color slot.
+   */
+  imageColorRegionPng?: string
   // Container / background shape drawn behind the icon content
   containerEnabled: boolean
   containerShape: ShapeType
@@ -309,6 +314,8 @@ export interface FaviconContent {
    * Same pixel size as imageDataUrl.
    */
   imageColorMarkPng?: string
+  /** Stable Match region ids (R + G*256). */
+  imageColorRegionPng?: string
   // canva prompt settings (no rendered inner content)
   canvaBusinessType: CanvaBusinessType
   canvaDesignType: CanvaDesignType
@@ -504,6 +511,8 @@ export interface PaintVector {
   imageColor4?: string
   imageColor5?: string
   colorMarkPng?: string
+  /** Stable Match region ids (R + G*256), same size as colorMarkPng. */
+  colorRegionPng?: string
   /** Tight unwarped source rect in canvas space (TL + size). */
   reshapeSrc?: { x: number; y: number; w: number; h: number }
   /** Destination quad in canvas space: TL, TR, BR, BL. */
@@ -577,6 +586,7 @@ export interface OutsideContentSettings extends OutsideTextSettings {
   imageColor4?: string
   imageColor5?: string
   imageColorMarkPng?: string
+  imageColorRegionPng?: string
 }
 
 /**
@@ -694,6 +704,7 @@ export interface PaintContentSync {
   imageColor4?: string
   imageColor5?: string
   imageColorMarkPng?: string
+  imageColorRegionPng?: string
   /** When Match edited the Inner image, persist the stamp-crop source bitmap. */
   imageDataUrl?: string
   /** Size ratio for the active content type (0–1+). */

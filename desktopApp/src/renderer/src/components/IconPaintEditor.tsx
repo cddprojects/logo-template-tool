@@ -43,7 +43,9 @@ import {
   ChevronDown,
   ChevronRight,
   Spline,
-  Tags
+  Tags,
+  Eye,
+  EyeOff
 } from 'lucide-react'
 import { FONT_FAMILY_GROUPS, FONT_WEIGHTS } from '../types'
 import type {
@@ -82,11 +84,14 @@ import {
   persistContentProxyVectors
 } from '../utils/paintSettingsSync'
 import {
+  buildMatchSectionLabels,
   enrichImageProxyWithMatch,
   fillMarkedSectionsOnImageProxy,
   isInnerUploadedImageProxy,
   matchClickOnImageProxy,
-  setImageProxySlotColor
+  refreshStampFromMarks,
+  setImageProxySlotColor,
+  type MatchSectionLabel
 } from '../utils/imageColorMatch'
 import { reshapeIsApplied } from '../utils/paintReshape'
 import {
@@ -381,8 +386,13 @@ export function IconPaintEditor({
   const preserveOuterOverlayRef = useRef(false)
 
   const [tool, setTool] = useState<Tool>('pointer')
-  /** Active Color 1–5 slot for Match tool (Inner uploaded image only). */
-  const [matchSlot, setMatchSlot] = useState(1)
+  /** Armed Color 1–5 while Match is on (`null` = Match on but nothing armed). */
+  const [matchSlot, setMatchSlot] = useState<number | null>(null)
+  const matchSlotRef = useRef<number | null>(null)
+  matchSlotRef.current = matchSlot
+  /** Show 1–5 section labels on the canvas while Match is active. */
+  const [matchLabelsVisible, setMatchLabelsVisible] = useState(true)
+  const [matchLabels, setMatchLabels] = useState<MatchSectionLabel[]>([])
   const toolRef = useRef<Tool>('pointer')
   toolRef.current = tool
   const [brushTip, setBrushTip] = useState<BrushTip>('round')
@@ -9134,6 +9144,8 @@ export function IconPaintEditor({
     // not a wall); do not abort when the click lands on the cut itself.
     if (tool === 'match') {
       void (async () => {
+        const armed = matchSlotRef.current
+        if (armed == null) return
         const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
         if (
           !sel ||
@@ -9144,15 +9156,12 @@ export function IconPaintEditor({
           return
         }
         const local = unmapObjDisplayPt(pt, sel)
-        const next = await matchClickOnImageProxy(sel, local, matchSlot)
+        const next = await matchClickOnImageProxy(sel, local, armed)
         if (!next) return
         commitLines(linesRef.current.map((l) => (l.id === next.id ? next : l)))
-        if (next.imageDataUrl) {
-          ensureStampImage(next.imageDataUrl, () => {
-            redrawLinesRef.current()
-            drawHandles()
-          })
-        }
+        // Defer remapped colours until Match exits; refresh labels only.
+        const labels = await buildMatchSectionLabels(next)
+        setMatchLabels(labels)
         pushHistory()
         redrawLines()
         drawHandles()
@@ -10459,8 +10468,82 @@ export function IconPaintEditor({
     selectedLayerIds.size <= 1
   )
   useEffect(() => {
-    if (tool === 'match' && !imageMatchTarget) setTool('pointer')
+    if (tool === 'match' && !imageMatchTarget) {
+      setTool('pointer')
+      setMatchSlot(null)
+      setMatchLabels([])
+    }
   }, [tool, imageMatchTarget])
+
+  const matchModeActiveRef = useRef(false)
+  useEffect(() => {
+    const wasMatch = matchModeActiveRef.current
+    matchModeActiveRef.current = tool === 'match'
+    if (!wasMatch || tool === 'match') return
+    // Left Match via another tool / loss of target — apply Color 1–5 from marks.
+    setMatchSlot(null)
+    setMatchLabels([])
+    void (async () => {
+      const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
+      if (!sel || !isInnerUploadedImageProxy(sel)) return
+      const next = await refreshStampFromMarks(sel)
+      commitLines(linesRef.current.map((l) => (l.id === next.id ? next : l)))
+      if (next.imageDataUrl) {
+        ensureStampImage(next.imageDataUrl, () => {
+          redrawLinesRef.current()
+          drawHandles()
+        })
+      }
+      pushHistory()
+      redrawLines()
+      drawHandles()
+    })()
+  }, [tool])
+
+  useEffect(() => {
+    if (tool !== 'match' || !imageMatchTarget || !selectedObj) {
+      if (tool !== 'match') setMatchLabels([])
+      return
+    }
+    let cancelled = false
+    void buildMatchSectionLabels(selectedObj).then((labels) => {
+      if (!cancelled) setMatchLabels(labels)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [tool, imageMatchTarget, selectedObj?.id, selectedObj?.colorMarkPng])
+
+  const exitMatchMode = useCallback(() => {
+    setTool('pointer')
+    // Remap + cleanup runs in the tool-leave effect above.
+  }, [])
+
+  const enterMatchMode = useCallback(() => {
+    setTool('match')
+    setMatchSlot(null)
+    void (async () => {
+      const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
+      if (!sel || !isInnerUploadedImageProxy(sel)) return
+      if (sel.colorRegionPng && sel.colorMarkPng) {
+        const labels = await buildMatchSectionLabels(sel)
+        setMatchLabels(labels)
+        return
+      }
+      const next = await enrichImageProxyWithMatch(sel, null)
+      commitLines(linesRef.current.map((l) => (l.id === next.id ? next : l)))
+      if (next.imageDataUrl) {
+        ensureStampImage(next.imageDataUrl, () => {
+          redrawLinesRef.current()
+          drawHandles()
+        })
+      }
+      const labels = await buildMatchSectionLabels(next)
+      setMatchLabels(labels)
+      redrawLines()
+      drawHandles()
+    })()
+  }, [])
   const fillableCtx = editingPoly || editingShape
   /** Text / stamp / group ignore the general stroke Size slider. */
   const selectionUsesStrokeSlider = (l: LineObj | null | undefined): boolean => {
@@ -11260,14 +11343,29 @@ export function IconPaintEditor({
               <div className="w-px h-6 bg-border shrink-0" />
               <button
                 type="button"
-                title="Match — assign Color 1–5 marks on this image (click sections; click again to unmark)"
-                onClick={() => setTool((t) => (t === 'match' ? 'pointer' : 'match'))}
+                title="Match — mark sections with Color 1–5 (click Match again to apply colours and exit)"
+                onClick={() => {
+                  if (tool === 'match') exitMatchMode()
+                  else enterMatchMode()
+                }}
                 className={`h-8 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium shrink-0 transition-colors ${
                   tool === 'match' ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
                 }`}
               >
                 <Tags size={14} />
                 Match
+              </button>
+              <button
+                type="button"
+                title={matchLabelsVisible ? 'Hide section numbers' : 'Show section numbers'}
+                onClick={() => setMatchLabelsVisible((v) => !v)}
+                className={`h-8 w-8 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+                  matchLabelsVisible
+                    ? 'bg-surface3 text-text'
+                    : 'bg-surface3 text-muted hover:text-text'
+                }`}
+              >
+                {matchLabelsVisible ? <Eye size={14} /> : <EyeOff size={14} />}
               </button>
               <span className="text-[10px] text-muted shrink-0" title="Same as Style → Image colours">
                 Color 1–5
@@ -11288,16 +11386,21 @@ export function IconPaintEditor({
                   <button
                     key={slot}
                     type="button"
-                    title={`Color ${slot}${tool === 'match' ? ' — Match target' : ' — click to edit'}`}
+                    title={
+                      tool === 'match'
+                        ? active
+                          ? `Color ${slot} armed — click again to disarm`
+                          : `Arm Color ${slot} — then click sections`
+                        : `Color ${slot} — click swatch to edit`
+                    }
                     onClick={() => {
                       if (tool === 'match') {
-                        setMatchSlot(slot)
+                        setMatchSlot((s) => (s === slot ? null : slot))
                         return
                       }
-                      // Swatch change via native color input below
                     }}
                     className={`relative flex items-center gap-1 shrink-0 rounded-lg border px-1 py-0.5 transition-colors ${
-                      active ? 'border-accent bg-accent/15' : 'border-border bg-surface3'
+                      active ? 'border-accent bg-accent/15 ring-1 ring-accent' : 'border-border bg-surface3'
                     }`}
                   >
                     <span className="text-[9px] text-muted w-3 text-center">{slot}</span>
@@ -11310,16 +11413,21 @@ export function IconPaintEditor({
                         void (async () => {
                           const next = await setImageProxySlotColor(selectedObj, slot, v)
                           if (!next) return
+                          // While Match is on, only store the slot colour — remapped
+                          // display updates when Match exits.
+                          const stored =
+                            tool === 'match'
+                              ? { ...next, imageDataUrl: selectedObj.imageDataUrl }
+                              : next
                           commitLines(
-                            linesRef.current.map((l) => (l.id === next.id ? next : l))
+                            linesRef.current.map((l) => (l.id === stored.id ? stored : l))
                           )
-                          if (next.imageDataUrl) {
-                            ensureStampImage(next.imageDataUrl, () => {
+                          if (tool !== 'match' && stored.imageDataUrl) {
+                            ensureStampImage(stored.imageDataUrl, () => {
                               redrawLinesRef.current()
                               drawHandles()
                             })
                           }
-                          setTool((t) => (t === 'match' ? t : t))
                           pushHistory()
                           redrawLines()
                           drawHandles()
@@ -11332,7 +11440,9 @@ export function IconPaintEditor({
               })}
               {tool === 'match' && (
                 <span className="text-[10px] text-muted shrink-0">
-                  Click sections to assign Color {matchSlot} · click again to unmark
+                  {matchSlot == null
+                    ? 'Choose Color 1–5, then click sections'
+                    : `Click sections for Color ${matchSlot} · click colour again to disarm`}
                 </span>
               )}
             </>
@@ -11987,6 +12097,55 @@ export function IconPaintEditor({
               if (hit) startTextEditRef.current(hit.id)
             }}
           />
+          {tool === 'match' &&
+            matchLabelsVisible &&
+            imageMatchTarget &&
+            selectedObj &&
+            matchLabels.length > 0 &&
+            (() => {
+              const a = selectedObj.pts[0]
+              const b = selectedObj.pts[1]
+              if (!a || !b) return null
+              const sx = stageSize.w / W
+              const sy = stageSize.h / H
+              const bx = Math.min(a.x, b.x)
+              const by = Math.min(a.y, b.y)
+              const dw = Math.max(1, Math.abs(b.x - a.x))
+              const dh = Math.max(1, Math.abs(b.y - a.y))
+              const rot = selectedObj.rot ?? 0
+              const c = objCenter(selectedObj)
+              return (
+                <div className="absolute inset-0 pointer-events-none overflow-hidden z-[5]">
+                  {matchLabels.map((lab) => {
+                    const lx = bx + (lab.ix / Math.max(1, lab.imgW)) * dw
+                    const ly = by + (lab.iy / Math.max(1, lab.imgH)) * dh
+                    const p =
+                      rot !== 0
+                        ? rotatePt({ x: lx, y: ly }, c, rot)
+                        : { x: lx, y: ly }
+                    return (
+                      <span
+                        key={lab.regionId}
+                        className="absolute font-bold leading-none select-none"
+                        style={{
+                          left: p.x * sx,
+                          top: p.y * sy,
+                          transform: 'translate(-50%, -50%)',
+                          color: lab.labelColor,
+                          fontSize: Math.max(10, Math.min(22, (Math.min(dw, dh) * sx) / 12)),
+                          textShadow:
+                            lab.labelColor === '#ffffff'
+                              ? '0 0 2px rgba(0,0,0,0.85)'
+                              : '0 0 2px rgba(255,255,255,0.85)'
+                        }}
+                      >
+                        {lab.slot}
+                      </span>
+                    )
+                  })}
+                </div>
+              )
+            })()}
           {textEditId && (() => {
             const l = lines.find((x) => x.id === textEditId) || linesRef.current.find((x) => x.id === textEditId)
             if (!l || l.type !== 'text') return null

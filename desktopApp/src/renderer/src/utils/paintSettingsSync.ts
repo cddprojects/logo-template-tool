@@ -85,6 +85,7 @@ const FAVICON_TYPE_KEYS: Record<ContentType, readonly string[]> = {
   image: [
     'imageDataUrl', 'imageSizeRatio', 'imageUseOriginalColors', 'imagePalette',
     'imageColor1', 'imageColor2', 'imageColor3', 'imageColor4', 'imageColor5',
+    'imageColorMarkPng', 'imageColorRegionPng',
     ...SHARED_CONTENT_KEYS
   ],
   svg: ['svgPath', 'svgColor', ...SHARED_CONTENT_KEYS],
@@ -113,6 +114,7 @@ const ICON_TYPE_KEYS: Record<IconSourceType, readonly string[]> = {
   image: [
     'imageDataUrl', 'imageSizeRatio', 'imageUseOriginalColors', 'imagePalette',
     'imageColor1', 'imageColor2', 'imageColor3', 'imageColor4', 'imageColor5',
+    'imageColorMarkPng', 'imageColorRegionPng',
     ...SHARED_CONTENT_KEYS
   ]
 }
@@ -2433,6 +2435,7 @@ export function outsideContentFromFavicon(content: FaviconContent): OutsideConte
     imageColor4: content.imageColor4,
     imageColor5: content.imageColor5,
     imageColorMarkPng: content.imageColorMarkPng,
+    imageColorRegionPng: content.imageColorRegionPng,
     contentShadowEnabled: !!content.contentShadowEnabled,
     contentShadowColor: content.contentShadowColor ?? '#00000080',
     contentShadowBlur: content.contentShadowBlur ?? 8,
@@ -2471,6 +2474,7 @@ export function outsideContentFromIcon(icon: IconConfig): OutsideContentSettings
     imageColor4: icon.imageColor4,
     imageColor5: icon.imageColor5,
     imageColorMarkPng: icon.imageColorMarkPng,
+    imageColorRegionPng: icon.imageColorRegionPng,
     contentShadowEnabled: !!icon.contentShadowEnabled,
     contentShadowColor: icon.contentShadowColor ?? '#00000080',
     contentShadowBlur: toDesign(icon.contentShadowBlur ?? 8),
@@ -2886,7 +2890,7 @@ export function buildPaintContentSync(opts: {
     // Partial stamp fills set rasterEdited and must not push fillColor — that
     // remaps the whole live image (including enclosed islands left unpainted).
     if (proxy.color && !proxy.rasterEdited) sync.fillColor = proxy.color
-    if (proxy.imageSourceDataUrl || proxy.colorMarkPng || proxy.imagePalette?.length) {
+    if (proxy.imageSourceDataUrl || proxy.colorMarkPng || proxy.colorRegionPng || proxy.imagePalette?.length) {
       if (proxy.imageUseOriginalColors !== undefined) {
         sync.imageUseOriginalColors = proxy.imageUseOriginalColors
       }
@@ -2897,6 +2901,7 @@ export function buildPaintContentSync(opts: {
       if (proxy.imageColor4 !== undefined) sync.imageColor4 = proxy.imageColor4
       if (proxy.imageColor5 !== undefined) sync.imageColor5 = proxy.imageColor5
       if (proxy.colorMarkPng !== undefined) sync.imageColorMarkPng = proxy.colorMarkPng
+      if (proxy.colorRegionPng !== undefined) sync.imageColorRegionPng = proxy.colorRegionPng
       // Marks are stamp-crop sized — keep imageDataUrl aligned with that bitmap.
       if (proxy.imageSourceDataUrl) sync.imageDataUrl = proxy.imageSourceDataUrl
     }
@@ -2993,9 +2998,14 @@ export function applyPaintContentSyncToFaviconContent(
     }
   }
 
-  if (sync.imagePalette || sync.imageColorMarkPng !== undefined || sync.imageColor1 !== undefined) {
-    if (next.type === 'image' || sync.imageColorMarkPng || sync.imagePalette) {
-      if (next.type !== 'image' && (sync.imageColorMarkPng || sync.imagePalette)) {
+  if (
+    sync.imagePalette ||
+    sync.imageColorMarkPng !== undefined ||
+    sync.imageColorRegionPng !== undefined ||
+    sync.imageColor1 !== undefined
+  ) {
+    if (next.type === 'image' || sync.imageColorMarkPng || sync.imageColorRegionPng || sync.imagePalette) {
+      if (next.type !== 'image' && (sync.imageColorMarkPng || sync.imageColorRegionPng || sync.imagePalette)) {
         // Keep type; only apply when already image
       }
       if (next.type === 'image') {
@@ -3009,6 +3019,7 @@ export function applyPaintContentSyncToFaviconContent(
         if (sync.imageColor4 !== undefined) next.imageColor4 = sync.imageColor4
         if (sync.imageColor5 !== undefined) next.imageColor5 = sync.imageColor5
         if (sync.imageColorMarkPng !== undefined) next.imageColorMarkPng = sync.imageColorMarkPng
+        if (sync.imageColorRegionPng !== undefined) next.imageColorRegionPng = sync.imageColorRegionPng
         if (sync.imageDataUrl) next.imageDataUrl = sync.imageDataUrl
       }
     }
@@ -3094,7 +3105,12 @@ export function applyPaintContentSyncToIcon(
     }
   }
 
-  if (sync.imagePalette || sync.imageColorMarkPng !== undefined || sync.imageColor1 !== undefined) {
+  if (
+    sync.imagePalette ||
+    sync.imageColorMarkPng !== undefined ||
+    sync.imageColorRegionPng !== undefined ||
+    sync.imageColor1 !== undefined
+  ) {
     if (next.sourceType === 'image') {
       if (sync.imageUseOriginalColors !== undefined) {
         next.imageUseOriginalColors = sync.imageUseOriginalColors
@@ -3106,6 +3122,7 @@ export function applyPaintContentSyncToIcon(
       if (sync.imageColor4 !== undefined) next.imageColor4 = sync.imageColor4
       if (sync.imageColor5 !== undefined) next.imageColor5 = sync.imageColor5
       if (sync.imageColorMarkPng !== undefined) next.imageColorMarkPng = sync.imageColorMarkPng
+      if (sync.imageColorRegionPng !== undefined) next.imageColorRegionPng = sync.imageColorRegionPng
       if (sync.imageDataUrl) next.imageDataUrl = sync.imageDataUrl
     }
   }
