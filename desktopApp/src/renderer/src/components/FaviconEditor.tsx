@@ -5,7 +5,7 @@ import { FAVICON_SHAPE_OPTIONS, faviconOuterCategory, DEFAULT_ICON_CONFIG } from
 import { bakeFaviconPaintContentLayer, renderFavicon, faviconInnerDrawSize } from '../utils/renderer'
 import { exportFaviconPng, exportFaviconSvg, exportFaviconIco, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
-import { Section, ColorRow, TransparentFillModeContext, SliderRow, ToggleRow, SelectRow, FontSelect, WeightSelect, FontStyleRow, TextRow, TextareaRow, ShapeGrid, NumberInputRow, AiImageGenPanel, RemoveBgButton, OuterCategoryTabs, ExportNameStyleToggle, ImageRecolorControls } from './Controls'
+import { Section, ColorRow, SwappableColorRows, TransparentFillModeContext, SliderRow, ToggleRow, SelectRow, FontSelect, WeightSelect, FontStyleRow, TextRow, TextareaRow, ShapeGrid, NumberInputRow, AiImageGenPanel, RemoveBgButton, OuterCategoryTabs, ExportNameStyleToggle, ImageRecolorControls } from './Controls'
 import { IconPicker } from './IconPicker'
 import { PreviewStage } from './PreviewStage'
 import { StylePanelResizeHandle } from './StylePanelResizeHandle'
@@ -1103,29 +1103,68 @@ export function FaviconEditor({
                   onChange={(v) => updateConfig({ outerShapeSvgUseOriginalColors: v })}
                 />
                 {!(config.outerShapeSvgUseOriginalColors ?? false) && (
-                  <>
-                    <ColorRow label="Color 1" value={config.outerShapeSvgColor ?? '#ffffff'} onChange={(v) => updateConfig({ outerShapeSvgColor: v })} />
-                    <ColorRow
-                      label="Color 2"
-                      value={config.outerShapeSvgSecondaryColor || config.outerShapeSvgColor || '#ffffff'}
-                      onChange={(v) => updateConfig({ outerShapeSvgSecondaryColor: v === (config.outerShapeSvgColor || '#ffffff') ? '' : v })}
-                    />
-                    <ColorRow
-                      label="Color 3"
-                      value={config.outerShapeSvgTertiaryColor || config.outerShapeSvgColor || '#ffffff'}
-                      onChange={(v) => updateConfig({ outerShapeSvgTertiaryColor: v === (config.outerShapeSvgColor || '#ffffff') ? '' : v })}
-                    />
-                    <ColorRow
-                      label="Color 4"
-                      value={config.outerShapeSvgColor4 || config.outerShapeSvgColor || '#ffffff'}
-                      onChange={(v) => updateConfig({ outerShapeSvgColor4: v === (config.outerShapeSvgColor || '#ffffff') ? '' : v })}
-                    />
-                    <ColorRow
-                      label="Color 5"
-                      value={config.outerShapeSvgColor5 || config.outerShapeSvgColor || '#ffffff'}
-                      onChange={(v) => updateConfig({ outerShapeSvgColor5: v === (config.outerShapeSvgColor || '#ffffff') ? '' : v })}
-                    />
-                  </>
+                  <SwappableColorRows
+                    slots={[
+                      {
+                        label: 'Color 1',
+                        value: config.outerShapeSvgColor ?? '#ffffff',
+                        onChange: (v) => updateConfig({ outerShapeSvgColor: v })
+                      },
+                      {
+                        label: 'Color 2',
+                        value: config.outerShapeSvgSecondaryColor || config.outerShapeSvgColor || '#ffffff',
+                        onChange: (v) =>
+                          updateConfig({
+                            outerShapeSvgSecondaryColor:
+                              v === (config.outerShapeSvgColor || '#ffffff') ? '' : v
+                          })
+                      },
+                      {
+                        label: 'Color 3',
+                        value: config.outerShapeSvgTertiaryColor || config.outerShapeSvgColor || '#ffffff',
+                        onChange: (v) =>
+                          updateConfig({
+                            outerShapeSvgTertiaryColor:
+                              v === (config.outerShapeSvgColor || '#ffffff') ? '' : v
+                          })
+                      },
+                      {
+                        label: 'Color 4',
+                        value: config.outerShapeSvgColor4 || config.outerShapeSvgColor || '#ffffff',
+                        onChange: (v) =>
+                          updateConfig({
+                            outerShapeSvgColor4: v === (config.outerShapeSvgColor || '#ffffff') ? '' : v
+                          })
+                      },
+                      {
+                        label: 'Color 5',
+                        value: config.outerShapeSvgColor5 || config.outerShapeSvgColor || '#ffffff',
+                        onChange: (v) =>
+                          updateConfig({
+                            outerShapeSvgColor5: v === (config.outerShapeSvgColor || '#ffffff') ? '' : v
+                          })
+                      }
+                    ]}
+                    onSwap={(a, b, va, vb) => {
+                      const primary = config.outerShapeSvgColor || '#ffffff'
+                      const nextPrimary = a === 0 ? vb : b === 0 ? va : primary
+                      const field = (i: number, v: string): Partial<FaviconConfig> => {
+                        if (i === 0) return { outerShapeSvgColor: v }
+                        if (i === 1)
+                          return {
+                            outerShapeSvgSecondaryColor: v === nextPrimary ? '' : v
+                          }
+                        if (i === 2)
+                          return {
+                            outerShapeSvgTertiaryColor: v === nextPrimary ? '' : v
+                          }
+                        if (i === 3)
+                          return { outerShapeSvgColor4: v === nextPrimary ? '' : v }
+                        return { outerShapeSvgColor5: v === nextPrimary ? '' : v }
+                      }
+                      updateConfig({ ...field(a, vb), ...field(b, va) })
+                    }}
+                  />
                 )}
                 <SliderRow label="Offset X" value={config.outerShapeOffsetX ?? 0} min={-100} max={100} onChange={(v) => updateConfig({ outerShapeOffsetX: v })} unit="px" />
                 <SliderRow label="Offset Y" value={config.outerShapeOffsetY ?? 0} min={-100} max={100} onChange={(v) => updateConfig({ outerShapeOffsetY: v })} unit="px" />
@@ -1279,29 +1318,66 @@ export function FaviconEditor({
                   onChange={(v) => setContent({ svgMarkupUseOriginalColors: v })}
                 />
                 {!(config.content.svgMarkupUseOriginalColors ?? false) && (
-                  <>
-                    <ColorRow label="Color 1" value={config.content.lucideColor} onChange={(v) => setContent({ lucideColor: v })} />
-                    <ColorRow
-                      label="Color 2"
-                      value={config.content.svgMarkupSecondaryColor || config.content.lucideColor}
-                      onChange={(v) => setContent({ svgMarkupSecondaryColor: v === config.content.lucideColor ? '' : v })}
-                    />
-                    <ColorRow
-                      label="Color 3"
-                      value={config.content.svgMarkupTertiaryColor || config.content.lucideColor}
-                      onChange={(v) => setContent({ svgMarkupTertiaryColor: v === config.content.lucideColor ? '' : v })}
-                    />
-                    <ColorRow
-                      label="Color 4"
-                      value={config.content.svgMarkupColor4 || config.content.lucideColor}
-                      onChange={(v) => setContent({ svgMarkupColor4: v === config.content.lucideColor ? '' : v })}
-                    />
-                    <ColorRow
-                      label="Color 5"
-                      value={config.content.svgMarkupColor5 || config.content.lucideColor}
-                      onChange={(v) => setContent({ svgMarkupColor5: v === config.content.lucideColor ? '' : v })}
-                    />
-                  </>
+                  <SwappableColorRows
+                    slots={[
+                      {
+                        label: 'Color 1',
+                        value: config.content.lucideColor,
+                        onChange: (v) => setContent({ lucideColor: v })
+                      },
+                      {
+                        label: 'Color 2',
+                        value: config.content.svgMarkupSecondaryColor || config.content.lucideColor,
+                        onChange: (v) =>
+                          setContent({
+                            svgMarkupSecondaryColor: v === config.content.lucideColor ? '' : v
+                          })
+                      },
+                      {
+                        label: 'Color 3',
+                        value: config.content.svgMarkupTertiaryColor || config.content.lucideColor,
+                        onChange: (v) =>
+                          setContent({
+                            svgMarkupTertiaryColor: v === config.content.lucideColor ? '' : v
+                          })
+                      },
+                      {
+                        label: 'Color 4',
+                        value: config.content.svgMarkupColor4 || config.content.lucideColor,
+                        onChange: (v) =>
+                          setContent({
+                            svgMarkupColor4: v === config.content.lucideColor ? '' : v
+                          })
+                      },
+                      {
+                        label: 'Color 5',
+                        value: config.content.svgMarkupColor5 || config.content.lucideColor,
+                        onChange: (v) =>
+                          setContent({
+                            svgMarkupColor5: v === config.content.lucideColor ? '' : v
+                          })
+                      }
+                    ]}
+                    onSwap={(a, b, va, vb) => {
+                      const primary = config.content.lucideColor
+                      const nextPrimary = a === 0 ? vb : b === 0 ? va : primary
+                      const field = (i: number, v: string): Partial<FaviconConfig['content']> => {
+                        if (i === 0) return { lucideColor: v }
+                        if (i === 1)
+                          return {
+                            svgMarkupSecondaryColor: v === nextPrimary ? '' : v
+                          }
+                        if (i === 2)
+                          return {
+                            svgMarkupTertiaryColor: v === nextPrimary ? '' : v
+                          }
+                        if (i === 3)
+                          return { svgMarkupColor4: v === nextPrimary ? '' : v }
+                        return { svgMarkupColor5: v === nextPrimary ? '' : v }
+                      }
+                      setContent({ ...field(a, vb), ...field(b, va) })
+                    }}
+                  />
                 )}
               </>
             )}

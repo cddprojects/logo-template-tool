@@ -73,7 +73,7 @@ export function ApplyToAllBar({
         </label>
         <label
           className="flex items-center gap-1 cursor-pointer select-none whitespace-nowrap"
-          title="Fill, border, shadow, and remapped image/SVG/Canva colours when those modes are in use — not Paint objects"
+          title="Fill, border, shadow, and remapped image/SVG/Canva colours when those modes are in use — not Paint objects. Off + Edit: copies the source image; targets with a custom Color 1–5 list keep that list; default targets use Original (pre-remap) colours"
         >
           <input
             type="checkbox"

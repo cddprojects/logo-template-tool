@@ -60,6 +60,38 @@ export function emptyImageRecolorFields(): ImageRecolorFields {
   }
 }
 
+/**
+ * True when the user turned Original colours off and changed at least one Color
+ * slot away from the scanned palette (or set a slot with no palette yet).
+ * Untouched “Original off but colours still = palette” counts as default.
+ */
+export function hasCustomImageRecolor(fields: {
+  imageUseOriginalColors?: boolean
+  imagePalette?: string[]
+  imageColor1?: string
+  imageColor2?: string
+  imageColor3?: string
+  imageColor4?: string
+  imageColor5?: string
+} | null | undefined): boolean {
+  if (!fields || fields.imageUseOriginalColors !== false) return false
+  const palette = fields.imagePalette ?? []
+  const slots = [
+    fields.imageColor1,
+    fields.imageColor2,
+    fields.imageColor3,
+    fields.imageColor4,
+    fields.imageColor5
+  ]
+  for (let i = 0; i < MAX_PALETTE; i++) {
+    const slot = (slots[i] ?? '').trim().toLowerCase()
+    if (!slot) continue
+    const orig = (palette[i] ?? '').trim().toLowerCase()
+    if (slot !== orig) return true
+  }
+  return false
+}
+
 const IMAGE_RECOLOR_KEYS = new Set([
   'imageUseOriginalColors',
   'imagePalette',

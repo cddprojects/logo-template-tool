@@ -16,7 +16,7 @@ import type {
 import { DEFAULT_FAVICON_CONFIG } from '../types'
 import { contentTypeFromIcon } from './contentTypeSync'
 import { loadCachedImage } from './iconUtils'
-import { emptyImageRecolorFields } from './imageRecolor'
+import { emptyImageRecolorFields, hasCustomImageRecolor, imageRecolorFieldsFromPalette } from './imageRecolor'
 import type { InnerContentDecor } from './paintVectorRender'
 import { paintVectorHasDisplayTransform } from './paintVectorRender'
 import { iconOuterShadowPad, measureSpacedText } from './renderer'
@@ -1076,19 +1076,104 @@ function applyFingerprintReplacer(_key: string, value: unknown): unknown {
 
 /** Merge Paint session planes selected by Apply “Edit” + Layer checkboxes.
  * Inner = Inner paint + objects at/above it; Outer = everything below Inner paint.
+ * When Colour is off, drop source-coloured rasters / contentBound image pixels so
+ * each target keeps its own live image (Original colours) instead of the source remap.
  */
 async function mergePaintSessionForApplyOptions(
   sourceSession: PaintSession | null | undefined,
   targetSession: PaintSession | null | undefined,
-  opts: Pick<ApplyToAllOptions, 'edit' | 'inner' | 'outer'>
+  opts: Pick<ApplyToAllOptions, 'edit' | 'inner' | 'outer' | 'color'>
 ): Promise<PaintSession | null | undefined> {
   if (!opts.edit) return targetSession
+  let merged: PaintSession | null | undefined
   if (opts.inner && opts.outer) {
-    return sourceSession ? structuredClone(sourceSession) : null
+    merged = sourceSession ? structuredClone(sourceSession) : null
+  } else if (opts.inner) {
+    merged = await mergePaintInnerFromSource(sourceSession, targetSession)
+  } else if (opts.outer) {
+    merged = await mergePaintOuterFromSource(sourceSession, targetSession)
+  } else {
+    return targetSession
   }
-  if (opts.inner) return mergePaintInnerFromSource(sourceSession, targetSession)
-  if (opts.outer) return mergePaintOuterFromSource(sourceSession, targetSession)
-  return targetSession
+  if (!opts.color && merged) {
+    merged = neutralizePaintSessionImageColors(merged, {
+      stripInner: !!opts.inner,
+      stripOuter: !!opts.outer
+    })
+  }
+  return merged
+}
+
+/**
+ * Remove baked image remaps from a paint session after Edit·without·Colour.
+ * Keeps object geometry (shapes / text / free stamps) but clears overlay PNGs and
+ * contentBound rasters so live Inner uses each target’s own image + colour slots.
+ */
+function neutralizePaintSessionImageColors(
+  session: PaintSession,
+  opts: { stripInner: boolean; stripOuter: boolean }
+): PaintSession {
+  const empty = emptyOverlayPng(session.resolution)
+  let next: PaintSession = { ...session }
+
+  if (opts.stripInner) {
+    const below =
+      !opts.stripOuter && session.contentBelowDecorationsPng
+        ? session.contentBelowDecorationsPng
+        : empty
+    next = {
+      ...next,
+      contentPng: empty,
+      contentAboveDecorationsPng: empty,
+      contentDecorationsPng: below,
+      contentBelowDecorationsPng: opts.stripOuter
+        ? empty
+        : (session.contentBelowDecorationsPng ?? empty),
+      decorationsPng: undefined,
+      contentBakedInDecorations: false,
+      linkedTextInDecorations: false
+    }
+  }
+  if (opts.stripOuter) {
+    const above =
+      !opts.stripInner &&
+      (session.contentAboveDecorationsPng ?? session.contentPng)
+        ? (session.contentAboveDecorationsPng ?? session.contentPng ?? empty)
+        : empty
+    next = {
+      ...next,
+      containerPng: empty,
+      containerDecorationsPng: empty,
+      contentBelowDecorationsPng: empty,
+      contentDecorationsPng: opts.stripInner ? empty : above,
+      decorationsPng: undefined
+    }
+  }
+
+  next.vectors = (next.vectors ?? []).map((v) => {
+    if (v.punchMask) return v
+    // Live Inner image stand-in — never carry the source’s remapped pixels.
+    if (v.contentBound || v.contentProxySlot) {
+      const {
+        imageDataUrl: _img,
+        paintStrokes: _ps,
+        contentBound: _cb,
+        ...rest
+      } = v
+      return {
+        ...rest,
+        type: rest.type ?? 'stamp',
+        stampSource: rest.stampSource ?? 'image',
+        contentProxySlot: true,
+        contentBound: undefined,
+        imageDataUrl: undefined,
+        paintStrokes: undefined
+      }
+    }
+    return v
+  })
+
+  return stripPaintSessionColorHints(next) ?? next
 }
 
 /**
@@ -1261,6 +1346,71 @@ function paintSessionHasColorRewriteHints(
   )
 }
 
+/**
+ * Edit · Colour off — copy the source image bitmap, then:
+ * - Target has Original off + custom Color 1–5 → keep that remap list
+ * - Otherwise → Original colours (pre paint-remap), not the source’s remapped look
+ */
+function imageFieldsForEditWithoutColor(
+  source: {
+    imageDataUrl?: string
+    imagePalette?: string[]
+    imageUseOriginalColors?: boolean
+    imageColor1?: string
+    imageColor2?: string
+    imageColor3?: string
+    imageColor4?: string
+    imageColor5?: string
+  },
+  target: {
+    imageDataUrl?: string
+    imagePalette?: string[]
+    imageUseOriginalColors?: boolean
+    imageColor1?: string
+    imageColor2?: string
+    imageColor3?: string
+    imageColor4?: string
+    imageColor5?: string
+  }
+): {
+  imageDataUrl: string
+  imagePalette: string[]
+  imageUseOriginalColors: boolean
+  imageColor1: string
+  imageColor2: string
+  imageColor3: string
+  imageColor4: string
+  imageColor5: string
+} {
+  const copiedUrl = (source.imageDataUrl || target.imageDataUrl || '').trim()
+  const palette =
+    source.imagePalette && source.imagePalette.length > 0
+      ? [...source.imagePalette]
+      : target.imagePalette && target.imagePalette.length > 0
+        ? [...target.imagePalette]
+        : []
+
+  if (hasCustomImageRecolor(target)) {
+    return {
+      imageDataUrl: copiedUrl,
+      imagePalette: palette,
+      imageUseOriginalColors: false,
+      imageColor1: target.imageColor1 ?? '',
+      imageColor2: target.imageColor2 ?? '',
+      imageColor3: target.imageColor3 ?? '',
+      imageColor4: target.imageColor4 ?? '',
+      imageColor5: target.imageColor5 ?? ''
+    }
+  }
+
+  // Default / Original: show the copied image as it was before edit remapping.
+  const original = imageRecolorFieldsFromPalette(palette)
+  return {
+    imageDataUrl: copiedUrl,
+    ...original
+  }
+}
+
 /** After Edit merge: honour Colour checkbox for live slots + vector fills. */
 function finalizeIconEditColors(
   next: IconConfig,
@@ -1301,6 +1451,14 @@ function finalizeIconEditColors(
     let out: IconConfig = {
       ...withIconTargetColors(next, target),
       paintSession: session
+    }
+    // Image: copy source bitmap; colour from target custom list or Original.
+    if (source.sourceType === 'image' && (out.sourceType === 'image' || target.sourceType === 'image')) {
+      out = {
+        ...out,
+        sourceType: 'image',
+        ...imageFieldsForEditWithoutColor(source, target)
+      }
     }
     if (!opts.outer) out = preserveIconOuterColors(out, target)
     else {
@@ -1357,6 +1515,19 @@ function finalizeFaviconEditColors(
       ...next,
       content: withFaviconTargetColors(next.content, target.content),
       paintSession: session
+    }
+    if (
+      source.content.type === 'image' &&
+      (out.content.type === 'image' || target.content.type === 'image')
+    ) {
+      out = {
+        ...out,
+        content: {
+          ...out.content,
+          type: 'image',
+          ...imageFieldsForEditWithoutColor(source.content, target.content)
+        }
+      }
     }
     if (!opts.outer) out = preserveFaviconOuterColors(out, target)
     else {

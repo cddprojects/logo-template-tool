@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react'
-import { Sparkles, Loader, Info } from 'lucide-react'
+import { Sparkles, Loader, Info, ArrowLeftRight } from 'lucide-react'
 import { generateAIImage, removeImageBackground } from '../utils/iconUtils'
 import {
   AI_VISUAL_STYLES,
@@ -22,17 +22,19 @@ interface RowProps {
   label: string
   children: React.ReactNode
   hint?: string
+  /** Optional control in the label column (e.g. colour-slot swap). */
+  leading?: React.ReactNode
 }
 
-export function Row({ label, children, hint }: RowProps): JSX.Element {
+export function Row({ label, children, hint, leading }: RowProps): JSX.Element {
   return (
     <div className="flex items-center gap-2 py-1.5 min-w-0">
-      <label
-        className="text-xs text-muted shrink-0 basis-[9rem] min-w-[9rem] max-w-[58%] leading-snug"
-        title={label}
-      >
-        {label}
-      </label>
+      <div className="shrink-0 basis-[9rem] min-w-[9rem] max-w-[58%] flex items-center gap-1.5">
+        {leading}
+        <label className="text-xs text-muted leading-snug truncate min-w-0" title={label}>
+          {label}
+        </label>
+      </div>
       <div className="flex-1 min-w-0 overflow-hidden">{children}</div>
       {hint && <span className="text-[10px] text-muted/60 shrink-0 ml-1">{hint}</span>}
     </div>
@@ -608,9 +610,20 @@ interface ColorRowProps {
   onChange: (v: string) => void
   /** Solid colours only — no Linear/Radial tabs (use for shadow colours). */
   solidOnly?: boolean
+  /** Lit = first pick in a two-click colour-slot swap. */
+  swapLit?: boolean
+  /** When set, shows a swap icon in the label indent. */
+  onSwapClick?: () => void
 }
 
-export function ColorRow({ label, value, onChange, solidOnly = false }: ColorRowProps): JSX.Element {
+export function ColorRow({
+  label,
+  value,
+  onChange,
+  solidOnly = false,
+  swapLit = false,
+  onSwapClick
+}: ColorRowProps): JSX.Element {
   const [open, setOpen] = React.useState(false)
   const [anchorRect, setAnchorRect] = React.useState<DOMRect | null>(null)
   const swatchRef = React.useRef<HTMLButtonElement>(null)
@@ -647,8 +660,29 @@ export function ColorRow({ label, value, onChange, solidOnly = false }: ColorRow
   const punchCtx = React.useContext(TransparentFillModeContext)
   const showPunchToggle = !!punchCtx && !isGrad && isZeroAlphaHex(effectiveValue)
 
+  const swapLeading = onSwapClick ? (
+    <button
+      type="button"
+      onClick={onSwapClick}
+      title={
+        swapLit
+          ? 'Selected — click another swap button to exchange colours'
+          : 'Swap colours — click here, then another slot'
+      }
+      className={`shrink-0 w-5 h-5 rounded flex items-center justify-center border transition-colors ${
+        swapLit
+          ? 'bg-accent text-white border-accent'
+          : 'bg-surface3 text-muted border-border hover:text-text hover:border-border'
+      }`}
+      aria-pressed={swapLit}
+      aria-label={swapLit ? `Swap source: ${label}` : `Swap ${label}`}
+    >
+      <ArrowLeftRight size={11} strokeWidth={2.25} />
+    </button>
+  ) : undefined
+
   return (
-    <Row label={label}>
+    <Row label={label} leading={swapLeading}>
       <div className="flex items-center gap-2 min-w-0 w-full">
         {/* Swatch — shows gradient or solid color, opens popup */}
         <button
@@ -1732,6 +1766,73 @@ export function RemoveBgButton({ imageDataUrl, onResult }: RemoveBgButtonProps):
 
 export type ImageRecolorPatch = Partial<ImageRecolorFields>
 
+/** Two-click arm → swap for Colour 1–5 style lists. */
+export function useColorSlotSwap(): {
+  armedIndex: number | null
+  onSwapClick: (index: number, swap: (a: number, b: number) => void) => void
+  clearArmed: () => void
+} {
+  const [armedIndex, setArmedIndex] = useState<number | null>(null)
+  return {
+    armedIndex,
+    clearArmed: () => setArmedIndex(null),
+    onSwapClick: (index, swap) => {
+      if (armedIndex === null) {
+        setArmedIndex(index)
+        return
+      }
+      if (armedIndex === index) {
+        setArmedIndex(null)
+        return
+      }
+      swap(armedIndex, index)
+      setArmedIndex(null)
+    }
+  }
+}
+
+export type SwappableColorSlot = {
+  label: string
+  value: string
+  onChange: (v: string) => void
+}
+
+/** Colour 1–N rows with swap buttons in the label indent. */
+export function SwappableColorRows({
+  slots,
+  solidOnly = false,
+  onSwap
+}: {
+  slots: SwappableColorSlot[]
+  solidOnly?: boolean
+  /**
+   * Apply both new values in one parent patch (index A gets valueB, B gets valueA).
+   * Prefer this over two onChange calls so React state updates are not lost.
+   */
+  onSwap: (indexA: number, indexB: number, valueA: string, valueB: string) => void
+}): JSX.Element {
+  const { armedIndex, onSwapClick } = useColorSlotSwap()
+  return (
+    <>
+      {slots.map((slot, i) => (
+        <ColorRow
+          key={`${slot.label}-${i}`}
+          label={slot.label}
+          value={slot.value}
+          onChange={slot.onChange}
+          solidOnly={solidOnly}
+          swapLit={armedIndex === i}
+          onSwapClick={() =>
+            onSwapClick(i, (a, b) => {
+              onSwap(a, b, slots[a]!.value, slots[b]!.value)
+            })
+          }
+        />
+      ))}
+    </>
+  )
+}
+
 interface ImageRecolorControlsProps {
   imageDataUrl: string
   imageUseOriginalColors?: boolean
@@ -1756,6 +1857,7 @@ export function ImageRecolorControls({
   onChange
 }: ImageRecolorControlsProps): JSX.Element | null {
   const [scanning, setScanning] = useState(false)
+  const { armedIndex, onSwapClick, clearArmed } = useColorSlotSwap()
   if (!imageDataUrl) return null
 
   const colors = [imageColor1, imageColor2, imageColor3, imageColor4, imageColor5]
@@ -1766,6 +1868,7 @@ export function ImageRecolorControls({
     try {
       const palette = await scanImagePalette(imageDataUrl)
       onChange(imageRecolorFieldsFromPalette(palette))
+      clearArmed()
     } finally {
       setScanning(false)
     }
@@ -1791,6 +1894,7 @@ export function ImageRecolorControls({
             label="Original colors"
             value={imageUseOriginalColors}
             onChange={(v) => {
+              clearArmed()
               if (v) {
                 onChange({ imageUseOriginalColors: true })
                 return
@@ -1810,11 +1914,23 @@ export function ImageRecolorControls({
                 label={`Color ${i + 1}`}
                 value={(colors[i] || '').trim() || orig}
                 onChange={(v) => onChange({ [colorKeys[i]]: v === orig ? '' : v })}
+                swapLit={armedIndex === i}
+                onSwapClick={() =>
+                  onSwapClick(i, (a, b) => {
+                    const ea = (colors[a] || '').trim() || imagePalette[a] || ''
+                    const eb = (colors[b] || '').trim() || imagePalette[b] || ''
+                    onChange({
+                      [colorKeys[a]]: eb,
+                      [colorKeys[b]]: ea
+                    } as ImageRecolorPatch)
+                  })
+                }
               />
             ))}
           {!imageUseOriginalColors && (
             <p className="text-[10px] text-muted leading-snug pb-1">
-              Maps each scanned colour to the picker above — best for simple flat designs.
+              Maps each scanned colour to the picker above — best for simple flat designs. Use the
+              arrows to swap two colour slots.
             </p>
           )}
         </>

@@ -39,6 +39,7 @@ import {
 import {
   Section,
   ColorRow,
+  SwappableColorRows,
   TransparentFillModeContext,
   SliderRow,
   TextRow,
@@ -1508,37 +1509,93 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                       />
                     )}
                     {!(ct === 'svg-markup' && (safeConfig.icon.svgMarkupUseOriginalColors ?? false)) && (
-                      <>
+                      ct === 'svg-markup' ? (
+                        <SwappableColorRows
+                          slots={[
+                            {
+                              label: 'Color 1',
+                              value: safeConfig.icon.primaryColor,
+                              onChange: (v) => setIcon({ primaryColor: v })
+                            },
+                            {
+                              label: 'Color 2',
+                              value:
+                                safeConfig.icon.svgMarkupSecondaryColor ||
+                                safeConfig.icon.primaryColor,
+                              onChange: (v) =>
+                                setIcon({
+                                  svgMarkupSecondaryColor:
+                                    v === safeConfig.icon.primaryColor ? '' : v
+                                })
+                            },
+                            {
+                              label: 'Color 3',
+                              value:
+                                safeConfig.icon.svgMarkupTertiaryColor ||
+                                safeConfig.icon.primaryColor,
+                              onChange: (v) =>
+                                setIcon({
+                                  svgMarkupTertiaryColor:
+                                    v === safeConfig.icon.primaryColor ? '' : v
+                                })
+                            },
+                            {
+                              label: 'Color 4',
+                              value:
+                                safeConfig.icon.svgMarkupColor4 ||
+                                safeConfig.icon.primaryColor,
+                              onChange: (v) =>
+                                setIcon({
+                                  svgMarkupColor4:
+                                    v === safeConfig.icon.primaryColor ? '' : v
+                                })
+                            },
+                            {
+                              label: 'Color 5',
+                              value:
+                                safeConfig.icon.svgMarkupColor5 ||
+                                safeConfig.icon.primaryColor,
+                              onChange: (v) =>
+                                setIcon({
+                                  svgMarkupColor5:
+                                    v === safeConfig.icon.primaryColor ? '' : v
+                                })
+                            }
+                          ]}
+                          onSwap={(a, b, va, vb) => {
+                            const primary = safeConfig.icon.primaryColor
+                            const slotValue = (i: number, v: string, nextPrimary: string) => {
+                              if (i === 0) return { primaryColor: v }
+                              if (i === 1)
+                                return {
+                                  svgMarkupSecondaryColor: v === nextPrimary ? '' : v
+                                }
+                              if (i === 2)
+                                return {
+                                  svgMarkupTertiaryColor: v === nextPrimary ? '' : v
+                                }
+                              if (i === 3)
+                                return {
+                                  svgMarkupColor4: v === nextPrimary ? '' : v
+                                }
+                              return {
+                                svgMarkupColor5: v === nextPrimary ? '' : v
+                              }
+                            }
+                            const nextPrimary = a === 0 ? vb : b === 0 ? va : primary
+                            setIcon({
+                              ...slotValue(a, vb, nextPrimary),
+                              ...slotValue(b, va, nextPrimary)
+                            })
+                          }}
+                        />
+                      ) : (
                         <ColorRow
-                          label={ct === 'svg-markup' ? 'Color 1' : 'Color'}
+                          label="Color"
                           value={safeConfig.icon.primaryColor}
                           onChange={(v) => setIcon({ primaryColor: v })}
                         />
-                        {ct === 'svg-markup' && (
-                          <>
-                            <ColorRow
-                              label="Color 2"
-                              value={safeConfig.icon.svgMarkupSecondaryColor || safeConfig.icon.primaryColor}
-                              onChange={(v) => setIcon({ svgMarkupSecondaryColor: v === safeConfig.icon.primaryColor ? '' : v })}
-                            />
-                            <ColorRow
-                              label="Color 3"
-                              value={safeConfig.icon.svgMarkupTertiaryColor || safeConfig.icon.primaryColor}
-                              onChange={(v) => setIcon({ svgMarkupTertiaryColor: v === safeConfig.icon.primaryColor ? '' : v })}
-                            />
-                            <ColorRow
-                              label="Color 4"
-                              value={safeConfig.icon.svgMarkupColor4 || safeConfig.icon.primaryColor}
-                              onChange={(v) => setIcon({ svgMarkupColor4: v === safeConfig.icon.primaryColor ? '' : v })}
-                            />
-                            <ColorRow
-                              label="Color 5"
-                              value={safeConfig.icon.svgMarkupColor5 || safeConfig.icon.primaryColor}
-                              onChange={(v) => setIcon({ svgMarkupColor5: v === safeConfig.icon.primaryColor ? '' : v })}
-                            />
-                          </>
-                        )}
-                      </>
+                      )
                     )}
                   </>
                   )

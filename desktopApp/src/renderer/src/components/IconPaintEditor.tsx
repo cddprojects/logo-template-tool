@@ -11700,7 +11700,35 @@ export function IconPaintEditor({
       <PreviewStage
         className="flex-1 min-h-0"
         onStageMouseDown={(e) => {
-          if (tool !== 'select' || e.button !== 0) return
+          if (e.button !== 0) return
+          // Canvas stopsPropagation — only the stage background (outside the
+          // icon frame) should reach here. Guard anyway in case a child misses it.
+          const frame = previewRef.current ?? stageRef.current
+          if (frame) {
+            const r = frame.getBoundingClientRect()
+            if (
+              e.clientX >= r.left &&
+              e.clientX <= r.right &&
+              e.clientY >= r.top &&
+              e.clientY <= r.bottom
+            ) {
+              return
+            }
+          }
+          // Large objects that fill the icon: click the surrounding stage to deselect.
+          // Layers / toolbar / library sit outside PreviewStage and never hit this.
+          if (tool === 'pointer' || tool === 'reshape') {
+            if (!selectedIdRef.current && selectedLayerIdsRef.current.size === 0) return
+            lineDragRef.current = null
+            selectedIdRef.current = null
+            setSelectedId(null)
+            selectedLayerIdsRef.current = new Set()
+            setSelectedLayerIds(new Set())
+            redrawLines()
+            drawHandles()
+            return
+          }
+          if (tool !== 'select') return
           // Clicks on the stage gutter must not start a new marquee or finalize
           // an active one — only the preview canvas handles those.
           if (floatRef.current || marqueeRef.current) return
