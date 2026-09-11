@@ -7,6 +7,7 @@ import {
   type AiVisualStyle
 } from '../utils/aiStyles'
 import {
+  bakeImageSoftAaBleed,
   imageRecolorFieldsFromPalette,
   scanImagePalette,
   type ImageRecolorFields
@@ -1764,7 +1765,11 @@ export function RemoveBgButton({ imageDataUrl, onResult }: RemoveBgButtonProps):
 
 // ── Image recolor (scan up to 5 colours, toggle manual replace like SVG) ───────
 
-export type ImageRecolorPatch = Partial<ImageRecolorFields>
+export type ImageRecolorPatch = Partial<ImageRecolorFields> & {
+  imageDataUrl?: string
+  imageColorMarkPng?: string
+  imageColorRegionPng?: string
+}
 
 /** Two-click arm → swap for Colour 1–5 style lists. */
 export function useColorSlotSwap(): {
@@ -1842,6 +1847,7 @@ interface ImageRecolorControlsProps {
   imageColor3?: string
   imageColor4?: string
   imageColor5?: string
+  imageColorMarkPng?: string
   onChange: (patch: ImageRecolorPatch) => void
 }
 
@@ -1854,9 +1860,11 @@ export function ImageRecolorControls({
   imageColor3 = '',
   imageColor4 = '',
   imageColor5 = '',
+  imageColorMarkPng,
   onChange
 }: ImageRecolorControlsProps): JSX.Element | null {
   const [scanning, setScanning] = useState(false)
+  const [bleeding, setBleeding] = useState(false)
   const { armedIndex, onSwapClick, clearArmed } = useColorSlotSwap()
   if (!imageDataUrl) return null
 
@@ -1874,6 +1882,28 @@ export function ImageRecolorControls({
     }
   }
 
+  const cleanEdges = async () => {
+    setBleeding(true)
+    try {
+      const baked = await bakeImageSoftAaBleed({
+        imageDataUrl,
+        imageUseOriginalColors,
+        imagePalette,
+        imageColor1,
+        imageColor2,
+        imageColor3,
+        imageColor4,
+        imageColor5,
+        imageColorMarkPng
+      })
+      if (!baked) return
+      onChange(baked)
+      clearArmed()
+    } finally {
+      setBleeding(false)
+    }
+  }
+
   return (
     <div className="space-y-1 pt-1">
       <div className="flex items-center justify-between gap-2 py-1">
@@ -1881,7 +1911,7 @@ export function ImageRecolorControls({
         <button
           type="button"
           onClick={scan}
-          disabled={scanning}
+          disabled={scanning || bleeding}
           className="px-2 py-1 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
           title="Scan the image for up to 5 solid colours"
         >
@@ -1928,10 +1958,22 @@ export function ImageRecolorControls({
               />
             ))}
           {!imageUseOriginalColors && (
-            <p className="text-[10px] text-muted leading-snug pb-1">
-              Maps each scanned colour to the picker above — best for simple flat designs. Use the
-              arrows to swap two colour slots.
-            </p>
+            <>
+              <button
+                type="button"
+                onClick={() => void cleanEdges()}
+                disabled={bleeding || scanning}
+                className="w-full px-2 py-1.5 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
+                title="Scan soft anti-aliased outline pixels and bleed neighbouring Color 1–5 into them, then bake the result as Original"
+              >
+                {bleeding ? 'Cleaning edges…' : 'Clean AA edges'}
+              </button>
+              <p className="text-[10px] text-muted leading-snug pb-1">
+                Maps each scanned colour to the picker above — best for simple flat designs. Use the
+                arrows to swap two colour slots. Clean AA edges removes old-colour outline halos
+                (bakes the remapped look).
+              </p>
+            </>
           )}
         </>
       )}

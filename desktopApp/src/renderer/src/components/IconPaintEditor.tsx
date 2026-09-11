@@ -94,6 +94,7 @@ import {
   setImageProxySlotColor,
   type MatchSectionLabel
 } from '../utils/imageColorMatch'
+import { bakeImageSoftAaBleed } from '../utils/imageRecolor'
 import { reshapeIsApplied } from '../utils/paintReshape'
 import {
   reuseCanvas,
@@ -11486,6 +11487,58 @@ export function IconPaintEditor({
                   </button>
                 )
               })}
+              {matchObj.imageUseOriginalColors === false && (
+                <button
+                  type="button"
+                  title="Scan soft AA outline and bleed neighbouring Color 1–5 into it, then bake as Original"
+                  onClick={() => {
+                    void (async () => {
+                      const source = matchObj.imageSourceDataUrl || matchObj.imageDataUrl
+                      if (!source) return
+                      const baked = await bakeImageSoftAaBleed({
+                        imageDataUrl: source,
+                        imageUseOriginalColors: matchObj.imageUseOriginalColors,
+                        imagePalette: matchObj.imagePalette,
+                        imageColor1: matchObj.imageColor1,
+                        imageColor2: matchObj.imageColor2,
+                        imageColor3: matchObj.imageColor3,
+                        imageColor4: matchObj.imageColor4,
+                        imageColor5: matchObj.imageColor5,
+                        imageColorMarkPng: matchObj.colorMarkPng
+                      })
+                      if (!baked) return
+                      const next: LineObj = {
+                        ...matchObj,
+                        imageDataUrl: baked.imageDataUrl,
+                        imageSourceDataUrl: baked.imageDataUrl,
+                        imageUseOriginalColors: true,
+                        imagePalette: baked.imagePalette,
+                        imageColor1: baked.imageColor1,
+                        imageColor2: baked.imageColor2,
+                        imageColor3: baked.imageColor3,
+                        imageColor4: baked.imageColor4,
+                        imageColor5: baked.imageColor5,
+                        colorMarkPng: undefined,
+                        colorRegionPng: undefined
+                      }
+                      commitLines(
+                        linesRef.current.map((l) => (l.id === next.id ? next : l))
+                      )
+                      ensureStampImage(next.imageDataUrl!, () => {
+                        redrawLinesRef.current()
+                        drawHandles()
+                      })
+                      pushHistory()
+                      redrawLines()
+                      drawHandles()
+                      if (tool === 'match') exitMatchMode()
+                    })()
+                  }}
+                  className="h-8 px-2 rounded-lg flex items-center text-[11px] font-medium shrink-0 bg-surface3 text-muted hover:text-text transition-colors"
+                >
+                  Clean AA
+                </button>
+              )}
               {tool === 'match' && (
                 <span className="text-[10px] text-muted shrink-0">
                   {matchSlot == null

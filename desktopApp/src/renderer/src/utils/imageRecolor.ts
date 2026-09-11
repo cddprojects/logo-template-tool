@@ -237,8 +237,7 @@ const recolorCache = new Map<string, string>()
 const MAX_RECOLOR_CACHE = 40
 
 function recolorCacheKey(src: string, palette: string[], replacements: string[]): string {
-  // v2: soft-edge neighbour bleed after solid remap
-  return `v2:${src.length}:${src.slice(22, 54)}:${src.slice(-32)}|${palette.join(',')}|${replacements.join(',')}`
+  return `${src.length}:${src.slice(22, 54)}:${src.slice(-32)}|${palette.join(',')}|${replacements.join(',')}`
 }
 
 /** Soft fringe alpha ceiling — above this, pixels are treated as solid ink. */
@@ -257,9 +256,8 @@ const BLEED_DIRS: readonly [number, number][] = [
 ]
 
 /**
- * After solid remap: copy remapped RGB into soft AA fringe pixels that sit next
- * to remapped ink. Keeps coverage alpha so the silhouette stays smooth, but
- * drops the old-colour halo that MAP_DIST / unmarked soft edges leave behind.
+ * Copy solid-neighbour RGB into soft AA fringe pixels. Keeps coverage alpha.
+ * `remapped` marks donor pixels (typically solid ink after Color 1–5 / Match).
  */
 function bleedRemapIntoSoftEdges(
   data: Uint8ClampedArray,
@@ -328,6 +326,31 @@ function bleedRemapIntoSoftEdges(
 }
 
 /**
+ * Scan a bitmap for soft AA fringes beside solid ink and bleed neighbour RGB
+ * into those pixels (alpha unchanged). Used by the on-demand Clean edges action.
+ */
+export async function bleedSoftAaEdgesOnBitmap(dataUrl: string): Promise<string> {
+  if (!dataUrl) return dataUrl
+  const img = await loadCachedImage(dataUrl)
+  if (!img || !img.width || !img.height) return dataUrl
+  const canvas = document.createElement('canvas')
+  canvas.width = img.width
+  canvas.height = img.height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return dataUrl
+  ctx.drawImage(img, 0, 0)
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  const data = imageData.data
+  const donors = new Uint8Array(canvas.width * canvas.height)
+  for (let p = 0; p < donors.length; p++) {
+    if (data[p * 4 + 3] > FRINGE_ALPHA_MAX) donors[p] = 1
+  }
+  bleedRemapIntoSoftEdges(data, canvas.width, canvas.height, donors)
+  ctx.putImageData(imageData, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
+/**
  * Remap palette colours in an image to replacement colours (preserves alpha).
  * Returns a PNG data URL, or the original src when remapping is a no-op.
  */
@@ -366,7 +389,6 @@ export async function applyImagePaletteRecolor(
   ctx.drawImage(img, 0, 0)
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
   const data = imageData.data
-  const remapped = new Uint8Array(canvas.width * canvas.height)
 
   for (let i = 0; i < data.length; i += 4) {
     if (data[i + 3] === 0) continue
@@ -385,10 +407,7 @@ export async function applyImagePaletteRecolor(
     data[i] = nr
     data[i + 1] = ng
     data[i + 2] = nb
-    remapped[i / 4] = 1
   }
-
-  bleedRemapIntoSoftEdges(data, canvas.width, canvas.height, remapped)
 
   ctx.putImageData(imageData, 0, 0)
   const out = canvas.toDataURL('image/png')
@@ -432,6 +451,42 @@ export async function resolveImageDataUrl(fields: {
   const palette = fields.imagePalette ?? []
   if (!palette.length) return src
   return applyImagePaletteRecolor(src, palette, imageReplacementColors(fields))
+}
+
+export type ImageAaBleedBakeResult = ImageRecolorFields & {
+  imageDataUrl: string
+  /** Cleared — Match maps referred to the pre-bake source. */
+  imageColorMarkPng: ''
+  imageColorRegionPng: ''
+}
+
+/**
+ * Resolve the current Color 1–5 / Match look, bleed soft AA edges, and bake as
+ * a new Original image (so the clean silhouette persists without live remap).
+ */
+export async function bakeImageSoftAaBleed(fields: {
+  imageDataUrl?: string
+  imageUseOriginalColors?: boolean
+  imagePalette?: string[]
+  imageColor1?: string
+  imageColor2?: string
+  imageColor3?: string
+  imageColor4?: string
+  imageColor5?: string
+  imageColorMarkPng?: string
+}): Promise<ImageAaBleedBakeResult | null> {
+  const src = (fields.imageDataUrl ?? '').trim()
+  if (!src) return null
+  const display = await resolveImageDataUrl(fields)
+  const bled = await bleedSoftAaEdgesOnBitmap(display || src)
+  const palette = await scanImagePalette(bled)
+  return {
+    imageDataUrl: bled,
+    ...imageRecolorFieldsFromPalette(palette),
+    imageUseOriginalColors: true,
+    imageColorMarkPng: '',
+    imageColorRegionPng: ''
+  }
 }
 
 export type ColorMarkMap = { marks: Uint8Array; w: number; h: number }
@@ -551,7 +606,6 @@ export async function applyColorMarksRecolor(
   const mw = w
   const mh = h
   const sameSize = mw === canvas.width && mh === canvas.height
-  const remapped = new Uint8Array(canvas.width * canvas.height)
   for (let y = 0; y < canvas.height; y++) {
     for (let x = 0; x < canvas.width; x++) {
       const i = (y * canvas.width + x) * 4
@@ -570,10 +624,8 @@ export async function applyColorMarksRecolor(
       data[i] = rgb[0]
       data[i + 1] = rgb[1]
       data[i + 2] = rgb[2]
-      remapped[y * canvas.width + x] = 1
     }
   }
-  bleedRemapIntoSoftEdges(data, canvas.width, canvas.height, remapped)
   ctx.putImageData(imageData, 0, 0)
   return canvas.toDataURL('image/png')
 }
