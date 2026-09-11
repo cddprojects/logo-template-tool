@@ -2404,7 +2404,7 @@ export function lineFromContentProxy(
     thickness: 0,
     color: settings.fillColor || '#ffffff',
     imageDataUrl: crop.dataUrl,
-    stampSource: 'image',
+    stampSource: 'image' as const,
     layer: 'content',
     contentBound: true,
     name: 'Inner content',
@@ -2449,6 +2449,7 @@ export function applyOutsideContentToProxy(
     ],
     contentBound: true,
     contentProxySlot: undefined,
+    stampSource: l.stampSource ?? 'image',
     name: l.name || 'Inner content',
     layer: l.layer ?? 'content',
     ...shadow

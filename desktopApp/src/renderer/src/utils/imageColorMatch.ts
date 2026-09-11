@@ -64,7 +64,7 @@ export function isInnerUploadedImageProxy(item: LineObj | null | undefined): boo
     item &&
     item.contentBound &&
     item.type === 'stamp' &&
-    item.stampSource === 'image' &&
+    (item.stampSource === 'image' || item.stampSource == null) &&
     (item.imageSourceDataUrl || item.imageDataUrl)
   )
 }
@@ -365,7 +365,8 @@ export async function hydrateImageProxyColors(
     ...colors,
     colorMarkPng: markPng,
     colorRegionPng: regionPng,
-    imageUseOriginalColors: useOriginal
+    imageUseOriginalColors: useOriginal,
+    stampSource: item.stampSource ?? 'image'
   }
 }
 
@@ -441,7 +442,8 @@ export async function enrichImageProxyWithMatch(
     ...colors,
     colorMarkPng: markPng,
     colorRegionPng: regionPng,
-    imageUseOriginalColors: useOriginal
+    imageUseOriginalColors: useOriginal,
+    stampSource: item.stampSource ?? 'image'
   }
   return refreshStampFromMarks(next)
 }

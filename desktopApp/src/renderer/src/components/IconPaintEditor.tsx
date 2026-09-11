@@ -9144,19 +9144,24 @@ export function IconPaintEditor({
     // shape/stamp/text must not swallow Outer background / border / shadow fills.
     // Overlay cuts on live Inner are handled by floodFill (inner is in the sample,
     // not a wall); do not abort when the click lands on the cut itself.
-    if (tool === 'match') {
+    if (tool === 'match' || toolRef.current === 'match') {
       void (async () => {
         const armed = matchSlotRef.current
         if (armed == null) return
-        const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
-        if (
-          !sel ||
-          !isInnerUploadedImageProxy(sel) ||
-          selectedLayerIdsRef.current.size > 1 ||
-          !objectOwnsFillClick(sel, pt)
-        ) {
-          return
+        const sel =
+          linesRef.current.find((l) => l.id === selectedIdRef.current) ??
+          linesRef.current.find((l) => isInnerUploadedImageProxy(l))
+        if (!sel || !isInnerUploadedImageProxy(sel)) return
+        // Keep selection locked on the Match target for the session.
+        if (selectedIdRef.current !== sel.id) {
+          selectedIdRef.current = sel.id
+          setSelectedId(sel.id)
+          setSelectedLayerIds(new Set([sel.id]))
         }
+        if (selectedLayerIdsRef.current.size > 1) {
+          setSelectedLayerIds(new Set([sel.id]))
+        }
+        if (!objectOwnsFillClick(sel, pt)) return
         const local = unmapObjDisplayPt(pt, sel)
         const next = await matchClickOnImageProxy(sel, local, armed)
         if (!next) return
@@ -10469,12 +10474,29 @@ export function IconPaintEditor({
     isInnerUploadedImageProxy(selectedObj) &&
     selectedLayerIds.size <= 1
   )
+  /** Keep Match chrome visible for the whole Match session (not only while imageMatchTarget is true). */
+  const showMatchChrome = tool === 'match' || imageMatchTarget
+
+  const findImageMatchProxy = (): LineObj | null => {
+    const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
+    if (sel && isInnerUploadedImageProxy(sel)) return sel
+    return linesRef.current.find((l) => isInnerUploadedImageProxy(l)) ?? null
+  }
+
   useEffect(() => {
-    if (tool === 'match' && !imageMatchTarget) {
-      setTool('pointer')
-      setMatchSlot(null)
-      setMatchLabels([])
+    if (tool !== 'match') return
+    if (imageMatchTarget) return
+    // Selection briefly lost / multi-select — try to keep Match on the image proxy.
+    const proxy = findImageMatchProxy()
+    if (proxy) {
+      selectedIdRef.current = proxy.id
+      setSelectedId(proxy.id)
+      setSelectedLayerIds(new Set([proxy.id]))
+      return
     }
+    setTool('pointer')
+    setMatchSlot(null)
+    setMatchLabels([])
   }, [tool, imageMatchTarget])
 
   const matchModeActiveRef = useRef(false)
@@ -10482,12 +10504,12 @@ export function IconPaintEditor({
     const wasMatch = matchModeActiveRef.current
     matchModeActiveRef.current = tool === 'match'
     if (!wasMatch || tool === 'match') return
-    // Left Match via another tool / loss of target — apply Color 1–5 from marks.
+    // Left Match via another tool / intentional exit — apply Color 1–5 from marks.
     setMatchSlot(null)
     setMatchLabels([])
     void (async () => {
-      const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
-      if (!sel || !isInnerUploadedImageProxy(sel)) return
+      const sel = findImageMatchProxy()
+      if (!sel) return
       const next = await refreshStampFromMarks(sel)
       commitLines(linesRef.current.map((l) => (l.id === next.id ? next : l)))
       if (next.imageDataUrl) {
@@ -10503,18 +10525,20 @@ export function IconPaintEditor({
   }, [tool])
 
   useEffect(() => {
-    if (tool !== 'match' || !imageMatchTarget || !selectedObj) {
-      if (tool !== 'match') setMatchLabels([])
+    if (tool !== 'match') {
+      setMatchLabels([])
       return
     }
+    const target = selectedObj && isInnerUploadedImageProxy(selectedObj) ? selectedObj : null
+    if (!target) return
     let cancelled = false
-    void buildMatchSectionLabels(selectedObj).then((labels) => {
+    void buildMatchSectionLabels(target).then((labels) => {
       if (!cancelled) setMatchLabels(labels)
     })
     return () => {
       cancelled = true
     }
-  }, [tool, imageMatchTarget, selectedObj?.id, selectedObj?.colorMarkPng])
+  }, [tool, selectedObj?.id, selectedObj?.colorMarkPng])
 
   const exitMatchMode = useCallback(() => {
     setTool('pointer')
@@ -10522,26 +10546,38 @@ export function IconPaintEditor({
   }, [])
 
   const enterMatchMode = useCallback(() => {
+    const sel =
+      linesRef.current.find((l) => l.id === selectedIdRef.current) ??
+      linesRef.current.find((l) => isInnerUploadedImageProxy(l))
+    if (!sel || !isInnerUploadedImageProxy(sel)) return
+    // Lock selection onto the image proxy before switching tools.
+    selectedIdRef.current = sel.id
+    setSelectedId(sel.id)
+    setSelectedLayerIds(new Set([sel.id]))
     setTool('match')
     setMatchSlot(null)
     void (async () => {
-      const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
-      if (!sel || !isInnerUploadedImageProxy(sel)) return
-      if (sel.colorRegionPng && sel.colorMarkPng) {
-        const labels = await buildMatchSectionLabels(sel)
+      const current = linesRef.current.find((l) => l.id === sel.id) ?? sel
+      if (current.colorRegionPng && current.colorMarkPng) {
+        const labels = await buildMatchSectionLabels(current)
         setMatchLabels(labels)
         return
       }
       // First Match: build stable regions + default marks from scanned palette.
-      const next = await enrichImageProxyWithMatch(sel, null)
-      commitLines(linesRef.current.map((l) => (l.id === next.id ? next : l)))
-      if (next.imageDataUrl) {
-        ensureStampImage(next.imageDataUrl, () => {
+      // Keep the current remapped look until Match exits (refresh then).
+      const prevDisplay = current.imageDataUrl
+      const next = await enrichImageProxyWithMatch(current, null)
+      const kept = prevDisplay
+        ? { ...next, imageDataUrl: prevDisplay }
+        : next
+      commitLines(linesRef.current.map((l) => (l.id === kept.id ? kept : l)))
+      if (kept.imageDataUrl) {
+        ensureStampImage(kept.imageDataUrl, () => {
           redrawLinesRef.current()
           drawHandles()
         })
       }
-      const labels = await buildMatchSectionLabels(next)
+      const labels = await buildMatchSectionLabels(kept)
       setMatchLabels(labels)
       redrawLines()
       drawHandles()
@@ -11338,10 +11374,16 @@ export function IconPaintEditor({
             </button>
           ))}
         </div>
-      ) : editingContentProxy && selectedObj ? (
+      ) : ((editingContentProxy && selectedObj) || tool === 'match') ? (
         <div className="flex items-center gap-2.5 px-4 h-11 flex-nowrap shrink-0 overflow-x-auto">
           <span className="text-[11px] font-semibold text-text shrink-0">Inner content</span>
-          {imageMatchTarget && (
+          {showMatchChrome && (() => {
+            const matchObj =
+              (selectedObj && isInnerUploadedImageProxy(selectedObj) ? selectedObj : null) ||
+              lines.find((l) => isInnerUploadedImageProxy(l)) ||
+              null
+            if (!matchObj) return null
+            return (
             <>
               <div className="w-px h-6 bg-border shrink-0" />
               <button
@@ -11381,8 +11423,8 @@ export function IconPaintEditor({
                   | 'imageColor4'
                   | 'imageColor5'
                 const hex =
-                  (selectedObj[key] || '').trim() ||
-                  selectedObj.imagePalette?.[slot - 1] ||
+                  (matchObj[key] || '').trim() ||
+                  matchObj.imagePalette?.[slot - 1] ||
                   '#888888'
                 const active = tool === 'match' && matchSlot === slot
                 return (
@@ -11414,13 +11456,11 @@ export function IconPaintEditor({
                       onChange={(e) => {
                         const v = e.target.value
                         void (async () => {
-                          const next = await setImageProxySlotColor(selectedObj, slot, v)
+                          const next = await setImageProxySlotColor(matchObj, slot, v)
                           if (!next) return
-                          // While Match is on, only store the slot colour — remapped
-                          // display updates when Match exits.
                           const stored =
                             tool === 'match'
-                              ? { ...next, imageDataUrl: selectedObj.imageDataUrl }
+                              ? { ...next, imageDataUrl: matchObj.imageDataUrl }
                               : next
                           commitLines(
                             linesRef.current.map((l) => (l.id === stored.id ? stored : l))
@@ -11449,7 +11489,8 @@ export function IconPaintEditor({
                 </span>
               )}
             </>
-          )}
+            )
+          })()}
           <div className="w-px h-6 bg-border shrink-0" />
           <span className="text-[10px] text-muted shrink-0">
             Drag to move · corner handles to resize
@@ -12102,7 +12143,6 @@ export function IconPaintEditor({
           />
           {tool === 'match' &&
             matchLabelsVisible &&
-            imageMatchTarget &&
             selectedObj &&
             matchLabels.length > 0 &&
             (() => {
