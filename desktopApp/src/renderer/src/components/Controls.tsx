@@ -1957,23 +1957,26 @@ export function ImageRecolorControls({
                 }
               />
             ))}
+          <button
+            type="button"
+            onClick={() => void cleanEdges()}
+            disabled={bleeding || scanning}
+            className="w-full px-2 py-1.5 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
+            title="Scan soft anti-aliased outline pixels and soft-bleed neighbouring solid colours up to 3px into them"
+          >
+            {bleeding ? 'Cleaning edges…' : 'Clean AA edges'}
+          </button>
           {!imageUseOriginalColors && (
-            <>
-              <button
-                type="button"
-                onClick={() => void cleanEdges()}
-                disabled={bleeding || scanning}
-                className="w-full px-2 py-1.5 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
-                title="Scan soft anti-aliased outline pixels and bleed neighbouring Color 1–5 into them, then bake the result as Original"
-              >
-                {bleeding ? 'Cleaning edges…' : 'Clean AA edges'}
-              </button>
-              <p className="text-[10px] text-muted leading-snug pb-1">
-                Maps each scanned colour to the picker above — best for simple flat designs. Use the
-                arrows to swap two colour slots. Clean AA edges removes old-colour outline halos
-                (bakes the remapped look).
-              </p>
-            </>
+            <p className="text-[10px] text-muted leading-snug pb-1">
+              Maps each scanned colour to the picker above — best for simple flat designs. Use the
+              arrows to swap two colour slots. Clean AA edges soft-bleeds outline halos (3px); you
+              can run it again anytime.
+            </p>
+          )}
+          {imageUseOriginalColors && (
+            <p className="text-[10px] text-muted leading-snug pb-1">
+              Clean AA edges soft-bleeds outline halos into neighbouring solid colours (3px).
+            </p>
           )}
         </>
       )}

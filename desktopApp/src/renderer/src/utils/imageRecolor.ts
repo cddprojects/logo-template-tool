@@ -240,94 +240,94 @@ function recolorCacheKey(src: string, palette: string[], replacements: string[])
   return `${src.length}:${src.slice(22, 54)}:${src.slice(-32)}|${palette.join(',')}|${replacements.join(',')}`
 }
 
-/** Soft fringe alpha ceiling — above this, pixels are treated as solid ink. */
-const FRINGE_ALPHA_MAX = 220
-/** Neighbour must be at least this opaque to donate a remapped colour. */
-const BLEED_NEIGHBOUR_ALPHA_MIN = 40
-const BLEED_DIRS: readonly [number, number][] = [
-  [-1, 0],
-  [1, 0],
-  [0, -1],
-  [0, 1],
-  [-1, -1],
-  [1, -1],
-  [-1, 1],
-  [1, 1]
-]
+/** Soft fringe: pixels at or below this alpha can receive bleed. */
+const FRINGE_ALPHA_MAX = 239
+/** Solid / near-solid ink that donates colour into the fringe. */
+const BLEED_DONOR_ALPHA_MIN = 240
+/** Soft AA bleed radius in pixels (Chebyshev). */
+const SOFT_AA_BLEED_RADIUS = 3
 
 /**
- * Copy solid-neighbour RGB into soft AA fringe pixels. Keeps coverage alpha.
- * `remapped` marks donor pixels (typically solid ink after Color 1–5 / Match).
+ * Soft-bleed solid-neighbour RGB into AA fringe within `radius` px.
+ * Keeps coverage alpha. Prefer nearer, then more-opaque donors.
  */
-function bleedRemapIntoSoftEdges(
+function bleedSoftAaWithinRadius(
   data: Uint8ClampedArray,
   w: number,
   h: number,
-  remapped: Uint8Array,
-  passes = 2
+  radius = SOFT_AA_BLEED_RADIUS
 ): void {
-  for (let pass = 0; pass < passes; pass++) {
-    const updates: number[] = []
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        const p = y * w + x
-        if (remapped[p]) continue
-        const i = p * 4
-        const a = data[i + 3]
-        if (a === 0 || a > FRINGE_ALPHA_MAX) continue
+  const n = w * h
+  const donor = new Uint8Array(n)
+  for (let p = 0; p < n; p++) {
+    if (data[p * 4 + 3] >= BLEED_DONOR_ALPHA_MIN) donor[p] = 1
+  }
 
-        let hits = 0
-        let sr = 0
-        let sg = 0
-        let sb = 0
-        let bestA = -1
-        let br = 0
-        let bg = 0
-        let bb = 0
-        for (const [dx, dy] of BLEED_DIRS) {
+  const updates: number[] = []
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x
+      const i = p * 4
+      const a = data[i + 3]
+      if (a === 0 || a > FRINGE_ALPHA_MAX) continue
+      if (donor[p]) continue
+
+      let bestDist = radius + 1
+      let bestA = -1
+      let br = 0
+      let bg = 0
+      let bb = 0
+      let sr = 0
+      let sg = 0
+      let sb = 0
+      let wsum = 0
+
+      for (let dy = -radius; dy <= radius; dy++) {
+        for (let dx = -radius; dx <= radius; dx++) {
+          const cheb = Math.max(Math.abs(dx), Math.abs(dy))
+          if (cheb === 0 || cheb > radius) continue
           const nx = x + dx
           const ny = y + dy
           if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
           const np = ny * w + nx
-          if (!remapped[np]) continue
+          if (!donor[np]) continue
           const ni = np * 4
           const na = data[ni + 3]
-          if (na < BLEED_NEIGHBOUR_ALPHA_MIN) continue
-          hits++
-          sr += data[ni]
-          sg += data[ni + 1]
-          sb += data[ni + 2]
-          if (na > bestA) {
+          const weight = radius + 1 - cheb
+          wsum += weight
+          sr += data[ni] * weight
+          sg += data[ni + 1] * weight
+          sb += data[ni + 2] * weight
+          if (cheb < bestDist || (cheb === bestDist && na > bestA)) {
+            bestDist = cheb
             bestA = na
             br = data[ni]
             bg = data[ni + 1]
             bb = data[ni + 2]
           }
         }
-        if (hits === 0) continue
-        if (hits >= 2) {
-          br = Math.round(sr / hits)
-          bg = Math.round(sg / hits)
-          bb = Math.round(sb / hits)
-        }
-        updates.push(p, br, bg, bb)
       }
+      if (bestDist > radius) continue
+      if (wsum > 0) {
+        br = Math.round(sr / wsum)
+        bg = Math.round(sg / wsum)
+        bb = Math.round(sb / wsum)
+      }
+      updates.push(i, br, bg, bb)
     }
-    if (!updates.length) break
-    for (let u = 0; u < updates.length; u += 4) {
-      const p = updates[u]!
-      const i = p * 4
-      data[i] = updates[u + 1]!
-      data[i + 1] = updates[u + 2]!
-      data[i + 2] = updates[u + 3]!
-      remapped[p] = 1
-    }
+  }
+
+  for (let u = 0; u < updates.length; u += 4) {
+    const i = updates[u]!
+    data[i] = updates[u + 1]!
+    data[i + 1] = updates[u + 2]!
+    data[i + 2] = updates[u + 3]!
   }
 }
 
 /**
  * Scan a bitmap for soft AA fringes beside solid ink and bleed neighbour RGB
- * into those pixels (alpha unchanged). Used by the on-demand Clean edges action.
+ * into those pixels within 3px (alpha unchanged). On-demand Clean AA action.
  */
 export async function bleedSoftAaEdgesOnBitmap(dataUrl: string): Promise<string> {
   if (!dataUrl) return dataUrl
@@ -340,12 +340,7 @@ export async function bleedSoftAaEdgesOnBitmap(dataUrl: string): Promise<string>
   if (!ctx) return dataUrl
   ctx.drawImage(img, 0, 0)
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-  const data = imageData.data
-  const donors = new Uint8Array(canvas.width * canvas.height)
-  for (let p = 0; p < donors.length; p++) {
-    if (data[p * 4 + 3] > FRINGE_ALPHA_MAX) donors[p] = 1
-  }
-  bleedRemapIntoSoftEdges(data, canvas.width, canvas.height, donors)
+  bleedSoftAaWithinRadius(imageData.data, canvas.width, canvas.height, SOFT_AA_BLEED_RADIUS)
   ctx.putImageData(imageData, 0, 0)
   return canvas.toDataURL('image/png')
 }
@@ -461,8 +456,8 @@ export type ImageAaBleedBakeResult = ImageRecolorFields & {
 }
 
 /**
- * Resolve the current Color 1–5 / Match look, bleed soft AA edges, and bake as
- * a new Original image (so the clean silhouette persists without live remap).
+ * Resolve the current Color 1–5 / Match look, soft-bleed AA within 3px, and bake
+ * the cleaned bitmap. Keeps Original / Color mode so Clean AA stays available.
  */
 export async function bakeImageSoftAaBleed(fields: {
   imageDataUrl?: string
@@ -477,13 +472,27 @@ export async function bakeImageSoftAaBleed(fields: {
 }): Promise<ImageAaBleedBakeResult | null> {
   const src = (fields.imageDataUrl ?? '').trim()
   if (!src) return null
+  const keepOriginal = fields.imageUseOriginalColors !== false
   const display = await resolveImageDataUrl(fields)
   const bled = await bleedSoftAaEdgesOnBitmap(display || src)
   const palette = await scanImagePalette(bled)
+  const seeded = imageRecolorFieldsFromPalette(palette)
   return {
     imageDataUrl: bled,
-    ...imageRecolorFieldsFromPalette(palette),
-    imageUseOriginalColors: true,
+    ...seeded,
+    // Stay in the same mode so Color 1–5 + Clean AA remain visible after use.
+    imageUseOriginalColors: keepOriginal,
+    // If still in remap mode, keep the user’s slot colours when possible so a
+    // second Clean AA doesn’t reset their picks; fall back to scanned palette.
+    ...(keepOriginal
+      ? {}
+      : {
+          imageColor1: (fields.imageColor1 || '').trim() || seeded.imageColor1,
+          imageColor2: (fields.imageColor2 || '').trim() || seeded.imageColor2,
+          imageColor3: (fields.imageColor3 || '').trim() || seeded.imageColor3,
+          imageColor4: (fields.imageColor4 || '').trim() || seeded.imageColor4,
+          imageColor5: (fields.imageColor5 || '').trim() || seeded.imageColor5
+        }),
     imageColorMarkPng: '',
     imageColorRegionPng: ''
   }
