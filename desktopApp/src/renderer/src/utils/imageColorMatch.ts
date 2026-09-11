@@ -529,7 +529,7 @@ export async function matchClickOnImageProxy(
 export type MatchSectionLabel = {
   regionId: number
   slot: number
-  /** Centre in stamp image pixels. */
+  /** Anchor on solid region ink (image pixels) — not a geometric centroid. */
   ix: number
   iy: number
   imgW: number
@@ -538,7 +538,82 @@ export type MatchSectionLabel = {
   labelColor: '#000000' | '#ffffff'
 }
 
-/** Labels for Match overlay (one per marked region). */
+/** Chamfer distance to nearest exterior / other-region pixel (approx Euclidean). */
+function regionDistanceTransform(
+  regionId: number,
+  regions: Uint16Array,
+  w: number,
+  h: number
+): Float32Array {
+  const dist = new Float32Array(w * h)
+  const INF = 1e8
+  for (let p = 0; p < regions.length; p++) {
+    dist[p] = regions[p] === regionId ? INF : 0
+  }
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const p = y * w + x
+      if (regions[p] !== regionId) continue
+      let d = dist[p]!
+      if (x > 0) d = Math.min(d, dist[p - 1]! + 1)
+      if (y > 0) d = Math.min(d, dist[p - w]! + 1)
+      if (x > 0 && y > 0) d = Math.min(d, dist[p - w - 1]! + 1.414)
+      if (x + 1 < w && y > 0) d = Math.min(d, dist[p - w + 1]! + 1.414)
+      dist[p] = d
+    }
+  }
+  for (let y = h - 1; y >= 0; y--) {
+    for (let x = w - 1; x >= 0; x--) {
+      const p = y * w + x
+      if (regions[p] !== regionId) continue
+      let d = dist[p]!
+      if (x + 1 < w) d = Math.min(d, dist[p + 1]! + 1)
+      if (y + 1 < h) d = Math.min(d, dist[p + w]! + 1)
+      if (x + 1 < w && y + 1 < h) d = Math.min(d, dist[p + w + 1]! + 1.414)
+      if (x > 0 && y + 1 < h) d = Math.min(d, dist[p + w - 1]! + 1.414)
+      dist[p] = d
+    }
+  }
+  return dist
+}
+
+type LabelCandidate = { x: number; y: number; score: number }
+
+/** Best in-fill anchors for a region (highest distance-to-edge first). */
+function regionLabelCandidates(
+  regionId: number,
+  regions: Uint16Array,
+  w: number,
+  h: number,
+  limit = 48
+): LabelCandidate[] {
+  const dist = regionDistanceTransform(regionId, regions, w, h)
+  const cands: LabelCandidate[] = []
+  for (let p = 0; p < regions.length; p++) {
+    if (regions[p] !== regionId) continue
+    const score = dist[p]!
+    if (score < 1) continue
+    const x = p % w
+    const y = (p / w) | 0
+    if (cands.length < limit) {
+      cands.push({ x, y, score })
+      if (cands.length === limit) cands.sort((a, b) => a.score - b.score)
+    } else if (score > cands[0]!.score) {
+      cands[0] = { x, y, score }
+      cands.sort((a, b) => a.score - b.score)
+    }
+  }
+  cands.sort((a, b) => b.score - a.score)
+  if (cands.length) return cands
+  // Fallback: any pixel of the region
+  for (let p = 0; p < regions.length; p++) {
+    if (regions[p] !== regionId) continue
+    return [{ x: p % w, y: (p / w) | 0, score: 0 }]
+  }
+  return []
+}
+
+/** Labels for Match overlay (one per marked region), on solid ink, non-overlapping. */
 export async function buildMatchSectionLabels(
   item: LineObj
 ): Promise<MatchSectionLabel[]> {
@@ -561,38 +636,105 @@ export async function buildMatchSectionLabels(
   ctx.drawImage(sample, 0, 0, regionMap.w, regionMap.h)
   const { data } = ctx.getImageData(0, 0, regionMap.w, regionMap.h)
 
-  const sums = new Map<number, { sx: number; sy: number; n: number; r: number; g: number; b: number; slot: number }>()
+  type Acc = {
+    n: number
+    r: number
+    g: number
+    b: number
+    slot: number
+  }
+  const sums = new Map<number, Acc>()
   for (let p = 0; p < regionMap.regions.length; p++) {
     const id = regionMap.regions[p]
     if (!id) continue
     const slot = markMap.marks[p] ?? 0
     if (slot < 1 || slot > 5) continue
-    const x = p % regionMap.w
-    const y = (p / regionMap.w) | 0
     const i = p * 4
     let s = sums.get(id)
     if (!s) {
-      s = { sx: 0, sy: 0, n: 0, r: 0, g: 0, b: 0, slot }
+      s = { n: 0, r: 0, g: 0, b: 0, slot }
       sums.set(id, s)
     }
-    s.sx += x
-    s.sy += y
     s.n++
-    s.r += data[i]
-    s.g += data[i + 1]
-    s.b += data[i + 2]
+    s.r += data[i]!
+    s.g += data[i + 1]!
+    s.b += data[i + 2]!
     s.slot = slot
   }
 
+  const ranked = [...sums.entries()].sort((a, b) => b[1].n - a[1].n)
+  const minSep = Math.max(16, Math.round(Math.min(regionMap.w, regionMap.h) * 0.045))
+  const minSep2 = minSep * minSep
+  const placed: { x: number; y: number }[] = []
   const out: MatchSectionLabel[] = []
-  for (const [regionId, s] of sums) {
+
+  for (const [regionId, s] of ranked) {
     if (s.n < 1) continue
+    const cands = regionLabelCandidates(regionId, regionMap.regions, regionMap.w, regionMap.h)
+    if (!cands.length) continue
+    let chosen = cands[0]!
+    for (const c of cands) {
+      let ok = true
+      for (const p of placed) {
+        const dx = c.x - p.x
+        const dy = c.y - p.y
+        if (dx * dx + dy * dy < minSep2) {
+          ok = false
+          break
+        }
+      }
+      if (ok) {
+        chosen = c
+        break
+      }
+    }
+    // If every candidate overlaps, nudge along candidates until clear or give up.
+    if (placed.some((p) => {
+      const dx = chosen.x - p.x
+      const dy = chosen.y - p.y
+      return dx * dx + dy * dy < minSep2
+    })) {
+      let found = false
+      for (const c of cands) {
+        for (const [dx, dy] of [
+          [0, 0],
+          [minSep, 0],
+          [-minSep, 0],
+          [0, minSep],
+          [0, -minSep],
+          [minSep, minSep],
+          [-minSep, minSep],
+          [minSep, -minSep],
+          [-minSep, -minSep]
+        ] as const) {
+          const nx = Math.max(0, Math.min(regionMap.w - 1, c.x + dx))
+          const ny = Math.max(0, Math.min(regionMap.h - 1, c.y + dy))
+          const np = ny * regionMap.w + nx
+          if (regionMap.regions[np] !== regionId) continue
+          if (
+            placed.some((p) => {
+              const ddx = nx - p.x
+              const ddy = ny - p.y
+              return ddx * ddx + ddy * ddy < minSep2
+            })
+          ) {
+            continue
+          }
+          chosen = { x: nx, y: ny, score: c.score }
+          found = true
+          break
+        }
+        if (found) break
+      }
+    }
+
+    placed.push({ x: chosen.x, y: chosen.y })
     const sectionHex = toHex(s.r / s.n, s.g / s.n, s.b / s.n)
     out.push({
       regionId,
       slot: s.slot,
-      ix: s.sx / s.n,
-      iy: s.sy / s.n,
+      ix: chosen.x + 0.5,
+      iy: chosen.y + 0.5,
       imgW: regionMap.w,
       imgH: regionMap.h,
       sectionHex,
