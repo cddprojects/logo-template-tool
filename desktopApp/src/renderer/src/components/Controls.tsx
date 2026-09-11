@@ -1962,20 +1962,20 @@ export function ImageRecolorControls({
             onClick={() => void cleanEdges()}
             disabled={bleeding || scanning}
             className="w-full px-2 py-1.5 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
-            title="Scan soft anti-aliased outline pixels and soft-bleed neighbouring solid colours up to 3px into them"
+            title="Strip soft anti-aliased outline (outer halo) and harden inward soft pixels — does not thicken the rim"
           >
             {bleeding ? 'Cleaning edges…' : 'Clean AA edges'}
           </button>
           {!imageUseOriginalColors && (
             <p className="text-[10px] text-muted leading-snug pb-1">
               Maps each scanned colour to the picker above — best for simple flat designs. Use the
-              arrows to swap two colour slots. Clean AA edges soft-bleeds outline halos (3px); you
-              can run it again anytime.
+              arrows to swap two colour slots. Clean AA edges removes soft outline halos (you can
+              run it again anytime).
             </p>
           )}
           {imageUseOriginalColors && (
             <p className="text-[10px] text-muted leading-snug pb-1">
-              Clean AA edges soft-bleeds outline halos into neighbouring solid colours (3px).
+              Clean AA edges strips the soft outline halo instead of painting over it.
             </p>
           )}
         </>

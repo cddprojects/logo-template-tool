@@ -240,94 +240,116 @@ function recolorCacheKey(src: string, palette: string[], replacements: string[])
   return `${src.length}:${src.slice(22, 54)}:${src.slice(-32)}|${palette.join(',')}|${replacements.join(',')}`
 }
 
-/** Soft fringe: pixels at or below this alpha can receive bleed. */
+/** Soft / AA fringe — below this is treated as outline matte, not solid ink. */
 const FRINGE_ALPHA_MAX = 239
-/** Solid / near-solid ink that donates colour into the fringe. */
-const BLEED_DONOR_ALPHA_MIN = 240
-/** Soft AA bleed radius in pixels (Chebyshev). */
-const SOFT_AA_BLEED_RADIUS = 3
+/** Solid ink used to harden inward soft pixels. */
+const SOLID_ALPHA_MIN = 240
+/** How far (px) to look when classifying outer vs inner fringe. */
+const AA_CLEAN_RADIUS = 3
 
 /**
- * Soft-bleed solid-neighbour RGB into AA fringe within `radius` px.
- * Keeps coverage alpha. Prefer nearer, then more-opaque donors.
+ * Remove soft AA outline instead of recolouring it (recolouring kept low alpha
+ * and made the rim bigger / more obvious).
+ *
+ * • Soft pixels near empty space → cleared (outer halo gone; silhouette trims).
+ * • Soft pixels boxed in by solid ink → hardened to that solid RGB at full alpha.
  */
-function bleedSoftAaWithinRadius(
+function cleanAaOutlineMatte(
   data: Uint8ClampedArray,
   w: number,
   h: number,
-  radius = SOFT_AA_BLEED_RADIUS
+  radius = AA_CLEAN_RADIUS
 ): void {
   const n = w * h
-  const donor = new Uint8Array(n)
+  const solid = new Uint8Array(n)
+  const empty = new Uint8Array(n)
   for (let p = 0; p < n; p++) {
-    if (data[p * 4 + 3] >= BLEED_DONOR_ALPHA_MIN) donor[p] = 1
+    const a = data[p * 4 + 3]
+    if (a >= SOLID_ALPHA_MIN) solid[p] = 1
+    else if (a === 0) empty[p] = 1
   }
 
-  const updates: number[] = []
+  const nearWithin = (x: number, y: number, mask: Uint8Array): boolean => {
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        if (dx === 0 && dy === 0) continue
+        if (Math.max(Math.abs(dx), Math.abs(dy)) > radius) continue
+        const nx = x + dx
+        const ny = y + dy
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) {
+          // Past the bitmap edge counts as empty for outer-fringe tests.
+          if (mask === empty) return true
+          continue
+        }
+        if (mask[ny * w + nx]) return true
+      }
+    }
+    return false
+  }
+
+  const nearestSolidRgb = (x: number, y: number): [number, number, number] | null => {
+    let bestDist = radius + 1
+    let bestA = -1
+    let br = 0
+    let bg = 0
+    let bb = 0
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        const cheb = Math.max(Math.abs(dx), Math.abs(dy))
+        if (cheb === 0 || cheb > radius) continue
+        const nx = x + dx
+        const ny = y + dy
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+        const np = ny * w + nx
+        if (!solid[np]) continue
+        const ni = np * 4
+        const na = data[ni + 3]
+        if (cheb < bestDist || (cheb === bestDist && na > bestA)) {
+          bestDist = cheb
+          bestA = na
+          br = data[ni]
+          bg = data[ni + 1]
+          bb = data[ni + 2]
+        }
+      }
+    }
+    return bestDist <= radius ? [br, bg, bb] : null
+  }
+
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const p = y * w + x
       const i = p * 4
       const a = data[i + 3]
       if (a === 0 || a > FRINGE_ALPHA_MAX) continue
-      if (donor[p]) continue
 
-      let bestDist = radius + 1
-      let bestA = -1
-      let br = 0
-      let bg = 0
-      let bb = 0
-      let sr = 0
-      let sg = 0
-      let sb = 0
-      let wsum = 0
+      const touchesEmpty = nearWithin(x, y, empty)
+      const touchesSolid = nearWithin(x, y, solid)
 
-      for (let dy = -radius; dy <= radius; dy++) {
-        for (let dx = -radius; dx <= radius; dx++) {
-          const cheb = Math.max(Math.abs(dx), Math.abs(dy))
-          if (cheb === 0 || cheb > radius) continue
-          const nx = x + dx
-          const ny = y + dy
-          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
-          const np = ny * w + nx
-          if (!donor[np]) continue
-          const ni = np * 4
-          const na = data[ni + 3]
-          const weight = radius + 1 - cheb
-          wsum += weight
-          sr += data[ni] * weight
-          sg += data[ni + 1] * weight
-          sb += data[ni + 2] * weight
-          if (cheb < bestDist || (cheb === bestDist && na > bestA)) {
-            bestDist = cheb
-            bestA = na
-            br = data[ni]
-            bg = data[ni + 1]
-            bb = data[ni + 2]
-          }
-        }
+      if (touchesEmpty) {
+        // Outer AA ring / halo — drop it so the outline does not read thicker.
+        data[i] = 0
+        data[i + 1] = 0
+        data[i + 2] = 0
+        data[i + 3] = 0
+        continue
       }
-      if (bestDist > radius) continue
-      if (wsum > 0) {
-        br = Math.round(sr / wsum)
-        bg = Math.round(sg / wsum)
-        bb = Math.round(sb / wsum)
+
+      if (touchesSolid) {
+        const rgb = nearestSolidRgb(x, y)
+        if (!rgb) continue
+        data[i] = rgb[0]
+        data[i + 1] = rgb[1]
+        data[i + 2] = rgb[2]
+        data[i + 3] = 255
       }
-      updates.push(i, br, bg, bb)
     }
-  }
-
-  for (let u = 0; u < updates.length; u += 4) {
-    const i = updates[u]!
-    data[i] = updates[u + 1]!
-    data[i + 1] = updates[u + 2]!
-    data[i + 2] = updates[u + 3]!
   }
 }
 
 /**
- * Scan a bitmap for soft AA fringes beside solid ink and bleed neighbour RGB
- * into those pixels within 3px (alpha unchanged). On-demand Clean AA action.
+ * Clean soft AA outline on a bitmap (strip outer fringe, harden inward soft).
+ * Used by the on-demand Clean AA action.
  */
 export async function bleedSoftAaEdgesOnBitmap(dataUrl: string): Promise<string> {
   if (!dataUrl) return dataUrl
@@ -340,7 +362,7 @@ export async function bleedSoftAaEdgesOnBitmap(dataUrl: string): Promise<string>
   if (!ctx) return dataUrl
   ctx.drawImage(img, 0, 0)
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-  bleedSoftAaWithinRadius(imageData.data, canvas.width, canvas.height, SOFT_AA_BLEED_RADIUS)
+  cleanAaOutlineMatte(imageData.data, canvas.width, canvas.height, AA_CLEAN_RADIUS)
   ctx.putImageData(imageData, 0, 0)
   return canvas.toDataURL('image/png')
 }
@@ -456,8 +478,8 @@ export type ImageAaBleedBakeResult = ImageRecolorFields & {
 }
 
 /**
- * Resolve the current Color 1–5 / Match look, soft-bleed AA within 3px, and bake
- * the cleaned bitmap. Keeps Original / Color mode so Clean AA stays available.
+ * Resolve the current Color 1–5 / Match look, strip outer soft AA outline, and
+ * bake the cleaned bitmap. Keeps Original / Color mode so Clean AA stays available.
  */
 export async function bakeImageSoftAaBleed(fields: {
   imageDataUrl?: string

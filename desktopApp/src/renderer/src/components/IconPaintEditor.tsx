@@ -11489,7 +11489,7 @@ export function IconPaintEditor({
               })}
               <button
                 type="button"
-                title="Scan soft AA outline and soft-bleed neighbouring solid colours up to 3px"
+                title="Strip soft AA outline halo (does not thicken the rim)"
                 onClick={() => {
                   void (async () => {
                     const source = matchObj.imageSourceDataUrl || matchObj.imageDataUrl
