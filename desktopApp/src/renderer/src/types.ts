@@ -780,6 +780,12 @@ export interface PaintSaveResult {
 export interface PaintSaveTargets {
   logoIds: string[]
   faviconIds: string[]
+  /**
+   * When true (default), colour slots / remaps from the painted session copy to every
+   * selected variant. When false, each target keeps its own Colour settings (like
+   * Apply to all with Colour unchecked) while still receiving the paint.
+   */
+  copyColors?: boolean
 }
 
 export interface PaintVariantOption {

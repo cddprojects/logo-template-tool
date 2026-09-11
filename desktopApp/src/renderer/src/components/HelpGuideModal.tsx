@@ -100,8 +100,10 @@ function UseGuide(): JSX.Element {
           <li>
             <span className="text-text">Paint</span> opens the icon editor. The right panel’s
             <span className="text-text"> Save to variants</span> list chooses which Logo / Favicon variants receive Save
-            (a one-time copy, not continuous sync between variants). Saving onto a synced pair
-            unlinks them and replaces the logo’s stored original icon with the painted result
+            (a one-time copy, not continuous sync between variants).
+            <span className="text-text"> Colour settings</span> (on by default) copies colour slots and remaps with the paint;
+            turn it off to keep each target’s own colours while still applying paint and objects.
+            Saving onto a synced pair unlinks them and replaces the logo’s stored original icon with the painted result
           </li>
           <li>
             Preview canvas: stage colour swatch (preview only), <span className="text-text">Default</span> (fit),

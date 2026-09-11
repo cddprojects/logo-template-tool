@@ -3554,6 +3554,114 @@ export function applyPaintSaveToIcon(
   )
 }
 
+/**
+ * Drop remapped Inner image pixels from a paint session without wiping brush overlays.
+ * Used when Paint Save keeps each variant’s own Colour settings.
+ */
+function clearPaintSessionBoundImagePixels(
+  session: PaintSession | null | undefined
+): PaintSession | null | undefined {
+  if (!session) return session
+  let next = stripPaintSessionColorHints(session) ?? session
+  if (next.contentBakedInDecorations) {
+    next = { ...next, contentBakedInDecorations: false }
+  }
+  next = {
+    ...next,
+    vectors: (next.vectors ?? []).map((v) => {
+      if (v.punchMask) return v
+      if (v.contentBound || v.contentProxySlot) {
+        const {
+          imageDataUrl: _img,
+          paintStrokes: _ps,
+          contentBound: _cb,
+          ...rest
+        } = v
+        return {
+          ...rest,
+          type: rest.type ?? 'stamp',
+          stampSource: rest.stampSource ?? 'image',
+          contentProxySlot: true,
+          contentBound: undefined,
+          imageDataUrl: undefined,
+          paintStrokes: undefined
+        }
+      }
+      return v
+    })
+  }
+  return next
+}
+
+/**
+ * Paint Save onto one logo icon variant.
+ * `copyColors` true: full clone of the painted result (default).
+ * `copyColors` false: keep the target’s colour slots / Match maps / stash colours.
+ */
+export function paintSaveIconForVariant(
+  painted: IconConfig,
+  target: IconConfig,
+  copyColors = true
+): IconConfig {
+  if (copyColors) return structuredClone(painted)
+  let out = finalizeIconEditColors(
+    structuredClone(painted),
+    target,
+    painted,
+    { edit: true, color: false, inner: true, outer: true }
+  )
+  out = {
+    ...out,
+    paintSession: clearPaintSessionBoundImagePixels(out.paintSession) ?? null,
+    imageColorMarkPng: target.imageColorMarkPng,
+    imageColorRegionPng: target.imageColorRegionPng,
+    contentTypeStash: mergeTypeStashColors(
+      painted.contentTypeStash,
+      target.contentTypeStash,
+      ICON_CONTENT_COLOR_KEYS,
+      iconPrimaryFill(target),
+      iconSecondaryFill(target)
+    ) as IconConfig['contentTypeStash']
+  }
+  return out
+}
+
+/**
+ * Paint Save onto one favicon variant.
+ * `copyColors` true: full clone of the painted result (default).
+ * `copyColors` false: keep the target’s colour slots / Match maps / stash colours.
+ */
+export function paintSaveFaviconForVariant(
+  painted: FaviconConfig,
+  target: FaviconConfig,
+  copyColors = true
+): FaviconConfig {
+  if (copyColors) return structuredClone(painted)
+  let out = finalizeFaviconEditColors(
+    structuredClone(painted),
+    target,
+    painted,
+    { edit: true, color: false, inner: true, outer: true }
+  )
+  out = {
+    ...out,
+    paintSession: clearPaintSessionBoundImagePixels(out.paintSession) ?? null,
+    content: {
+      ...out.content,
+      imageColorMarkPng: target.content.imageColorMarkPng,
+      imageColorRegionPng: target.content.imageColorRegionPng
+    },
+    contentTypeStash: mergeTypeStashColors(
+      painted.contentTypeStash,
+      target.contentTypeStash,
+      FAVICON_CONTENT_COLOR_KEYS,
+      faviconPrimaryFill(target.content),
+      faviconSecondaryFill(target.content)
+    ) as FaviconConfig['contentTypeStash']
+  }
+  return out
+}
+
 function iconContainerToOuterShape(icon: IconConfig): FaviconOuterShape {
   if (!icon.containerEnabled || icon.containerShape === 'none') return 'none'
   if (icon.containerType === 'image') return 'image'

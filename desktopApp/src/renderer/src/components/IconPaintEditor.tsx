@@ -351,6 +351,10 @@ export function IconPaintEditor({
   const [saveFaviconIds, setSaveFaviconIds] = useState<Set<string>>(
     () => new Set(initialSaveTargets?.faviconIds ?? [])
   )
+  /** When on, colour slots / remaps copy with paint; when off, each variant keeps its colours. */
+  const [saveCopyColors, setSaveCopyColors] = useState(
+    () => initialSaveTargets?.copyColors !== false
+  )
   const [paletteIcon, setPaletteIcon] = useState<IconConfig>(() => ({
     ...DEFAULT_ICON_CONFIG,
     sourceType: 'lucide',
@@ -9705,7 +9709,8 @@ export function IconPaintEditor({
       },
       {
         logoIds: [...saveLogoIds],
-        faviconIds: [...saveFaviconIds]
+        faviconIds: [...saveFaviconIds],
+        copyColors: saveCopyColors
       }
     )
   }
@@ -12425,9 +12430,23 @@ export function IconPaintEditor({
       <aside className="w-[16.9rem] shrink-0 border-l border-border bg-surface flex flex-col min-h-0">
         {showSaveTargets && (
           <section className="h-2/5 min-h-0 flex flex-col border-b border-border">
-            <div className="px-3 py-2 border-b border-border shrink-0">
-              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">Save to variants</p>
-              <p className="text-[9px] text-muted/70 mt-0.5">Pick where this paint applies</p>
+            <div className="px-3 py-2 border-b border-border shrink-0 space-y-1.5">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-muted">Save to variants</p>
+                <p className="text-[9px] text-muted/70 mt-0.5">Pick where this paint applies</p>
+              </div>
+              <label
+                className="flex items-center gap-1.5 cursor-pointer select-none text-[11px] text-muted hover:text-text"
+                title="On: copy fill, border, shadow, and remapped image/SVG colours to every selected variant. Off: each variant keeps its own Colour settings (paint and objects still apply)"
+              >
+                <input
+                  type="checkbox"
+                  className="accent-accent shrink-0"
+                  checked={saveCopyColors}
+                  onChange={(e) => setSaveCopyColors(e.target.checked)}
+                />
+                Colour settings
+              </label>
             </div>
             <div className="flex flex-1 min-h-0 overflow-hidden">
               <div className="flex-1 min-w-0 overflow-y-auto border-r border-border px-2 py-2 space-y-1">

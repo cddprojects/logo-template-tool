@@ -26,6 +26,8 @@ import {
   clearFaviconUploadedImage,
   mapFaviconStashToIconStash,
   outsideContentFromFavicon,
+  paintSaveFaviconForVariant,
+  paintSaveIconForVariant,
   switchFaviconContentType,
   updateIconStashAfterSave,
   unsyncLogoConfig,
@@ -370,6 +372,7 @@ export function FaviconEditor({
     })!
     const favIds = new Set(targets.faviconIds)
     const logoIds = new Set(targets.logoIds)
+    const copyColors = targets.copyColors !== false
     const sync = result.contentSync
     if (!config) return
 
@@ -392,7 +395,10 @@ export function FaviconEditor({
       onChange(
         variantsRef.current.map((v) => {
           if (!favIds.has(v.id)) return v
-          return { ...v, config: structuredClone(savedFavicon) }
+          return {
+            ...v,
+            config: paintSaveFaviconForVariant(savedFavicon, v.config, copyColors)
+          }
         })
       )
     }
@@ -401,6 +407,11 @@ export function FaviconEditor({
       onLogoChange(
         logoVariantsRef.current.map((v) => {
           if (!logoIds.has(v.id)) return v
+          // Live colours before Save: synced mirror when linked, else stored icon.
+          const liveIcon =
+            (v.config.iconLinked ?? true)
+              ? (v.config.syncedIcon ?? v.config.icon)
+              : v.config.icon
           // Paint Save is a one-time copy: unlink and replace the stored original
           // icon (the custom `icon` kept while synced) with the painted result.
           return {
@@ -411,7 +422,7 @@ export function FaviconEditor({
               iconSyncBroken: false,
               syncedIconSnapshot: null,
               syncedIcon: null,
-              icon: structuredClone(savedIcon)
+              icon: paintSaveIconForVariant(savedIcon, liveIcon, copyColors)
             }
           }
         })
