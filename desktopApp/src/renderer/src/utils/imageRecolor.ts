@@ -323,16 +323,20 @@ export async function resolveImageDataUrl(fields: {
   const src = fields.imageDataUrl ?? ''
   if (!src) return ''
   if (fields.imageUseOriginalColors !== false) return src
-  const mark = await decodeColorMarkPng(fields.imageColorMarkPng)
-  if (mark && mark.marks.some((v) => v > 0)) {
-    const colors = [
-      fields.imageColor1 || fields.imagePalette?.[0] || '',
-      fields.imageColor2 || fields.imagePalette?.[1] || '',
-      fields.imageColor3 || fields.imagePalette?.[2] || '',
-      fields.imageColor4 || fields.imagePalette?.[3] || '',
-      fields.imageColor5 || fields.imagePalette?.[4] || ''
-    ]
-    return applyColorMarksRecolor(src, mark.marks, mark.w, mark.h, colors)
+  // Prefer Match marks whenever a map is stored (same path as Paint).
+  // All-zero marks → keep source (do not fall back to nearest-palette).
+  if (fields.imageColorMarkPng) {
+    const mark = await decodeColorMarkPng(fields.imageColorMarkPng)
+    if (mark) {
+      const colors = [
+        fields.imageColor1 || fields.imagePalette?.[0] || '',
+        fields.imageColor2 || fields.imagePalette?.[1] || '',
+        fields.imageColor3 || fields.imagePalette?.[2] || '',
+        fields.imageColor4 || fields.imagePalette?.[3] || '',
+        fields.imageColor5 || fields.imagePalette?.[4] || ''
+      ]
+      return applyColorMarksRecolor(src, mark.marks, mark.w, mark.h, colors)
+    }
   }
   const palette = fields.imagePalette ?? []
   if (!palette.length) return src

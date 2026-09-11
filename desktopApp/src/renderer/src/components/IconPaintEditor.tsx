@@ -87,6 +87,7 @@ import {
   buildMatchSectionLabels,
   enrichImageProxyWithMatch,
   fillMarkedSectionsOnImageProxy,
+  hydrateImageProxyColors,
   isInnerUploadedImageProxy,
   matchClickOnImageProxy,
   refreshStampFromMarks,
@@ -1465,7 +1466,8 @@ export function IconPaintEditor({
             seededProxy &&
             (outsideAll.contentType === 'image' || !!outsideAll.imageSourceDataUrl)
           ) {
-            seededProxy = await enrichImageProxyWithMatch(seededProxy, outsideAll)
+            // Same source + Color/marks resolve as outside preview (no region rebuild).
+            seededProxy = await hydrateImageProxyColors(seededProxy, outsideAll)
             restored = restored.map((l) => (l.id === seededProxy!.id ? seededProxy! : l))
             if (seededProxy.imageDataUrl) {
               ensureStampImage(seededProxy.imageDataUrl, () => {
@@ -4671,9 +4673,9 @@ export function IconPaintEditor({
       return {
         ...item,
         imageDataUrl,
-        imageSourceDataUrl: keepMarks ? imageDataUrl : item.imageSourceDataUrl,
         ...(nearComplete && !keepMarks ? { color: fill } : {}),
         // Keep contentBound + marks for Save sync; bake only when no Match map.
+        // Do not overwrite imageSourceDataUrl with remapped display (double-remap outside).
         rasterEdited: keepMarks ? !!item.rasterEdited : true,
         imageUseOriginalColors: keepMarks ? false : item.imageUseOriginalColors,
         sourceSvgMarkup: undefined,
@@ -10530,6 +10532,7 @@ export function IconPaintEditor({
         setMatchLabels(labels)
         return
       }
+      // First Match: build stable regions + default marks from scanned palette.
       const next = await enrichImageProxyWithMatch(sel, null)
       commitLines(linesRef.current.map((l) => (l.id === next.id ? next : l)))
       if (next.imageDataUrl) {

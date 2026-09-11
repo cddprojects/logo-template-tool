@@ -6,10 +6,10 @@
  */
 
 import {
-  applyColorMarksRecolor,
   decodeColorMarkPng,
   encodeColorMarkPng,
   imageRecolorFieldsFromPalette,
+  resolveImageDataUrl,
   scanImagePalette,
   type ColorMarkMap
 } from './imageRecolor'
@@ -18,24 +18,6 @@ import type { OutsideContentSettings } from '../types'
 import type { LineObj } from '../components/iconPaint/paintHelpers'
 
 const COLOR_TOL = 40
-
-function slotColors(item: {
-  imagePalette?: string[]
-  imageColor1?: string
-  imageColor2?: string
-  imageColor3?: string
-  imageColor4?: string
-  imageColor5?: string
-}): string[] {
-  const p = item.imagePalette ?? []
-  return [
-    (item.imageColor1 || '').trim() || p[0] || '',
-    (item.imageColor2 || '').trim() || p[1] || '',
-    (item.imageColor3 || '').trim() || p[2] || '',
-    (item.imageColor4 || '').trim() || p[3] || '',
-    (item.imageColor5 || '').trim() || p[4] || ''
-  ]
-}
 
 function parseHex(hex: string): [number, number, number] | null {
   const h = hex.trim().replace('#', '')
@@ -313,19 +295,78 @@ function regionSlotsFromMarks(
 export async function refreshStampFromMarks(item: LineObj): Promise<LineObj> {
   const source = item.imageSourceDataUrl || item.imageDataUrl
   if (!source) return item
-  const map = await decodeColorMarkPng(item.colorMarkPng)
-  const useOriginal = item.imageUseOriginalColors !== false
-  let display = source
-  if (!useOriginal && map) {
-    display = await applyColorMarksRecolor(
-      source,
-      map.marks,
-      map.w,
-      map.h,
-      slotColors(item)
-    )
+  const display = await resolveImageDataUrl({
+    imageDataUrl: source,
+    imageUseOriginalColors: item.imageUseOriginalColors,
+    imagePalette: item.imagePalette,
+    imageColor1: item.imageColor1,
+    imageColor2: item.imageColor2,
+    imageColor3: item.imageColor3,
+    imageColor4: item.imageColor4,
+    imageColor5: item.imageColor5,
+    imageColorMarkPng: item.colorMarkPng
+  })
+  return { ...item, imageDataUrl: display || source }
+}
+
+/**
+ * Attach Color 1–5 / source fields and set the stamp bitmap via the same
+ * resolve path as the outside logo/favicon preview (no Match rebuild).
+ */
+export async function hydrateImageProxyColors(
+  item: LineObj,
+  settings: OutsideContentSettings | null | undefined
+): Promise<LineObj> {
+  if (!item.imageDataUrl && !settings?.imageSourceDataUrl && !item.imageSourceDataUrl) {
+    return item
   }
-  return { ...item, imageDataUrl: display }
+  const source =
+    (settings?.imageSourceDataUrl || item.imageSourceDataUrl || '').trim() ||
+    item.imageDataUrl!
+  let palette =
+    settings?.imagePalette && settings.imagePalette.length > 0
+      ? [...settings.imagePalette]
+      : item.imagePalette && item.imagePalette.length > 0
+        ? [...item.imagePalette]
+        : await scanImagePalette(source)
+  if (!palette.length) palette = await scanImagePalette(source)
+  const defaults = palette.length ? imageRecolorFieldsFromPalette(palette) : null
+  const colors = {
+    imageColor1:
+      (settings?.imageColor1 || item.imageColor1 || '').trim() || defaults?.imageColor1 || '',
+    imageColor2:
+      (settings?.imageColor2 || item.imageColor2 || '').trim() || defaults?.imageColor2 || '',
+    imageColor3:
+      (settings?.imageColor3 || item.imageColor3 || '').trim() || defaults?.imageColor3 || '',
+    imageColor4:
+      (settings?.imageColor4 || item.imageColor4 || '').trim() || defaults?.imageColor4 || '',
+    imageColor5:
+      (settings?.imageColor5 || item.imageColor5 || '').trim() || defaults?.imageColor5 || ''
+  }
+  const useOriginal = settings?.imageUseOriginalColors ?? item.imageUseOriginalColors ?? true
+  const markPng = settings?.imageColorMarkPng || item.colorMarkPng
+  const regionPng = settings?.imageColorRegionPng || item.colorRegionPng
+  const display = await resolveImageDataUrl({
+    imageDataUrl: source,
+    imageUseOriginalColors: useOriginal,
+    imagePalette: palette.length ? palette : undefined,
+    imageColor1: colors.imageColor1,
+    imageColor2: colors.imageColor2,
+    imageColor3: colors.imageColor3,
+    imageColor4: colors.imageColor4,
+    imageColor5: colors.imageColor5,
+    imageColorMarkPng: markPng
+  })
+  return {
+    ...item,
+    imageSourceDataUrl: source,
+    imageDataUrl: display || item.imageDataUrl,
+    imagePalette: palette.length ? palette : item.imagePalette,
+    ...colors,
+    colorMarkPng: markPng,
+    colorRegionPng: regionPng,
+    imageUseOriginalColors: useOriginal
+  }
 }
 
 /** Seed regions + Color 1–5 marks on a contentBound image stamp. */
@@ -378,16 +419,9 @@ export async function enrichImageProxyWithMatch(
     regionMap &&
     (!map || map.w !== stampSize.w || map.h !== stampSize.h)
   ) {
-    const markPalette = useOriginal
-      ? palette
-      : [colors.imageColor1, colors.imageColor2, colors.imageColor3, colors.imageColor4, colors.imageColor5].filter(
-          (c) => !!c
-        )
-    const built = await marksFromRegions(
-      source,
-      regionMap,
-      markPalette.length ? markPalette : palette
-    )
+    // Always seed from scanned palette (source RGB), never from Color 1–5
+    // replacements — those only apply when remapping for display.
+    const built = await marksFromRegions(source, regionMap, palette)
     if (built) {
       map = built
       markPng = encodeColorMarkPng(built.marks, built.w, built.h)

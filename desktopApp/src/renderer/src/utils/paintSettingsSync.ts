@@ -2902,7 +2902,7 @@ export function buildPaintContentSync(opts: {
       if (proxy.imageColor5 !== undefined) sync.imageColor5 = proxy.imageColor5
       if (proxy.colorMarkPng !== undefined) sync.imageColorMarkPng = proxy.colorMarkPng
       if (proxy.colorRegionPng !== undefined) sync.imageColorRegionPng = proxy.colorRegionPng
-      // Marks are stamp-crop sized — keep imageDataUrl aligned with that bitmap.
+      // Marks + regions are sized to imageSourceDataUrl — keep that as live imageDataUrl.
       if (proxy.imageSourceDataUrl) sync.imageDataUrl = proxy.imageSourceDataUrl
     }
     Object.assign(sync, shadowSyncFromVector(proxy, res, drawArea))
