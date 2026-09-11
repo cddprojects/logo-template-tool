@@ -237,7 +237,94 @@ const recolorCache = new Map<string, string>()
 const MAX_RECOLOR_CACHE = 40
 
 function recolorCacheKey(src: string, palette: string[], replacements: string[]): string {
-  return `${src.length}:${src.slice(22, 54)}:${src.slice(-32)}|${palette.join(',')}|${replacements.join(',')}`
+  // v2: soft-edge neighbour bleed after solid remap
+  return `v2:${src.length}:${src.slice(22, 54)}:${src.slice(-32)}|${palette.join(',')}|${replacements.join(',')}`
+}
+
+/** Soft fringe alpha ceiling — above this, pixels are treated as solid ink. */
+const FRINGE_ALPHA_MAX = 220
+/** Neighbour must be at least this opaque to donate a remapped colour. */
+const BLEED_NEIGHBOUR_ALPHA_MIN = 40
+const BLEED_DIRS: readonly [number, number][] = [
+  [-1, 0],
+  [1, 0],
+  [0, -1],
+  [0, 1],
+  [-1, -1],
+  [1, -1],
+  [-1, 1],
+  [1, 1]
+]
+
+/**
+ * After solid remap: copy remapped RGB into soft AA fringe pixels that sit next
+ * to remapped ink. Keeps coverage alpha so the silhouette stays smooth, but
+ * drops the old-colour halo that MAP_DIST / unmarked soft edges leave behind.
+ */
+function bleedRemapIntoSoftEdges(
+  data: Uint8ClampedArray,
+  w: number,
+  h: number,
+  remapped: Uint8Array,
+  passes = 2
+): void {
+  for (let pass = 0; pass < passes; pass++) {
+    const updates: number[] = []
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const p = y * w + x
+        if (remapped[p]) continue
+        const i = p * 4
+        const a = data[i + 3]
+        if (a === 0 || a > FRINGE_ALPHA_MAX) continue
+
+        let hits = 0
+        let sr = 0
+        let sg = 0
+        let sb = 0
+        let bestA = -1
+        let br = 0
+        let bg = 0
+        let bb = 0
+        for (const [dx, dy] of BLEED_DIRS) {
+          const nx = x + dx
+          const ny = y + dy
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+          const np = ny * w + nx
+          if (!remapped[np]) continue
+          const ni = np * 4
+          const na = data[ni + 3]
+          if (na < BLEED_NEIGHBOUR_ALPHA_MIN) continue
+          hits++
+          sr += data[ni]
+          sg += data[ni + 1]
+          sb += data[ni + 2]
+          if (na > bestA) {
+            bestA = na
+            br = data[ni]
+            bg = data[ni + 1]
+            bb = data[ni + 2]
+          }
+        }
+        if (hits === 0) continue
+        if (hits >= 2) {
+          br = Math.round(sr / hits)
+          bg = Math.round(sg / hits)
+          bb = Math.round(sb / hits)
+        }
+        updates.push(p, br, bg, bb)
+      }
+    }
+    if (!updates.length) break
+    for (let u = 0; u < updates.length; u += 4) {
+      const p = updates[u]!
+      const i = p * 4
+      data[i] = updates[u + 1]!
+      data[i + 1] = updates[u + 2]!
+      data[i + 2] = updates[u + 3]!
+      remapped[p] = 1
+    }
+  }
 }
 
 /**
@@ -279,6 +366,7 @@ export async function applyImagePaletteRecolor(
   ctx.drawImage(img, 0, 0)
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
   const data = imageData.data
+  const remapped = new Uint8Array(canvas.width * canvas.height)
 
   for (let i = 0; i < data.length; i += 4) {
     if (data[i + 3] === 0) continue
@@ -297,7 +385,10 @@ export async function applyImagePaletteRecolor(
     data[i] = nr
     data[i + 1] = ng
     data[i + 2] = nb
+    remapped[i / 4] = 1
   }
+
+  bleedRemapIntoSoftEdges(data, canvas.width, canvas.height, remapped)
 
   ctx.putImageData(imageData, 0, 0)
   const out = canvas.toDataURL('image/png')
@@ -460,6 +551,7 @@ export async function applyColorMarksRecolor(
   const mw = w
   const mh = h
   const sameSize = mw === canvas.width && mh === canvas.height
+  const remapped = new Uint8Array(canvas.width * canvas.height)
   for (let y = 0; y < canvas.height; y++) {
     for (let x = 0; x < canvas.width; x++) {
       const i = (y * canvas.width + x) * 4
@@ -478,8 +570,10 @@ export async function applyColorMarksRecolor(
       data[i] = rgb[0]
       data[i + 1] = rgb[1]
       data[i + 2] = rgb[2]
+      remapped[y * canvas.width + x] = 1
     }
   }
+  bleedRemapIntoSoftEdges(data, canvas.width, canvas.height, remapped)
   ctx.putImageData(imageData, 0, 0)
   return canvas.toDataURL('image/png')
 }
