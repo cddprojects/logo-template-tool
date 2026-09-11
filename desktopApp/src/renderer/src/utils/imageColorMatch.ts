@@ -1,8 +1,10 @@
 /**
  * Paint Match tool helpers for Inner uploaded images (contentBound stamps).
  *
- * Regions are fixed connected components from the source bitmap. Color 1–5 marks
- * assign a slot to a whole region without merging adjacent regions that share a slot.
+ * Regions are fixed connected components from the source bitmap. Auto-seed
+ * assigns Color 1–5 only to the five largest regions (by area); smaller
+ * regions stay unmarked until the user marks them. Marks never merge
+ * neighbouring regions that share a slot.
  */
 
 import {
@@ -27,10 +29,6 @@ function parseHex(hex: string): [number, number, number] | null {
   const b = parseInt(h.slice(4, 6), 16)
   if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return null
   return [r, g, b]
-}
-
-function rgbDist(a: [number, number, number], b: [number, number, number]): number {
-  return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2])
 }
 
 function toHex(r: number, g: number, b: number): string {
@@ -182,28 +180,17 @@ export async function buildImageRegions(
   return { regions, w, h, count: nextId }
 }
 
-function nearestSlot(
-  pixel: [number, number, number],
-  paletteRgb: [number, number, number][]
-): number {
-  let best = 0
-  let bestDist = rgbDist(pixel, paletteRgb[0]!)
-  for (let s = 1; s < paletteRgb.length; s++) {
-    const d = rgbDist(pixel, paletteRgb[s]!)
-    if (d < bestDist) {
-      bestDist = d
-      best = s
-    }
-  }
-  return best + 1
-}
-
-/** Build Color 1–5 mark map from region partition + palette (majority / seed colour). */
+/**
+ * Build Color 1–5 marks from the region partition.
+ * Only the five largest regions (by opaque area) are auto-marked:
+ * largest → Color 1 … 5th → Color 5. Smaller regions stay unmarked (original)
+ * until the user assigns them in Match.
+ */
 export async function marksFromRegions(
   dataUrl: string,
   regionMap: ImageRegionMap,
-  palette: string[]
-): Promise<ColorMarkMap | null> {
+  _palette?: string[]
+): Promise<(ColorMarkMap & { slotColors: string[] }) | null> {
   const img = await loadCachedImage(dataUrl)
   if (!img) return null
   const canvas = document.createElement('canvas')
@@ -213,35 +200,37 @@ export async function marksFromRegions(
   if (!ctx) return null
   ctx.drawImage(img, 0, 0, regionMap.w, regionMap.h)
   const { data } = ctx.getImageData(0, 0, regionMap.w, regionMap.h)
-  const paletteRgb: [number, number, number][] = []
-  for (const hex of palette.slice(0, 5)) {
-    const rgb = parseHex(hex)
-    if (rgb) paletteRgb.push(rgb)
-  }
-  if (!paletteRgb.length) return null
 
-  const slotVotes = new Map<number, number[]>()
+  const area = new Uint32Array(regionMap.count + 1)
+  const sumR = new Float64Array(regionMap.count + 1)
+  const sumG = new Float64Array(regionMap.count + 1)
+  const sumB = new Float64Array(regionMap.count + 1)
   for (let p = 0; p < regionMap.regions.length; p++) {
     const id = regionMap.regions[p]
     if (!id) continue
     const i = p * 4
     if (data[i + 3] < 40) continue
-    const slot = nearestSlot([data[i], data[i + 1], data[i + 2]], paletteRgb)
-    let votes = slotVotes.get(id)
-    if (!votes) {
-      votes = [0, 0, 0, 0, 0, 0]
-      slotVotes.set(id, votes)
-    }
-    votes[slot]++
+    area[id]++
+    sumR[id] += data[i]
+    sumG[id] += data[i + 1]
+    sumB[id] += data[i + 2]
   }
 
+  const ranked: { id: number; area: number }[] = []
+  for (let id = 1; id <= regionMap.count; id++) {
+    if ((area[id] ?? 0) > 0) ranked.push({ id, area: area[id]! })
+  }
+  ranked.sort((a, b) => b.area - a.area)
+
   const regionSlot = new Uint8Array(regionMap.count + 1)
-  for (const [id, votes] of slotVotes) {
-    let best = 1
-    for (let s = 2; s <= 5; s++) {
-      if ((votes[s] ?? 0) > (votes[best] ?? 0)) best = s
-    }
-    regionSlot[id] = best
+  const slotColors: string[] = ['', '', '', '', '']
+  const top = ranked.slice(0, 5)
+  for (let i = 0; i < top.length; i++) {
+    const { id } = top[i]!
+    const slot = i + 1
+    regionSlot[id] = slot
+    const n = Math.max(1, area[id] ?? 1)
+    slotColors[i] = toHex(sumR[id]! / n, sumG[id]! / n, sumB[id]! / n)
   }
 
   const marks = new Uint8Array(regionMap.w * regionMap.h)
@@ -249,7 +238,7 @@ export async function marksFromRegions(
     const id = regionMap.regions[p]
     marks[p] = id ? regionSlot[id] ?? 0 : 0
   }
-  return { marks, w: regionMap.w, h: regionMap.h }
+  return { marks, w: regionMap.w, h: regionMap.h, slotColors }
 }
 
 function marksFromRegionSlots(
@@ -391,14 +380,6 @@ export async function enrichImageProxyWithMatch(
   if (!palette.length) return item
 
   const defaults = imageRecolorFieldsFromPalette(palette)
-  const colors = {
-    imageColor1: (settings?.imageColor1 || item.imageColor1 || '').trim() || defaults.imageColor1,
-    imageColor2: (settings?.imageColor2 || item.imageColor2 || '').trim() || defaults.imageColor2,
-    imageColor3: (settings?.imageColor3 || item.imageColor3 || '').trim() || defaults.imageColor3,
-    imageColor4: (settings?.imageColor4 || item.imageColor4 || '').trim() || defaults.imageColor4,
-    imageColor5: (settings?.imageColor5 || item.imageColor5 || '').trim() || defaults.imageColor5
-  }
-
   const stampSize = await loadImageSize(source)
   if (!stampSize) return item
   const useOriginal = settings?.imageUseOriginalColors ?? item.imageUseOriginalColors ?? true
@@ -416,23 +397,49 @@ export async function enrichImageProxyWithMatch(
 
   let markPng = settings?.imageColorMarkPng || item.colorMarkPng
   let map = await decodeColorMarkPng(markPng)
+  let seededSlotColors: string[] | null = null
   if (
     regionMap &&
     (!map || map.w !== stampSize.w || map.h !== stampSize.h)
   ) {
-    // Always seed from scanned palette (source RGB), never from Color 1–5
-    // replacements — those only apply when remapping for display.
+    // Top-5 regions by area → Color 1–5; smaller regions stay unmarked.
     const built = await marksFromRegions(source, regionMap, palette)
     if (built) {
       map = built
       markPng = encodeColorMarkPng(built.marks, built.w, built.h)
+      seededSlotColors = built.slotColors
     }
   } else if (regionMap && map && regionsRebuilt) {
-    // Old flood marks → reassign per new region so touching same-slot areas stay split.
-    const regionSlot = regionSlotsFromMarks(regionMap, map.marks)
-    const nextMarks = marksFromRegionSlots(regionMap, regionSlot)
-    map = nextMarks
-    markPng = encodeColorMarkPng(nextMarks.marks, nextMarks.w, nextMarks.h)
+    // Region map was rebuilt — re-seed top-5 by area (do not keep tiny outline marks).
+    const built = await marksFromRegions(source, regionMap, palette)
+    if (built) {
+      map = built
+      markPng = encodeColorMarkPng(built.marks, built.w, built.h)
+      seededSlotColors = built.slotColors
+    }
+  }
+
+  const colors = {
+    imageColor1:
+      (settings?.imageColor1 || item.imageColor1 || '').trim() ||
+      seededSlotColors?.[0] ||
+      defaults.imageColor1,
+    imageColor2:
+      (settings?.imageColor2 || item.imageColor2 || '').trim() ||
+      seededSlotColors?.[1] ||
+      defaults.imageColor2,
+    imageColor3:
+      (settings?.imageColor3 || item.imageColor3 || '').trim() ||
+      seededSlotColors?.[2] ||
+      defaults.imageColor3,
+    imageColor4:
+      (settings?.imageColor4 || item.imageColor4 || '').trim() ||
+      seededSlotColors?.[3] ||
+      defaults.imageColor4,
+    imageColor5:
+      (settings?.imageColor5 || item.imageColor5 || '').trim() ||
+      seededSlotColors?.[4] ||
+      defaults.imageColor5
   }
 
   const next: LineObj = {
