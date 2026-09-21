@@ -253,9 +253,132 @@ function marksFromRegionSlots(
   return { marks, w: regionMap.w, h: regionMap.h }
 }
 
+function encodeRegionsWithRest(
+  regions: Uint16Array,
+  w: number,
+  h: number,
+  restById: Uint8Array
+): string {
+  const canvas = document.createElement('canvas')
+  canvas.width = Math.max(1, w)
+  canvas.height = Math.max(1, h)
+  const ctx = canvas.getContext('2d')
+  if (!ctx) return ''
+  const img = ctx.createImageData(canvas.width, canvas.height)
+  const n = Math.min(regions.length, canvas.width * canvas.height)
+  for (let p = 0; p < n; p++) {
+    const id = regions[p] ?? 0
+    const i = p * 4
+    img.data[i] = id & 0xff
+    img.data[i + 1] = (id >> 8) & 0xff
+    // Blue marks sections that came from Unmarked, so a later Color 1–5 pick
+    // can recolour only those sections.
+    img.data[i + 2] = id && restById[id] ? 1 : 0
+    img.data[i + 3] = 255
+  }
+  ctx.putImageData(img, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
+async function restFlagsByRegion(
+  regionPng: string | null | undefined,
+  regionMap: ImageRegionMap
+): Promise<Uint8Array> {
+  const flags = new Uint8Array(regionMap.count + 1)
+  if (!regionPng) return flags
+  const img = await loadCachedImage(regionPng)
+  if (!img || img.width !== regionMap.w || img.height !== regionMap.h) return flags
+  const canvas = document.createElement('canvas')
+  canvas.width = img.width
+  canvas.height = img.height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return flags
+  ctx.drawImage(img, 0, 0)
+  const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  for (let p = 0; p < regionMap.regions.length; p++) {
+    const id = regionMap.regions[p]
+    if (!id) continue
+    if (data[p * 4 + 2] > 0) flags[id] = 1
+  }
+  return flags
+}
+
+export type UnmarkedInkStatus = {
+  /** Regions that are not Color 1–5 yet. */
+  unmarkedCount: number
+  /** Color slot last applied to Unmarked sections, if any. */
+  restSlot: number | null
+}
+
+async function regionSlotsForUnmarked(opts: {
+  imageDataUrl: string
+  imageColorMarkPng?: string
+  imageColorRegionPng?: string
+}): Promise<{
+  regionMap: ImageRegionMap
+  regionSlot: Uint8Array
+  rest: Uint8Array
+  hadRegionPng: boolean
+} | null> {
+  const source = (opts.imageDataUrl || '').trim()
+  if (!source) return null
+  let regionMap = await decodeRegionPng(opts.imageColorRegionPng)
+  const hadRegionPng = !!regionMap
+  if (!regionMap) {
+    regionMap = await buildImageRegions(source)
+    if (!regionMap) return null
+  }
+  const markMap = await decodeColorMarkPng(opts.imageColorMarkPng)
+  const hasMarks =
+    !!markMap &&
+    markMap.w === regionMap.w &&
+    markMap.h === regionMap.h &&
+    markMap.marks.some((m) => m >= 1 && m <= 5)
+  let regionSlot: Uint8Array
+  if (hasMarks && markMap) {
+    regionSlot = regionSlotsFromMarks(regionMap, markMap.marks)
+  } else {
+    const seeded = await marksFromRegions(source, regionMap)
+    regionSlot = seeded
+      ? regionSlotsFromMarks(regionMap, seeded.marks)
+      : new Uint8Array(regionMap.count + 1)
+  }
+  const rest = await restFlagsByRegion(opts.imageColorRegionPng, regionMap)
+  return { regionMap, regionSlot, rest, hadRegionPng }
+}
+
+/** How many sections are still unmarked, and which Color slot Unmarked last used. */
+export async function inspectUnmarkedInk(opts: {
+  imageDataUrl: string
+  imageColorMarkPng?: string
+  imageColorRegionPng?: string
+}): Promise<UnmarkedInkStatus | null> {
+  const loaded = await regionSlotsForUnmarked(opts)
+  if (!loaded) return null
+  let unmarkedCount = 0
+  const restVotes = [0, 0, 0, 0, 0, 0]
+  for (let id = 1; id <= loaded.regionMap.count; id++) {
+    if (!loaded.regionSlot[id]) unmarkedCount++
+    if (loaded.rest[id]) {
+      const slot = loaded.regionSlot[id] ?? 0
+      if (slot >= 1 && slot <= 5) restVotes[slot]++
+    }
+  }
+  let restSlot: number | null = null
+  let best = 0
+  for (let s = 1; s <= 5; s++) {
+    if (restVotes[s]! > best) {
+      best = restVotes[s]!
+      restSlot = s
+    }
+  }
+  return { unmarkedCount, restSlot }
+}
+
 /**
  * Paint every region that is not already Color 1–5 with `slot`.
- * Marked sections stay as they are. Builds a region map if Match has not yet.
+ * Remembers exactly that leftover set (first/later Unmarked fills) so the
+ * number button can recolour only those sections later — not Match-marked ones.
  */
 export async function assignUnmarkedInkToSlot(opts: {
   imageDataUrl: string
@@ -264,43 +387,58 @@ export async function assignUnmarkedInkToSlot(opts: {
   slot: number
 }): Promise<{ imageColorMarkPng: string; imageColorRegionPng: string } | null> {
   if (opts.slot < 1 || opts.slot > 5) return null
-  const source = (opts.imageDataUrl || '').trim()
-  if (!source) return null
-
-  let regionMap = await decodeRegionPng(opts.imageColorRegionPng)
-  if (!regionMap) {
-    regionMap = await buildImageRegions(source)
-    if (!regionMap) return null
+  const loaded = await regionSlotsForUnmarked(opts)
+  if (!loaded) return null
+  let any = false
+  // Only regions that are unmarked right now join the leftover set.
+  for (let id = 1; id <= loaded.regionMap.count; id++) {
+    if (loaded.regionSlot[id]) continue
+    loaded.regionSlot[id] = opts.slot
+    loaded.rest[id] = 1
+    any = true
   }
-
-  const markMap = await decodeColorMarkPng(opts.imageColorMarkPng)
-  const hasMarks =
-    !!markMap &&
-    markMap.w === regionMap.w &&
-    markMap.h === regionMap.h &&
-    markMap.marks.some((m) => m >= 1 && m <= 5)
-
-  let regionSlot: Uint8Array
-  if (hasMarks && markMap) {
-    regionSlot = regionSlotsFromMarks(regionMap, markMap.marks)
-  } else {
-    // No Match yet: keep the five largest regions on Color 1–5, then the
-    // chosen slot only fills what those marks leave unmarked.
-    const seeded = await marksFromRegions(source, regionMap)
-    regionSlot = seeded
-      ? regionSlotsFromMarks(regionMap, seeded.marks)
-      : new Uint8Array(regionMap.count + 1)
-  }
-
-  for (let id = 1; id <= regionMap.count; id++) {
-    if (!regionSlot[id]) regionSlot[id] = opts.slot
-  }
-
-  const next = marksFromRegionSlots(regionMap, regionSlot)
+  if (!any) return null
+  const next = marksFromRegionSlots(loaded.regionMap, loaded.regionSlot)
   return {
     imageColorMarkPng: encodeColorMarkPng(next.marks, next.w, next.h),
-    imageColorRegionPng:
-      opts.imageColorRegionPng || encodeRegionPng(regionMap.regions, regionMap.w, regionMap.h)
+    imageColorRegionPng: encodeRegionsWithRest(
+      loaded.regionMap.regions,
+      loaded.regionMap.w,
+      loaded.regionMap.h,
+      loaded.rest
+    )
+  }
+}
+
+/**
+ * Recolour only the leftover set captured when Unmarked was used.
+ * Match / Color 1–5 sections that were already marked before that stay put.
+ */
+export async function recolorUnmarkedGroup(opts: {
+  imageDataUrl: string
+  imageColorMarkPng?: string
+  imageColorRegionPng?: string
+  slot: number
+}): Promise<{ imageColorMarkPng: string; imageColorRegionPng: string } | null> {
+  if (opts.slot < 1 || opts.slot > 5) return null
+  const loaded = await regionSlotsForUnmarked(opts)
+  if (!loaded) return null
+  let any = false
+  for (let id = 1; id <= loaded.regionMap.count; id++) {
+    if (!loaded.rest[id]) continue
+    loaded.regionSlot[id] = opts.slot
+    any = true
+  }
+  if (!any) return null
+  const next = marksFromRegionSlots(loaded.regionMap, loaded.regionSlot)
+  return {
+    imageColorMarkPng: encodeColorMarkPng(next.marks, next.w, next.h),
+    imageColorRegionPng: encodeRegionsWithRest(
+      loaded.regionMap.regions,
+      loaded.regionMap.w,
+      loaded.regionMap.h,
+      loaded.rest
+    )
   }
 }
 
@@ -566,10 +704,17 @@ export async function matchClickOnImageProxy(
   const cur = regionSlot[regionId] ?? 0
   regionSlot[regionId] = cur === activeSlot ? 0 : activeSlot
   const nextMarks = marksFromRegionSlots(regionMap, regionSlot)
+  // Keep Unmarked leftover flags (blue channel) when rewriting the region map.
+  const rest = await restFlagsByRegion(item.colorRegionPng, regionMap)
 
   return {
     ...item,
-    colorRegionPng: item.colorRegionPng || encodeRegionPng(regionMap.regions, regionMap.w, regionMap.h),
+    colorRegionPng: encodeRegionsWithRest(
+      regionMap.regions,
+      regionMap.w,
+      regionMap.h,
+      rest
+    ),
     colorMarkPng: encodeColorMarkPng(nextMarks.marks, nextMarks.w, nextMarks.h),
     imageUseOriginalColors: false,
     imageSourceDataUrl: source

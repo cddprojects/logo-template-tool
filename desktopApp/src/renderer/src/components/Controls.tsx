@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react'
+import React, { useEffect, useState, useRef } from 'react'
 import { Sparkles, Loader, Info, ArrowLeftRight } from 'lucide-react'
 import { generateAIImage, removeImageBackground } from '../utils/iconUtils'
 import {
@@ -6,7 +6,11 @@ import {
   withImageStyle,
   type AiVisualStyle
 } from '../utils/aiStyles'
-import { assignUnmarkedInkToSlot } from '../utils/imageColorMatch'
+import {
+  assignUnmarkedInkToSlot,
+  inspectUnmarkedInk,
+  recolorUnmarkedGroup
+} from '../utils/imageColorMatch'
 import {
   bakeImageSoftAaBleed,
   imageRecolorFieldsFromPalette,
@@ -26,16 +30,32 @@ interface RowProps {
   hint?: string
   /** Optional control in the label column (e.g. colour-slot swap). */
   leading?: React.ReactNode
+  /** When set, the label is a button (used to pick a Color 1–5 slot). */
+  onLabelClick?: () => void
+  labelActive?: boolean
 }
 
-export function Row({ label, children, hint, leading }: RowProps): JSX.Element {
+export function Row({ label, children, hint, leading, onLabelClick, labelActive }: RowProps): JSX.Element {
   return (
     <div className="flex items-center gap-2 py-1.5 min-w-0">
       <div className="shrink-0 basis-[9rem] min-w-[9rem] max-w-[58%] flex items-center gap-1.5">
         {leading}
-        <label className="text-xs text-muted leading-snug truncate min-w-0" title={label}>
-          {label}
-        </label>
+        {onLabelClick ? (
+          <button
+            type="button"
+            onClick={onLabelClick}
+            title={label}
+            className={`text-xs leading-snug truncate min-w-0 text-left ${
+              labelActive ? 'text-accent font-semibold' : 'text-muted hover:text-text'
+            }`}
+          >
+            {label}
+          </button>
+        ) : (
+          <label className="text-xs text-muted leading-snug truncate min-w-0" title={label}>
+            {label}
+          </label>
+        )}
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">{children}</div>
       {hint && <span className="text-[10px] text-muted/60 shrink-0 ml-1">{hint}</span>}
@@ -616,6 +636,9 @@ interface ColorRowProps {
   swapLit?: boolean
   /** When set, shows a swap icon in the label indent. */
   onSwapClick?: () => void
+  /** When set, clicking the label picks this Color slot (Unmarked mode). */
+  onLabelClick?: () => void
+  labelActive?: boolean
 }
 
 export function ColorRow({
@@ -624,7 +647,9 @@ export function ColorRow({
   onChange,
   solidOnly = false,
   swapLit = false,
-  onSwapClick
+  onSwapClick,
+  onLabelClick,
+  labelActive
 }: ColorRowProps): JSX.Element {
   const [open, setOpen] = React.useState(false)
   const [anchorRect, setAnchorRect] = React.useState<DOMRect | null>(null)
@@ -684,7 +709,7 @@ export function ColorRow({
   ) : undefined
 
   return (
-    <Row label={label} leading={swapLeading}>
+    <Row label={label} leading={swapLeading} onLabelClick={onLabelClick} labelActive={labelActive}>
       <div className="flex items-center gap-2 min-w-0 w-full">
         {/* Swatch — shows gradient or solid color, opens popup */}
         <button
@@ -1869,11 +1894,35 @@ export function ImageRecolorControls({
   const [scanning, setScanning] = useState(false)
   const [bleeding, setBleeding] = useState(false)
   const [assigningRest, setAssigningRest] = useState(false)
+  /** 'assign' = next Color 1–5 fills unmarked sections. 'recolor' = next Color 1–5 updates those sections. */
+  const [unmarkedPick, setUnmarkedPick] = useState<'assign' | 'recolor' | null>(null)
+  const [unmarkedCount, setUnmarkedCount] = useState(0)
+  const [restSlot, setRestSlot] = useState<number | null>(null)
   const { armedIndex, onSwapClick, clearArmed } = useColorSlotSwap()
-  if (!imageDataUrl) return null
 
   const colors = [imageColor1, imageColor2, imageColor3, imageColor4, imageColor5]
   const colorKeys = ['imageColor1', 'imageColor2', 'imageColor3', 'imageColor4', 'imageColor5'] as const
+
+  useEffect(() => {
+    if (imageUseOriginalColors || !imageDataUrl) {
+      setUnmarkedCount(0)
+      setRestSlot(null)
+      return
+    }
+    let cancel = false
+    void inspectUnmarkedInk({
+      imageDataUrl,
+      imageColorMarkPng,
+      imageColorRegionPng
+    }).then((status) => {
+      if (cancel || !status) return
+      setUnmarkedCount(status.unmarkedCount)
+      setRestSlot(status.restSlot)
+    })
+    return () => {
+      cancel = true
+    }
+  }, [imageDataUrl, imageUseOriginalColors, imageColorMarkPng, imageColorRegionPng])
 
   const scan = async () => {
     setScanning(true)
@@ -1886,10 +1935,12 @@ export function ImageRecolorControls({
     }
   }
 
-  const assignRest = async (slot: number) => {
+  const applyUnmarkedSlot = async (slot: number) => {
+    if (!unmarkedPick || !imageDataUrl) return
     setAssigningRest(true)
     try {
-      const assigned = await assignUnmarkedInkToSlot({
+      const run = unmarkedPick === 'recolor' ? recolorUnmarkedGroup : assignUnmarkedInkToSlot
+      const assigned = await run({
         imageDataUrl,
         imageColorMarkPng,
         imageColorRegionPng,
@@ -1901,6 +1952,8 @@ export function ImageRecolorControls({
         imageColorMarkPng: assigned.imageColorMarkPng,
         imageColorRegionPng: assigned.imageColorRegionPng
       })
+      setRestSlot(slot)
+      setUnmarkedPick(null)
       clearArmed()
     } finally {
       setAssigningRest(false)
@@ -1928,6 +1981,8 @@ export function ImageRecolorControls({
       setBleeding(false)
     }
   }
+
+  if (!imageDataUrl) return null
 
   return (
     <div className="space-y-1 pt-1">
@@ -1980,30 +2035,57 @@ export function ImageRecolorControls({
                     } as ImageRecolorPatch)
                   })
                 }
+                labelActive={!!unmarkedPick}
+                onLabelClick={
+                  unmarkedPick ? () => void applyUnmarkedSlot(i + 1) : undefined
+                }
               />
             ))}
           {!imageUseOriginalColors && (
             <div className="flex items-center gap-1.5 py-1">
-              <span
-                className="text-[10px] text-muted shrink-0 w-16"
-                title="Colour for ink that is not already marked as Color 1–5"
+              <button
+                type="button"
+                disabled={unmarkedCount === 0 || assigningRest || scanning || bleeding}
+                onClick={() =>
+                  setUnmarkedPick((mode) => (mode === 'assign' ? null : 'assign'))
+                }
+                className={`px-2 py-1 rounded-lg text-[10px] font-medium border transition-colors disabled:opacity-40 ${
+                  unmarkedPick === 'assign'
+                    ? 'bg-accent text-white border-accent'
+                    : 'bg-surface3 text-muted hover:text-text border-border'
+                }`}
+                title={
+                  unmarkedCount === 0
+                    ? 'No unmarked leftover sections'
+                    : 'On — then click a Color 1–5 label to paint leftover (unmarked) sections'
+                }
               >
                 Unmarked
-              </span>
-              <div className="flex flex-1 gap-1">
-                {([1, 2, 3, 4, 5] as const).map((slot) => (
-                  <button
-                    key={`rest-${slot}`}
-                    type="button"
-                    disabled={assigningRest || scanning || bleeding}
-                    onClick={() => void assignRest(slot)}
-                    className="flex-1 py-1 rounded text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
-                    title={`Paint unmarked sections with Color ${slot}`}
-                  >
-                    {assigningRest ? '…' : slot}
-                  </button>
-                ))}
-              </div>
+              </button>
+              {restSlot != null && (
+                <button
+                  type="button"
+                  disabled={assigningRest || scanning || bleeding}
+                  onClick={() =>
+                    setUnmarkedPick((mode) => (mode === 'recolor' ? null : 'recolor'))
+                  }
+                  className={`w-7 py-1 rounded-lg text-[10px] font-semibold border transition-colors ${
+                    unmarkedPick === 'recolor'
+                      ? 'bg-accent text-white border-accent'
+                      : 'bg-surface3 text-text border-border hover:border-accent'
+                  }`}
+                  title={`Leftover sections from Unmarked use Color ${restSlot} — click, then pick another Color 1–5 to update only those`}
+                >
+                  {restSlot}
+                </button>
+              )}
+              {unmarkedPick && (
+                <span className="text-[10px] text-muted truncate">
+                  {unmarkedPick === 'assign'
+                    ? 'Click a Color 1–5 label for leftovers'
+                    : `Click a Color 1–5 label to recolour Unmarked leftovers (was Color ${restSlot})`}
+                </span>
+              )}
             </div>
           )}
           <button

@@ -93,6 +93,8 @@ import {
   refreshStampFromMarks,
   setImageProxySlotColor,
   assignUnmarkedInkToSlot,
+  inspectUnmarkedInk,
+  recolorUnmarkedGroup,
   type MatchSectionLabel
 } from '../utils/imageColorMatch'
 import { bakeImageSoftAaBleed } from '../utils/imageRecolor'
@@ -397,6 +399,10 @@ export function IconPaintEditor({
   const [matchSlot, setMatchSlot] = useState<number | null>(null)
   const matchSlotRef = useRef<number | null>(null)
   matchSlotRef.current = matchSlot
+  /** Unmarked mode: next Color 1–5 click fills leftover sections, or recolours them. */
+  const [unmarkedPick, setUnmarkedPick] = useState<'assign' | 'recolor' | null>(null)
+  const [unmarkedCount, setUnmarkedCount] = useState(0)
+  const [restSlot, setRestSlot] = useState<number | null>(null)
   /** Show 1–5 section labels on the canvas while Match is active. */
   const [matchLabelsVisible, setMatchLabelsVisible] = useState(true)
   const [matchLabels, setMatchLabels] = useState<MatchSectionLabel[]>([])
@@ -10483,6 +10489,43 @@ export function IconPaintEditor({
   )
   /** Keep Match chrome visible for the whole Match session (not only while imageMatchTarget is true). */
   const showMatchChrome = tool === 'match' || imageMatchTarget
+  const unmarkedProxy =
+    (selectedObj && isInnerUploadedImageProxy(selectedObj) ? selectedObj : null) ||
+    lines.find((l) => isInnerUploadedImageProxy(l)) ||
+    null
+
+  useEffect(() => {
+    if (!showMatchChrome || !unmarkedProxy) {
+      setUnmarkedCount(0)
+      setRestSlot(null)
+      return
+    }
+    const source = unmarkedProxy.imageSourceDataUrl || unmarkedProxy.imageDataUrl
+    if (!source) {
+      setUnmarkedCount(0)
+      setRestSlot(null)
+      return
+    }
+    let cancel = false
+    void inspectUnmarkedInk({
+      imageDataUrl: source,
+      imageColorMarkPng: unmarkedProxy.colorMarkPng,
+      imageColorRegionPng: unmarkedProxy.colorRegionPng
+    }).then((status) => {
+      if (cancel || !status) return
+      setUnmarkedCount(status.unmarkedCount)
+      setRestSlot(status.restSlot)
+    })
+    return () => {
+      cancel = true
+    }
+  }, [
+    showMatchChrome,
+    unmarkedProxy?.imageSourceDataUrl,
+    unmarkedProxy?.imageDataUrl,
+    unmarkedProxy?.colorMarkPng,
+    unmarkedProxy?.colorRegionPng
+  ])
 
   const findImageMatchProxy = (): LineObj | null => {
     const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
@@ -11446,13 +11489,56 @@ export function IconPaintEditor({
                         : `Color ${slot} — click swatch to edit`
                     }
                     onClick={() => {
+                      if (unmarkedPick) {
+                        void (async () => {
+                          const source = matchObj.imageSourceDataUrl || matchObj.imageDataUrl
+                          if (!source) return
+                          const run =
+                            unmarkedPick === 'recolor' ? recolorUnmarkedGroup : assignUnmarkedInkToSlot
+                          const assigned = await run({
+                            imageDataUrl: source,
+                            imageColorMarkPng: matchObj.colorMarkPng,
+                            imageColorRegionPng: matchObj.colorRegionPng,
+                            slot
+                          })
+                          if (!assigned) return
+                          const stamped = await refreshStampFromMarks({
+                            ...matchObj,
+                            imageUseOriginalColors: false,
+                            imageSourceDataUrl: source,
+                            colorMarkPng: assigned.imageColorMarkPng,
+                            colorRegionPng: assigned.imageColorRegionPng
+                          })
+                          commitLines(
+                            linesRef.current.map((l) => (l.id === stamped.id ? stamped : l))
+                          )
+                          if (stamped.imageDataUrl) {
+                            ensureStampImage(stamped.imageDataUrl, () => {
+                              redrawLinesRef.current()
+                              drawHandles()
+                            })
+                          }
+                          setRestSlot(slot)
+                          setUnmarkedPick(null)
+                          pushHistory()
+                          redrawLines()
+                          drawHandles()
+                          if (tool === 'match') {
+                            const labels = await buildMatchSectionLabels(stamped)
+                            setMatchLabels(labels)
+                          }
+                        })()
+                        return
+                      }
                       if (tool === 'match') {
                         setMatchSlot((s) => (s === slot ? null : slot))
                         return
                       }
                     }}
                     className={`relative flex items-center gap-1 shrink-0 rounded-lg border px-1 py-0.5 transition-colors ${
-                      active ? 'border-accent bg-accent/15 ring-1 ring-accent' : 'border-border bg-surface3'
+                      active || unmarkedPick
+                        ? 'border-accent bg-accent/15 ring-1 ring-accent'
+                        : 'border-border bg-surface3'
                     }`}
                   >
                     <span className="text-[9px] text-muted w-3 text-center">{slot}</span>
@@ -11488,58 +11574,37 @@ export function IconPaintEditor({
                   </button>
                 )
               })}
-              <span
-                className="text-[10px] text-muted shrink-0"
-                title="Colour for ink that is not already marked as Color 1–5"
+              <button
+                type="button"
+                disabled={unmarkedCount === 0}
+                title={
+                  unmarkedCount === 0
+                    ? 'No unmarked leftover sections'
+                    : 'On — then click Color 1–5 to paint leftover (unmarked) sections'
+                }
+                onClick={() => setUnmarkedPick((mode) => (mode === 'assign' ? null : 'assign'))}
+                className={`h-8 px-2 rounded-lg flex items-center text-[11px] font-medium shrink-0 border transition-colors disabled:opacity-40 ${
+                  unmarkedPick === 'assign'
+                    ? 'bg-accent text-white border-accent'
+                    : 'bg-surface3 text-muted hover:text-text border-border'
+                }`}
               >
                 Unmarked
-              </span>
-              {([1, 2, 3, 4, 5] as const).map((slot) => (
+              </button>
+              {restSlot != null && (
                 <button
-                  key={`rest-${slot}`}
                   type="button"
-                  title={`Paint unmarked sections with Color ${slot}`}
-                  onClick={() => {
-                    void (async () => {
-                      const source = matchObj.imageSourceDataUrl || matchObj.imageDataUrl
-                      if (!source) return
-                      const assigned = await assignUnmarkedInkToSlot({
-                        imageDataUrl: source,
-                        imageColorMarkPng: matchObj.colorMarkPng,
-                        imageColorRegionPng: matchObj.colorRegionPng,
-                        slot
-                      })
-                      if (!assigned) return
-                      const stamped = await refreshStampFromMarks({
-                        ...matchObj,
-                        imageUseOriginalColors: false,
-                        imageSourceDataUrl: source,
-                        colorMarkPng: assigned.imageColorMarkPng,
-                        colorRegionPng: assigned.imageColorRegionPng
-                      })
-                      commitLines(
-                        linesRef.current.map((l) => (l.id === stamped.id ? stamped : l))
-                      )
-                      if (stamped.imageDataUrl) {
-                        ensureStampImage(stamped.imageDataUrl, () => {
-                          redrawLinesRef.current()
-                          drawHandles()
-                        })
-                      }
-                      pushHistory()
-                      redrawLines()
-                      drawHandles()
-                      if (tool === 'match') {
-                        const labels = await buildMatchSectionLabels(stamped)
-                        setMatchLabels(labels)
-                      }
-                    })()
-                  }}
-                  className="h-8 w-6 rounded-lg text-[10px] font-medium shrink-0 bg-surface3 text-muted hover:text-text border border-border transition-colors"
+                  title={`Leftover sections from Unmarked use Color ${restSlot} — click, then pick another Color 1–5 to update only those`}
+                  onClick={() => setUnmarkedPick((mode) => (mode === 'recolor' ? null : 'recolor'))}
+                  className={`h-8 w-8 rounded-lg flex items-center justify-center text-[11px] font-semibold shrink-0 border transition-colors ${
+                    unmarkedPick === 'recolor'
+                      ? 'bg-accent text-white border-accent'
+                      : 'bg-surface3 text-text border-border hover:border-accent'
+                  }`}
                 >
-                  {slot}
+                  {restSlot}
                 </button>
-              ))}
+              )}
               <button
                 type="button"
                 title="Strip soft AA outline halo (does not thicken the rim)"
