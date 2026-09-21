@@ -137,8 +137,14 @@ export interface IconConfig {
   /**
    * Stable region partition for Match (PNG, R + G*256 = region id).
    * Adjacent regions stay separate even when they share a Color slot.
+   * Blue channel > 0 = leftover set from Unmarked (not a Match mark).
    */
   imageColorRegionPng?: string
+  /**
+   * Color 1–5 slot used for Unmarked leftovers (region blue flag).
+   * Those regions stay mark 0 so Match does not show a section number.
+   */
+  imageUnmarkedColorSlot?: number
   // Container / background shape drawn behind the icon content
   containerEnabled: boolean
   containerShape: ShapeType
@@ -314,8 +320,10 @@ export interface FaviconContent {
    * Same pixel size as imageDataUrl.
    */
   imageColorMarkPng?: string
-  /** Stable Match region ids (R + G*256). */
+  /** Stable Match region ids (R + G*256). Blue = Unmarked leftover set. */
   imageColorRegionPng?: string
+  /** Color 1–5 for Unmarked leftovers; those regions stay Match-unmarked (mark 0). */
+  imageUnmarkedColorSlot?: number
   // canva prompt settings (no rendered inner content)
   canvaBusinessType: CanvaBusinessType
   canvaDesignType: CanvaDesignType
@@ -511,8 +519,10 @@ export interface PaintVector {
   imageColor4?: string
   imageColor5?: string
   colorMarkPng?: string
-  /** Stable Match region ids (R + G*256), same size as colorMarkPng. */
+  /** Stable Match region ids (R + G*256), same size as colorMarkPng. Blue = Unmarked leftovers. */
   colorRegionPng?: string
+  /** Color 1–5 for Unmarked leftovers; mark map stays 0 for those regions. */
+  unmarkedColorSlot?: number
   /** Tight unwarped source rect in canvas space (TL + size). */
   reshapeSrc?: { x: number; y: number; w: number; h: number }
   /** Destination quad in canvas space: TL, TR, BR, BL. */
@@ -587,6 +597,7 @@ export interface OutsideContentSettings extends OutsideTextSettings {
   imageColor5?: string
   imageColorMarkPng?: string
   imageColorRegionPng?: string
+  imageUnmarkedColorSlot?: number
 }
 
 /**
@@ -705,6 +716,7 @@ export interface PaintContentSync {
   imageColor5?: string
   imageColorMarkPng?: string
   imageColorRegionPng?: string
+  imageUnmarkedColorSlot?: number
   /** When Match edited the Inner image, persist the stamp-crop source bitmap. */
   imageDataUrl?: string
   /** Size ratio for the active content type (0–1+). */

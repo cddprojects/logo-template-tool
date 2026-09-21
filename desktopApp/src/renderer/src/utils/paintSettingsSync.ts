@@ -85,7 +85,7 @@ const FAVICON_TYPE_KEYS: Record<ContentType, readonly string[]> = {
   image: [
     'imageDataUrl', 'imageSizeRatio', 'imageUseOriginalColors', 'imagePalette',
     'imageColor1', 'imageColor2', 'imageColor3', 'imageColor4', 'imageColor5',
-    'imageColorMarkPng', 'imageColorRegionPng',
+    'imageColorMarkPng', 'imageColorRegionPng', 'imageUnmarkedColorSlot',
     ...SHARED_CONTENT_KEYS
   ],
   svg: ['svgPath', 'svgColor', ...SHARED_CONTENT_KEYS],
@@ -114,7 +114,7 @@ const ICON_TYPE_KEYS: Record<IconSourceType, readonly string[]> = {
   image: [
     'imageDataUrl', 'imageSizeRatio', 'imageUseOriginalColors', 'imagePalette',
     'imageColor1', 'imageColor2', 'imageColor3', 'imageColor4', 'imageColor5',
-    'imageColorMarkPng', 'imageColorRegionPng',
+    'imageColorMarkPng', 'imageColorRegionPng', 'imageUnmarkedColorSlot',
     ...SHARED_CONTENT_KEYS
   ]
 }
@@ -2436,6 +2436,7 @@ export function outsideContentFromFavicon(content: FaviconContent): OutsideConte
     imageColor5: content.imageColor5,
     imageColorMarkPng: content.imageColorMarkPng,
     imageColorRegionPng: content.imageColorRegionPng,
+    imageUnmarkedColorSlot: content.imageUnmarkedColorSlot,
     contentShadowEnabled: !!content.contentShadowEnabled,
     contentShadowColor: content.contentShadowColor ?? '#00000080',
     contentShadowBlur: content.contentShadowBlur ?? 8,
@@ -2475,6 +2476,7 @@ export function outsideContentFromIcon(icon: IconConfig): OutsideContentSettings
     imageColor5: icon.imageColor5,
     imageColorMarkPng: icon.imageColorMarkPng,
     imageColorRegionPng: icon.imageColorRegionPng,
+    imageUnmarkedColorSlot: icon.imageUnmarkedColorSlot,
     contentShadowEnabled: !!icon.contentShadowEnabled,
     contentShadowColor: icon.contentShadowColor ?? '#00000080',
     contentShadowBlur: toDesign(icon.contentShadowBlur ?? 8),
@@ -2890,7 +2892,7 @@ export function buildPaintContentSync(opts: {
     // Partial stamp fills set rasterEdited and must not push fillColor — that
     // remaps the whole live image (including enclosed islands left unpainted).
     if (proxy.color && !proxy.rasterEdited) sync.fillColor = proxy.color
-    if (proxy.imageSourceDataUrl || proxy.colorMarkPng || proxy.colorRegionPng || proxy.imagePalette?.length) {
+    if (proxy.imageSourceDataUrl || proxy.colorMarkPng || proxy.colorRegionPng || proxy.imagePalette?.length || proxy.unmarkedColorSlot != null) {
       if (proxy.imageUseOriginalColors !== undefined) {
         sync.imageUseOriginalColors = proxy.imageUseOriginalColors
       }
@@ -2902,6 +2904,9 @@ export function buildPaintContentSync(opts: {
       if (proxy.imageColor5 !== undefined) sync.imageColor5 = proxy.imageColor5
       if (proxy.colorMarkPng !== undefined) sync.imageColorMarkPng = proxy.colorMarkPng
       if (proxy.colorRegionPng !== undefined) sync.imageColorRegionPng = proxy.colorRegionPng
+      if (proxy.unmarkedColorSlot !== undefined) {
+        sync.imageUnmarkedColorSlot = proxy.unmarkedColorSlot
+      }
       // Marks + regions are sized to imageSourceDataUrl — keep that as live imageDataUrl.
       if (proxy.imageSourceDataUrl) sync.imageDataUrl = proxy.imageSourceDataUrl
     }
@@ -3002,6 +3007,7 @@ export function applyPaintContentSyncToFaviconContent(
     sync.imagePalette ||
     sync.imageColorMarkPng !== undefined ||
     sync.imageColorRegionPng !== undefined ||
+    sync.imageUnmarkedColorSlot !== undefined ||
     sync.imageColor1 !== undefined
   ) {
     if (next.type === 'image' || sync.imageColorMarkPng || sync.imageColorRegionPng || sync.imagePalette) {
@@ -3020,6 +3026,9 @@ export function applyPaintContentSyncToFaviconContent(
         if (sync.imageColor5 !== undefined) next.imageColor5 = sync.imageColor5
         if (sync.imageColorMarkPng !== undefined) next.imageColorMarkPng = sync.imageColorMarkPng
         if (sync.imageColorRegionPng !== undefined) next.imageColorRegionPng = sync.imageColorRegionPng
+        if (sync.imageUnmarkedColorSlot !== undefined) {
+          next.imageUnmarkedColorSlot = sync.imageUnmarkedColorSlot
+        }
         if (sync.imageDataUrl) next.imageDataUrl = sync.imageDataUrl
       }
     }
@@ -3109,6 +3118,7 @@ export function applyPaintContentSyncToIcon(
     sync.imagePalette ||
     sync.imageColorMarkPng !== undefined ||
     sync.imageColorRegionPng !== undefined ||
+    sync.imageUnmarkedColorSlot !== undefined ||
     sync.imageColor1 !== undefined
   ) {
     if (next.sourceType === 'image') {
@@ -3123,6 +3133,9 @@ export function applyPaintContentSyncToIcon(
       if (sync.imageColor5 !== undefined) next.imageColor5 = sync.imageColor5
       if (sync.imageColorMarkPng !== undefined) next.imageColorMarkPng = sync.imageColorMarkPng
       if (sync.imageColorRegionPng !== undefined) next.imageColorRegionPng = sync.imageColorRegionPng
+      if (sync.imageUnmarkedColorSlot !== undefined) {
+        next.imageUnmarkedColorSlot = sync.imageUnmarkedColorSlot
+      }
       if (sync.imageDataUrl) next.imageDataUrl = sync.imageDataUrl
     }
   }
@@ -3615,6 +3628,7 @@ export function paintSaveIconForVariant(
     paintSession: clearPaintSessionBoundImagePixels(out.paintSession) ?? null,
     imageColorMarkPng: target.imageColorMarkPng,
     imageColorRegionPng: target.imageColorRegionPng,
+    imageUnmarkedColorSlot: target.imageUnmarkedColorSlot,
     contentTypeStash: mergeTypeStashColors(
       painted.contentTypeStash,
       target.contentTypeStash,
@@ -3649,7 +3663,8 @@ export function paintSaveFaviconForVariant(
     content: {
       ...out.content,
       imageColorMarkPng: target.content.imageColorMarkPng,
-      imageColorRegionPng: target.content.imageColorRegionPng
+      imageColorRegionPng: target.content.imageColorRegionPng,
+      imageUnmarkedColorSlot: target.content.imageUnmarkedColorSlot
     },
     contentTypeStash: mergeTypeStashColors(
       painted.contentTypeStash,

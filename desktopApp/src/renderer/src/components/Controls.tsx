@@ -1795,6 +1795,7 @@ export type ImageRecolorPatch = Partial<ImageRecolorFields> & {
   imageDataUrl?: string
   imageColorMarkPng?: string
   imageColorRegionPng?: string
+  imageUnmarkedColorSlot?: number
 }
 
 /** Two-click arm → swap for Colour 1–5 style lists. */
@@ -1875,6 +1876,7 @@ interface ImageRecolorControlsProps {
   imageColor5?: string
   imageColorMarkPng?: string
   imageColorRegionPng?: string
+  imageUnmarkedColorSlot?: number
   onChange: (patch: ImageRecolorPatch) => void
 }
 
@@ -1889,6 +1891,7 @@ export function ImageRecolorControls({
   imageColor5 = '',
   imageColorMarkPng,
   imageColorRegionPng,
+  imageUnmarkedColorSlot,
   onChange
 }: ImageRecolorControlsProps): JSX.Element | null {
   const [scanning, setScanning] = useState(false)
@@ -1913,7 +1916,8 @@ export function ImageRecolorControls({
     void inspectUnmarkedInk({
       imageDataUrl,
       imageColorMarkPng,
-      imageColorRegionPng
+      imageColorRegionPng,
+      imageUnmarkedColorSlot
     }).then((status) => {
       if (cancel || !status) return
       setUnmarkedCount(status.unmarkedCount)
@@ -1922,7 +1926,13 @@ export function ImageRecolorControls({
     return () => {
       cancel = true
     }
-  }, [imageDataUrl, imageUseOriginalColors, imageColorMarkPng, imageColorRegionPng])
+  }, [
+    imageDataUrl,
+    imageUseOriginalColors,
+    imageColorMarkPng,
+    imageColorRegionPng,
+    imageUnmarkedColorSlot
+  ])
 
   const scan = async () => {
     setScanning(true)
@@ -1950,7 +1960,8 @@ export function ImageRecolorControls({
       onChange({
         imageUseOriginalColors: false,
         imageColorMarkPng: assigned.imageColorMarkPng,
-        imageColorRegionPng: assigned.imageColorRegionPng
+        imageColorRegionPng: assigned.imageColorRegionPng,
+        imageUnmarkedColorSlot: assigned.imageUnmarkedColorSlot
       })
       setRestSlot(slot)
       setUnmarkedPick(null)
@@ -1972,7 +1983,9 @@ export function ImageRecolorControls({
         imageColor3,
         imageColor4,
         imageColor5,
-        imageColorMarkPng
+        imageColorMarkPng,
+        imageColorRegionPng,
+        imageUnmarkedColorSlot
       })
       if (!baked) return
       onChange(baked)

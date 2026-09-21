@@ -10510,7 +10510,8 @@ export function IconPaintEditor({
     void inspectUnmarkedInk({
       imageDataUrl: source,
       imageColorMarkPng: unmarkedProxy.colorMarkPng,
-      imageColorRegionPng: unmarkedProxy.colorRegionPng
+      imageColorRegionPng: unmarkedProxy.colorRegionPng,
+      imageUnmarkedColorSlot: unmarkedProxy.unmarkedColorSlot
     }).then((status) => {
       if (cancel || !status) return
       setUnmarkedCount(status.unmarkedCount)
@@ -10524,7 +10525,8 @@ export function IconPaintEditor({
     unmarkedProxy?.imageSourceDataUrl,
     unmarkedProxy?.imageDataUrl,
     unmarkedProxy?.colorMarkPng,
-    unmarkedProxy?.colorRegionPng
+    unmarkedProxy?.colorRegionPng,
+    unmarkedProxy?.unmarkedColorSlot
   ])
 
   const findImageMatchProxy = (): LineObj | null => {
@@ -11507,7 +11509,8 @@ export function IconPaintEditor({
                             imageUseOriginalColors: false,
                             imageSourceDataUrl: source,
                             colorMarkPng: assigned.imageColorMarkPng,
-                            colorRegionPng: assigned.imageColorRegionPng
+                            colorRegionPng: assigned.imageColorRegionPng,
+                            unmarkedColorSlot: assigned.imageUnmarkedColorSlot
                           })
                           commitLines(
                             linesRef.current.map((l) => (l.id === stamped.id ? stamped : l))
@@ -11621,7 +11624,9 @@ export function IconPaintEditor({
                       imageColor3: matchObj.imageColor3,
                       imageColor4: matchObj.imageColor4,
                       imageColor5: matchObj.imageColor5,
-                      imageColorMarkPng: matchObj.colorMarkPng
+                      imageColorMarkPng: matchObj.colorMarkPng,
+                      imageColorRegionPng: matchObj.colorRegionPng,
+                      imageUnmarkedColorSlot: matchObj.unmarkedColorSlot
                     })
                     if (!baked) return
                     const next: LineObj = {
@@ -11635,8 +11640,9 @@ export function IconPaintEditor({
                       imageColor3: baked.imageColor3,
                       imageColor4: baked.imageColor4,
                       imageColor5: baked.imageColor5,
-                      colorMarkPng: undefined,
-                      colorRegionPng: undefined
+                      colorMarkPng: baked.imageColorMarkPng || undefined,
+                      colorRegionPng: baked.imageColorRegionPng || undefined,
+                      unmarkedColorSlot: baked.imageUnmarkedColorSlot
                     }
                     commitLines(
                       linesRef.current.map((l) => (l.id === next.id ? next : l))
@@ -11648,6 +11654,10 @@ export function IconPaintEditor({
                     pushHistory()
                     redrawLines()
                     drawHandles()
+                    if (tool === 'match') {
+                      const labels = await buildMatchSectionLabels(next)
+                      setMatchLabels(labels)
+                    }
                   })()
                 }}
                 className="h-8 px-2 rounded-lg flex items-center text-[11px] font-medium shrink-0 bg-surface3 text-muted hover:text-text transition-colors"

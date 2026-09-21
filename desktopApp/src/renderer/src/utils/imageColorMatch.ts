@@ -347,57 +347,71 @@ async function regionSlotsForUnmarked(opts: {
   return { regionMap, regionSlot, rest, hadRegionPng }
 }
 
-/** How many sections are still unmarked, and which Color slot Unmarked last used. */
+/** How many leftover sections still need Unmarked, and which Color slot leftovers use. */
 export async function inspectUnmarkedInk(opts: {
   imageDataUrl: string
   imageColorMarkPng?: string
   imageColorRegionPng?: string
+  imageUnmarkedColorSlot?: number
 }): Promise<UnmarkedInkStatus | null> {
   const loaded = await regionSlotsForUnmarked(opts)
   if (!loaded) return null
   let unmarkedCount = 0
-  const restVotes = [0, 0, 0, 0, 0, 0]
   for (let id = 1; id <= loaded.regionMap.count; id++) {
-    if (!loaded.regionSlot[id]) unmarkedCount++
-    if (loaded.rest[id]) {
-      const slot = loaded.regionSlot[id] ?? 0
-      if (slot >= 1 && slot <= 5) restVotes[slot]++
-    }
+    // Already Match-marked or already claimed by Unmarked leftovers → not pending.
+    if (loaded.regionSlot[id] || loaded.rest[id]) continue
+    unmarkedCount++
   }
+  const hasRest = loaded.rest.some((v) => v)
   let restSlot: number | null = null
-  let best = 0
-  for (let s = 1; s <= 5; s++) {
-    if (restVotes[s]! > best) {
-      best = restVotes[s]!
-      restSlot = s
+  if (hasRest) {
+    if (
+      opts.imageUnmarkedColorSlot != null &&
+      opts.imageUnmarkedColorSlot >= 1 &&
+      opts.imageUnmarkedColorSlot <= 5
+    ) {
+      restSlot = opts.imageUnmarkedColorSlot
+    } else {
+      for (let id = 1; id <= loaded.regionMap.count; id++) {
+        if (loaded.rest[id] && loaded.regionSlot[id]) {
+          restSlot = loaded.regionSlot[id]!
+          break
+        }
+      }
     }
   }
   return { unmarkedCount, restSlot }
 }
 
 /**
- * Paint every region that is not already Color 1–5 with `slot`.
- * Remembers exactly that leftover set (first/later Unmarked fills) so the
- * number button can recolour only those sections later — not Match-marked ones.
+ * Paint leftover (Match-unmarked) regions with Color `slot` without Match-marking them.
+ * Remembers that leftover set so the number button can recolour only those pixels.
  */
 export async function assignUnmarkedInkToSlot(opts: {
   imageDataUrl: string
   imageColorMarkPng?: string
   imageColorRegionPng?: string
   slot: number
-}): Promise<{ imageColorMarkPng: string; imageColorRegionPng: string } | null> {
+}): Promise<{
+  imageColorMarkPng: string
+  imageColorRegionPng: string
+  imageUnmarkedColorSlot: number
+} | null> {
   if (opts.slot < 1 || opts.slot > 5) return null
   const loaded = await regionSlotsForUnmarked(opts)
   if (!loaded) return null
   let any = false
-  // Only regions that are unmarked right now join the leftover set.
   for (let id = 1; id <= loaded.regionMap.count; id++) {
-    if (loaded.regionSlot[id]) continue
-    loaded.regionSlot[id] = opts.slot
+    if (loaded.regionSlot[id] || loaded.rest[id]) continue
+    // Stay Match-unmarked (slot 0); only flag as Unmarked leftover.
     loaded.rest[id] = 1
     any = true
   }
   if (!any) return null
+  // Ensure leftovers never carry Match numbers (also clears older mistaken marks).
+  for (let id = 1; id <= loaded.regionMap.count; id++) {
+    if (loaded.rest[id]) loaded.regionSlot[id] = 0
+  }
   const next = marksFromRegionSlots(loaded.regionMap, loaded.regionSlot)
   return {
     imageColorMarkPng: encodeColorMarkPng(next.marks, next.w, next.h),
@@ -406,27 +420,33 @@ export async function assignUnmarkedInkToSlot(opts: {
       loaded.regionMap.w,
       loaded.regionMap.h,
       loaded.rest
-    )
+    ),
+    imageUnmarkedColorSlot: opts.slot
   }
 }
 
 /**
- * Recolour only the leftover set captured when Unmarked was used.
- * Match / Color 1–5 sections that were already marked before that stay put.
+ * Recolour only the leftover set from Unmarked. Match-marked sections stay put.
+ * Leftovers remain Match-unmarked (mark 0).
  */
 export async function recolorUnmarkedGroup(opts: {
   imageDataUrl: string
   imageColorMarkPng?: string
   imageColorRegionPng?: string
   slot: number
-}): Promise<{ imageColorMarkPng: string; imageColorRegionPng: string } | null> {
+}): Promise<{
+  imageColorMarkPng: string
+  imageColorRegionPng: string
+  imageUnmarkedColorSlot: number
+} | null> {
   if (opts.slot < 1 || opts.slot > 5) return null
   const loaded = await regionSlotsForUnmarked(opts)
   if (!loaded) return null
   let any = false
   for (let id = 1; id <= loaded.regionMap.count; id++) {
     if (!loaded.rest[id]) continue
-    loaded.regionSlot[id] = opts.slot
+    // Keep mark 0 — Unmarked leftovers are never Match section numbers.
+    loaded.regionSlot[id] = 0
     any = true
   }
   if (!any) return null
@@ -438,7 +458,8 @@ export async function recolorUnmarkedGroup(opts: {
       loaded.regionMap.w,
       loaded.regionMap.h,
       loaded.rest
-    )
+    ),
+    imageUnmarkedColorSlot: opts.slot
   }
 }
 
@@ -482,7 +503,9 @@ export async function refreshStampFromMarks(item: LineObj): Promise<LineObj> {
     imageColor3: item.imageColor3,
     imageColor4: item.imageColor4,
     imageColor5: item.imageColor5,
-    imageColorMarkPng: item.colorMarkPng
+    imageColorMarkPng: item.colorMarkPng,
+    imageColorRegionPng: item.colorRegionPng,
+    imageUnmarkedColorSlot: item.unmarkedColorSlot
   })
   return { ...item, imageDataUrl: display || source }
 }
@@ -524,6 +547,8 @@ export async function hydrateImageProxyColors(
   const useOriginal = settings?.imageUseOriginalColors ?? item.imageUseOriginalColors ?? true
   const markPng = settings?.imageColorMarkPng || item.colorMarkPng
   const regionPng = settings?.imageColorRegionPng || item.colorRegionPng
+  const unmarkedSlot =
+    settings?.imageUnmarkedColorSlot ?? item.unmarkedColorSlot
   const display = await resolveImageDataUrl({
     imageDataUrl: source,
     imageUseOriginalColors: useOriginal,
@@ -533,7 +558,9 @@ export async function hydrateImageProxyColors(
     imageColor3: colors.imageColor3,
     imageColor4: colors.imageColor4,
     imageColor5: colors.imageColor5,
-    imageColorMarkPng: markPng
+    imageColorMarkPng: markPng,
+    imageColorRegionPng: regionPng,
+    imageUnmarkedColorSlot: unmarkedSlot
   })
   return {
     ...item,
@@ -543,6 +570,7 @@ export async function hydrateImageProxyColors(
     ...colors,
     colorMarkPng: markPng,
     colorRegionPng: regionPng,
+    unmarkedColorSlot: unmarkedSlot,
     imageUseOriginalColors: useOriginal,
     stampSource: item.stampSource ?? 'image'
   }
@@ -631,6 +659,8 @@ export async function enrichImageProxyWithMatch(
       defaults.imageColor5
   }
 
+  const unmarkedSlot =
+    settings?.imageUnmarkedColorSlot ?? item.unmarkedColorSlot
   const next: LineObj = {
     ...item,
     imageSourceDataUrl: source,
@@ -638,6 +668,7 @@ export async function enrichImageProxyWithMatch(
     ...colors,
     colorMarkPng: markPng,
     colorRegionPng: regionPng,
+    unmarkedColorSlot: unmarkedSlot,
     imageUseOriginalColors: useOriginal,
     stampSource: item.stampSource ?? 'image'
   }
@@ -704,8 +735,9 @@ export async function matchClickOnImageProxy(
   const cur = regionSlot[regionId] ?? 0
   regionSlot[regionId] = cur === activeSlot ? 0 : activeSlot
   const nextMarks = marksFromRegionSlots(regionMap, regionSlot)
-  // Keep Unmarked leftover flags (blue channel) when rewriting the region map.
+  // Keep Unmarked leftover flags; Match claim clears leftover for that region.
   const rest = await restFlagsByRegion(item.colorRegionPng, regionMap)
+  if (regionSlot[regionId] >= 1) rest[regionId] = 0
 
   return {
     ...item,
@@ -818,6 +850,8 @@ export async function buildMatchSectionLabels(
   const regionMap = await decodeRegionPng(item.colorRegionPng)
   const markMap = await decodeColorMarkPng(item.colorMarkPng)
   if (!regionMap || !markMap) return []
+  // Unmarked leftovers may share a fill colour but must never show Match numbers.
+  const rest = await restFlagsByRegion(item.colorRegionPng, regionMap)
 
   const img = await loadCachedImage(source)
   if (!img) return []
@@ -842,7 +876,7 @@ export async function buildMatchSectionLabels(
   const sums = new Map<number, Acc>()
   for (let p = 0; p < regionMap.regions.length; p++) {
     const id = regionMap.regions[p]
-    if (!id) continue
+    if (!id || rest[id]) continue
     const slot = markMap.marks[p] ?? 0
     if (slot < 1 || slot > 5) continue
     const i = p * 4

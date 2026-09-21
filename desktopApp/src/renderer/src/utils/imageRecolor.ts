@@ -446,40 +446,117 @@ export async function resolveImageDataUrl(fields: {
   imageColor4?: string
   imageColor5?: string
   imageColorMarkPng?: string
+  imageColorRegionPng?: string
+  imageUnmarkedColorSlot?: number
 }): Promise<string> {
   const src = fields.imageDataUrl ?? ''
   if (!src) return ''
   if (fields.imageUseOriginalColors !== false) return src
+  const colors = [
+    fields.imageColor1 || fields.imagePalette?.[0] || '',
+    fields.imageColor2 || fields.imagePalette?.[1] || '',
+    fields.imageColor3 || fields.imagePalette?.[2] || '',
+    fields.imageColor4 || fields.imagePalette?.[3] || '',
+    fields.imageColor5 || fields.imagePalette?.[4] || ''
+  ]
   // Prefer Match marks whenever a map is stored (same path as Paint).
   // All-zero marks → keep source (do not fall back to nearest-palette).
+  let out = src
   if (fields.imageColorMarkPng) {
     const mark = await decodeColorMarkPng(fields.imageColorMarkPng)
     if (mark) {
-      const colors = [
-        fields.imageColor1 || fields.imagePalette?.[0] || '',
-        fields.imageColor2 || fields.imagePalette?.[1] || '',
-        fields.imageColor3 || fields.imagePalette?.[2] || '',
-        fields.imageColor4 || fields.imagePalette?.[3] || '',
-        fields.imageColor5 || fields.imagePalette?.[4] || ''
-      ]
-      return applyColorMarksRecolor(src, mark.marks, mark.w, mark.h, colors)
+      out = await applyColorMarksRecolor(src, mark.marks, mark.w, mark.h, colors)
+    }
+  } else {
+    const palette = fields.imagePalette ?? []
+    if (palette.length) {
+      out = await applyImagePaletteRecolor(src, palette, imageReplacementColors(fields))
     }
   }
-  const palette = fields.imagePalette ?? []
-  if (!palette.length) return src
-  return applyImagePaletteRecolor(src, palette, imageReplacementColors(fields))
+  const unmarkedSlot = fields.imageUnmarkedColorSlot
+  if (
+    fields.imageColorRegionPng &&
+    unmarkedSlot != null &&
+    unmarkedSlot >= 1 &&
+    unmarkedSlot <= MAX_PALETTE
+  ) {
+    out = await applyUnmarkedRestRecolor(
+      out,
+      fields.imageColorRegionPng,
+      unmarkedSlot,
+      colors
+    )
+  }
+  return out
+}
+
+/**
+ * Recolour Unmarked leftover regions (region PNG blue flag) with Color slot.
+ * Does not use the Match mark map — leftovers stay Match-unmarked.
+ */
+export async function applyUnmarkedRestRecolor(
+  dataUrl: string,
+  regionPng: string,
+  unmarkedSlot: number,
+  colors: string[]
+): Promise<string> {
+  if (!dataUrl || !regionPng || unmarkedSlot < 1 || unmarkedSlot > MAX_PALETTE) return dataUrl
+  const rgb = parseHex(colors[unmarkedSlot - 1] || '')
+  if (!rgb) return dataUrl
+  const img = await loadCachedImage(dataUrl)
+  const regionImg = await loadCachedImage(regionPng)
+  if (!img || !regionImg) return dataUrl
+  const canvas = document.createElement('canvas')
+  canvas.width = img.width
+  canvas.height = img.height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return dataUrl
+  ctx.drawImage(img, 0, 0)
+  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  const data = imageData.data
+
+  const rc = document.createElement('canvas')
+  rc.width = regionImg.width
+  rc.height = regionImg.height
+  const rctx = rc.getContext('2d', { willReadFrequently: true })
+  if (!rctx) return dataUrl
+  rctx.drawImage(regionImg, 0, 0)
+  const rd = rctx.getImageData(0, 0, rc.width, rc.height).data
+  const sameSize = rc.width === canvas.width && rc.height === canvas.height
+
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      const i = (y * canvas.width + x) * 4
+      if (data[i + 3] === 0) continue
+      let ri: number
+      if (sameSize) {
+        ri = i
+      } else {
+        const mx = Math.min(rc.width - 1, Math.floor((x / canvas.width) * rc.width))
+        const my = Math.min(rc.height - 1, Math.floor((y / canvas.height) * rc.height))
+        ri = (my * rc.width + mx) * 4
+      }
+      // Blue channel flags Unmarked leftovers.
+      if (rd[ri + 2]! <= 0) continue
+      data[i] = rgb[0]
+      data[i + 1] = rgb[1]
+      data[i + 2] = rgb[2]
+    }
+  }
+  ctx.putImageData(imageData, 0, 0)
+  return canvas.toDataURL('image/png')
 }
 
 export type ImageAaBleedBakeResult = ImageRecolorFields & {
   imageDataUrl: string
-  /** Cleared — Match maps referred to the pre-bake source. */
-  imageColorMarkPng: ''
-  imageColorRegionPng: ''
+  imageColorMarkPng?: string
+  imageColorRegionPng?: string
+  imageUnmarkedColorSlot?: number
 }
 
 /**
- * Resolve the current Color 1–5 / Match look, strip outer soft AA outline, and
- * bake the cleaned bitmap. Keeps Original / Color mode so Clean AA stays available.
+ * Resolve the current Color 1–5 / Match / Unmarked look, strip outer soft AA
+ * outline, and bake the cleaned bitmap. Preserves Match marks + Unmarked set.
  */
 export async function bakeImageSoftAaBleed(fields: {
   imageDataUrl?: string
@@ -491,21 +568,38 @@ export async function bakeImageSoftAaBleed(fields: {
   imageColor4?: string
   imageColor5?: string
   imageColorMarkPng?: string
+  imageColorRegionPng?: string
+  imageUnmarkedColorSlot?: number
 }): Promise<ImageAaBleedBakeResult | null> {
   const src = (fields.imageDataUrl ?? '').trim()
   if (!src) return null
   const keepOriginal = fields.imageUseOriginalColors !== false
   const display = await resolveImageDataUrl(fields)
   const bled = await bleedSoftAaEdgesOnBitmap(display || src)
+  const hasMaps = !!(fields.imageColorMarkPng || fields.imageColorRegionPng)
+  if (hasMaps) {
+    // Keep Match / Unmarked maps. Baked pixels already show remapped colours;
+    // preserving maps avoids a Rescan that randomly re-marks sections.
+    return {
+      imageDataUrl: bled,
+      imagePalette: fields.imagePalette ?? [],
+      imageUseOriginalColors: keepOriginal,
+      imageColor1: fields.imageColor1 ?? '',
+      imageColor2: fields.imageColor2 ?? '',
+      imageColor3: fields.imageColor3 ?? '',
+      imageColor4: fields.imageColor4 ?? '',
+      imageColor5: fields.imageColor5 ?? '',
+      imageColorMarkPng: fields.imageColorMarkPng,
+      imageColorRegionPng: fields.imageColorRegionPng,
+      imageUnmarkedColorSlot: fields.imageUnmarkedColorSlot
+    }
+  }
   const palette = await scanImagePalette(bled)
   const seeded = imageRecolorFieldsFromPalette(palette)
   return {
     imageDataUrl: bled,
     ...seeded,
-    // Stay in the same mode so Color 1–5 + Clean AA remain visible after use.
     imageUseOriginalColors: keepOriginal,
-    // If still in remap mode, keep the user’s slot colours when possible so a
-    // second Clean AA doesn’t reset their picks; fall back to scanned palette.
     ...(keepOriginal
       ? {}
       : {
@@ -516,7 +610,8 @@ export async function bakeImageSoftAaBleed(fields: {
           imageColor5: (fields.imageColor5 || '').trim() || seeded.imageColor5
         }),
     imageColorMarkPng: '',
-    imageColorRegionPng: ''
+    imageColorRegionPng: '',
+    imageUnmarkedColorSlot: undefined
   }
 }
 

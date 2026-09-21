@@ -1497,6 +1497,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                       imageColor5={safeConfig.icon.imageColor5}
                       imageColorMarkPng={safeConfig.icon.imageColorMarkPng}
                       imageColorRegionPng={safeConfig.icon.imageColorRegionPng}
+                      imageUnmarkedColorSlot={safeConfig.icon.imageUnmarkedColorSlot}
                       onChange={(patch) => setIcon(patch)}
                     />
                   </>
