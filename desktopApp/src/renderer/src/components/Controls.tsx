@@ -13,6 +13,7 @@ import {
 } from '../utils/imageColorMatch'
 import {
   bakeImageSoftAaBleed,
+  bakeImageSmoothAa,
   imageRecolorFieldsFromPalette,
   scanImagePalette,
   type ImageRecolorFields
@@ -1896,6 +1897,7 @@ export function ImageRecolorControls({
 }: ImageRecolorControlsProps): JSX.Element | null {
   const [scanning, setScanning] = useState(false)
   const [bleeding, setBleeding] = useState(false)
+  const [smoothing, setSmoothing] = useState(false)
   const [assigningRest, setAssigningRest] = useState(false)
   /** 'assign' = next Color 1–5 fills unmarked sections. 'recolor' = next Color 1–5 updates those sections. */
   const [unmarkedPick, setUnmarkedPick] = useState<'assign' | 'recolor' | null>(null)
@@ -1995,6 +1997,30 @@ export function ImageRecolorControls({
     }
   }
 
+  const smoothEdges = async () => {
+    setSmoothing(true)
+    try {
+      const baked = await bakeImageSmoothAa({
+        imageDataUrl,
+        imageUseOriginalColors,
+        imagePalette,
+        imageColor1,
+        imageColor2,
+        imageColor3,
+        imageColor4,
+        imageColor5,
+        imageColorMarkPng,
+        imageColorRegionPng,
+        imageUnmarkedColorSlot
+      })
+      if (!baked) return
+      onChange(baked)
+      clearArmed()
+    } finally {
+      setSmoothing(false)
+    }
+  }
+
   if (!imageDataUrl) return null
 
   return (
@@ -2004,7 +2030,7 @@ export function ImageRecolorControls({
         <button
           type="button"
           onClick={scan}
-          disabled={scanning || bleeding || assigningRest}
+          disabled={scanning || bleeding || smoothing || assigningRest}
           className="px-2 py-1 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
           title="Scan the image for up to 5 solid colours"
         >
@@ -2058,7 +2084,7 @@ export function ImageRecolorControls({
             <div className="flex items-center gap-1.5 py-1">
               <button
                 type="button"
-                disabled={unmarkedCount === 0 || assigningRest || scanning || bleeding}
+                disabled={unmarkedCount === 0 || assigningRest || scanning || bleeding || smoothing}
                 onClick={() =>
                   setUnmarkedPick((mode) => (mode === 'assign' ? null : 'assign'))
                 }
@@ -2078,7 +2104,7 @@ export function ImageRecolorControls({
               {restSlot != null && (
                 <button
                   type="button"
-                  disabled={assigningRest || scanning || bleeding}
+                  disabled={assigningRest || scanning || bleeding || smoothing}
                   onClick={() =>
                     setUnmarkedPick((mode) => (mode === 'recolor' ? null : 'recolor'))
                   }
@@ -2101,25 +2127,36 @@ export function ImageRecolorControls({
               )}
             </div>
           )}
-          <button
-            type="button"
-            onClick={() => void cleanEdges()}
-            disabled={bleeding || scanning || assigningRest}
-            className="w-full px-2 py-1.5 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
-            title="Strip soft anti-aliased outline (outer halo) and harden inward soft pixels — does not thicken the rim"
-          >
-            {bleeding ? 'Cleaning edges…' : 'Clean AA edges'}
-          </button>
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              type="button"
+              onClick={() => void cleanEdges()}
+              disabled={bleeding || smoothing || scanning || assigningRest}
+              className="px-2 py-1.5 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
+              title="Strip soft anti-aliased outline (outer halo) and harden inward soft pixels — does not thicken the rim"
+            >
+              {bleeding ? 'Cleaning…' : 'Clean AA'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void smoothEdges()}
+              disabled={bleeding || smoothing || scanning || assigningRest}
+              className="px-2 py-1.5 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
+              title="Rebuild a soft coverage fringe on hard edges for a smoother export (no dark/white halo)"
+            >
+              {smoothing ? 'Smoothing…' : 'Smooth AA'}
+            </button>
+          </div>
           {!imageUseOriginalColors && (
             <p className="text-[10px] text-muted leading-snug pb-1">
               Maps each scanned colour to the picker above — best for simple flat designs. Use the
-              arrows to swap two colour slots. Clean AA edges removes soft outline halos (you can
-              run it again anytime).
+              arrows to swap two colour slots. Clean AA removes soft outline halos; Smooth AA softens
+              jagged edges for export.
             </p>
           )}
           {imageUseOriginalColors && (
             <p className="text-[10px] text-muted leading-snug pb-1">
-              Clean AA edges strips the soft outline halo instead of painting over it.
+              Clean AA strips soft outline halos. Smooth AA rebuilds a soft fringe on hard edges.
             </p>
           )}
         </>

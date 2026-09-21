@@ -367,6 +367,90 @@ export async function bleedSoftAaEdgesOnBitmap(dataUrl: string): Promise<string>
   return canvas.toDataURL('image/png')
 }
 
+/** Alpha at/above this counts as solid ink when rebuilding Smooth AA. */
+const SMOOTH_AA_SOLID_MIN = 128
+
+/**
+ * Rebuild a soft coverage fringe for hard / jagged silhouettes.
+ * Hardens to a binary mask, supersamples 2×, then box-filters with
+ * premultiplied alpha so edges stay smooth without dark/white halos.
+ */
+export async function smoothAaEdgesOnBitmap(dataUrl: string): Promise<string> {
+  if (!dataUrl) return dataUrl
+  const img = await loadCachedImage(dataUrl)
+  if (!img || !img.width || !img.height) return dataUrl
+  const w = img.width
+  const h = img.height
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return dataUrl
+  ctx.drawImage(img, 0, 0)
+  const src = ctx.getImageData(0, 0, w, h).data
+
+  const W2 = w * 2
+  const bigR = new Float32Array(W2 * h * 2)
+  const bigG = new Float32Array(W2 * h * 2)
+  const bigB = new Float32Array(W2 * h * 2)
+  const bigA = new Float32Array(W2 * h * 2)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4
+      const solid = src[i + 3]! >= SMOOTH_AA_SOLID_MIN
+      const pr = solid ? src[i]! : 0
+      const pg = solid ? src[i + 1]! : 0
+      const pb = solid ? src[i + 2]! : 0
+      const pa = solid ? 1 : 0
+      for (let dy = 0; dy < 2; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          const bp = (y * 2 + dy) * W2 + (x * 2 + dx)
+          bigR[bp] = pr
+          bigG[bp] = pg
+          bigB[bp] = pb
+          bigA[bp] = pa
+        }
+      }
+    }
+  }
+
+  const out = ctx.createImageData(w, h)
+  const dst = out.data
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sr = 0
+      let sg = 0
+      let sb = 0
+      let sa = 0
+      for (let dy = 0; dy < 2; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          const bp = (y * 2 + dy) * W2 + (x * 2 + dx)
+          const a = bigA[bp]!
+          sr += bigR[bp]! * a
+          sg += bigG[bp]! * a
+          sb += bigB[bp]! * a
+          sa += a
+        }
+      }
+      const oi = (y * w + x) * 4
+      if (sa <= 0) {
+        dst[oi] = 0
+        dst[oi + 1] = 0
+        dst[oi + 2] = 0
+        dst[oi + 3] = 0
+        continue
+      }
+      const inv = 1 / sa
+      dst[oi] = Math.round(sr * inv)
+      dst[oi + 1] = Math.round(sg * inv)
+      dst[oi + 2] = Math.round(sb * inv)
+      dst[oi + 3] = Math.round((sa / 4) * 255)
+    }
+  }
+  ctx.putImageData(out, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
 /**
  * Remap palette colours in an image to replacement colours (preserves alpha).
  * Returns a PNG data URL, or the original src when remapping is a no-op.
@@ -554,11 +638,7 @@ export type ImageAaBleedBakeResult = ImageRecolorFields & {
   imageUnmarkedColorSlot?: number
 }
 
-/**
- * Resolve the current Color 1–5 / Match / Unmarked look, strip outer soft AA
- * outline, and bake the cleaned bitmap. Preserves Match marks + Unmarked set.
- */
-export async function bakeImageSoftAaBleed(fields: {
+type ImageEdgeBakeFields = {
   imageDataUrl?: string
   imageUseOriginalColors?: boolean
   imagePalette?: string[]
@@ -570,18 +650,21 @@ export async function bakeImageSoftAaBleed(fields: {
   imageColorMarkPng?: string
   imageColorRegionPng?: string
   imageUnmarkedColorSlot?: number
-}): Promise<ImageAaBleedBakeResult | null> {
+}
+
+async function bakeImageWithEdgePass(
+  fields: ImageEdgeBakeFields,
+  edgePass: (dataUrl: string) => Promise<string>
+): Promise<ImageAaBleedBakeResult | null> {
   const src = (fields.imageDataUrl ?? '').trim()
   if (!src) return null
   const keepOriginal = fields.imageUseOriginalColors !== false
   const display = await resolveImageDataUrl(fields)
-  const bled = await bleedSoftAaEdgesOnBitmap(display || src)
+  const processed = await edgePass(display || src)
   const hasMaps = !!(fields.imageColorMarkPng || fields.imageColorRegionPng)
   if (hasMaps) {
-    // Keep Match / Unmarked maps. Baked pixels already show remapped colours;
-    // preserving maps avoids a Rescan that randomly re-marks sections.
     return {
-      imageDataUrl: bled,
+      imageDataUrl: processed,
       imagePalette: fields.imagePalette ?? [],
       imageUseOriginalColors: keepOriginal,
       imageColor1: fields.imageColor1 ?? '',
@@ -594,10 +677,10 @@ export async function bakeImageSoftAaBleed(fields: {
       imageUnmarkedColorSlot: fields.imageUnmarkedColorSlot
     }
   }
-  const palette = await scanImagePalette(bled)
+  const palette = await scanImagePalette(processed)
   const seeded = imageRecolorFieldsFromPalette(palette)
   return {
-    imageDataUrl: bled,
+    imageDataUrl: processed,
     ...seeded,
     imageUseOriginalColors: keepOriginal,
     ...(keepOriginal
@@ -613,6 +696,26 @@ export async function bakeImageSoftAaBleed(fields: {
     imageColorRegionPng: '',
     imageUnmarkedColorSlot: undefined
   }
+}
+
+/**
+ * Resolve the current Color 1–5 / Match / Unmarked look, strip outer soft AA
+ * outline, and bake the cleaned bitmap. Preserves Match marks + Unmarked set.
+ */
+export async function bakeImageSoftAaBleed(
+  fields: ImageEdgeBakeFields
+): Promise<ImageAaBleedBakeResult | null> {
+  return bakeImageWithEdgePass(fields, bleedSoftAaEdgesOnBitmap)
+}
+
+/**
+ * Resolve colours, then rebuild a smooth coverage AA fringe for export.
+ * Preserves Match marks + Unmarked set when maps exist.
+ */
+export async function bakeImageSmoothAa(
+  fields: ImageEdgeBakeFields
+): Promise<ImageAaBleedBakeResult | null> {
+  return bakeImageWithEdgePass(fields, smoothAaEdgesOnBitmap)
 }
 
 export type ColorMarkMap = { marks: Uint8Array; w: number; h: number }

@@ -97,7 +97,7 @@ import {
   recolorUnmarkedGroup,
   type MatchSectionLabel
 } from '../utils/imageColorMatch'
-import { bakeImageSoftAaBleed } from '../utils/imageRecolor'
+import { bakeImageSoftAaBleed, bakeImageSmoothAa } from '../utils/imageRecolor'
 import { reshapeIsApplied } from '../utils/paintReshape'
 import {
   reuseCanvas,
@@ -11663,6 +11663,62 @@ export function IconPaintEditor({
                 className="h-8 px-2 rounded-lg flex items-center text-[11px] font-medium shrink-0 bg-surface3 text-muted hover:text-text transition-colors"
               >
                 Clean AA
+              </button>
+              <button
+                type="button"
+                title="Rebuild soft coverage AA on hard / jagged edges for a smoother export"
+                onClick={() => {
+                  void (async () => {
+                    const source = matchObj.imageSourceDataUrl || matchObj.imageDataUrl
+                    if (!source) return
+                    const baked = await bakeImageSmoothAa({
+                      imageDataUrl: source,
+                      imageUseOriginalColors: matchObj.imageUseOriginalColors,
+                      imagePalette: matchObj.imagePalette,
+                      imageColor1: matchObj.imageColor1,
+                      imageColor2: matchObj.imageColor2,
+                      imageColor3: matchObj.imageColor3,
+                      imageColor4: matchObj.imageColor4,
+                      imageColor5: matchObj.imageColor5,
+                      imageColorMarkPng: matchObj.colorMarkPng,
+                      imageColorRegionPng: matchObj.colorRegionPng,
+                      imageUnmarkedColorSlot: matchObj.unmarkedColorSlot
+                    })
+                    if (!baked) return
+                    const next: LineObj = {
+                      ...matchObj,
+                      imageDataUrl: baked.imageDataUrl,
+                      imageSourceDataUrl: baked.imageDataUrl,
+                      imageUseOriginalColors: baked.imageUseOriginalColors,
+                      imagePalette: baked.imagePalette,
+                      imageColor1: baked.imageColor1,
+                      imageColor2: baked.imageColor2,
+                      imageColor3: baked.imageColor3,
+                      imageColor4: baked.imageColor4,
+                      imageColor5: baked.imageColor5,
+                      colorMarkPng: baked.imageColorMarkPng || undefined,
+                      colorRegionPng: baked.imageColorRegionPng || undefined,
+                      unmarkedColorSlot: baked.imageUnmarkedColorSlot
+                    }
+                    commitLines(
+                      linesRef.current.map((l) => (l.id === next.id ? next : l))
+                    )
+                    ensureStampImage(next.imageDataUrl!, () => {
+                      redrawLinesRef.current()
+                      drawHandles()
+                    })
+                    pushHistory()
+                    redrawLines()
+                    drawHandles()
+                    if (tool === 'match') {
+                      const labels = await buildMatchSectionLabels(next)
+                      setMatchLabels(labels)
+                    }
+                  })()
+                }}
+                className="h-8 px-2 rounded-lg flex items-center text-[11px] font-medium shrink-0 bg-surface3 text-muted hover:text-text transition-colors"
+              >
+                Smooth AA
               </button>
               {tool === 'match' && (
                 <span className="text-[10px] text-muted shrink-0">
