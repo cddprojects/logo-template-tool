@@ -372,8 +372,8 @@ const SMOOTH_AA_SOLID_MIN = 128
 
 /**
  * Rebuild a soft coverage fringe for hard / jagged silhouettes.
- * Hardens to a binary mask, supersamples 2×, then box-filters with
- * premultiplied alpha so edges stay smooth without dark/white halos.
+ * Binary mask → 2× nearest → overlapping box filter (mixes neighbouring
+ * source pixels) with premultiplied alpha so edges soften visibly.
  */
 export async function smoothAaEdgesOnBitmap(dataUrl: string): Promise<string> {
   if (!dataUrl) return dataUrl
@@ -389,51 +389,61 @@ export async function smoothAaEdgesOnBitmap(dataUrl: string): Promise<string> {
   ctx.drawImage(img, 0, 0)
   const src = ctx.getImageData(0, 0, w, h).data
 
+  // 2× hard silhouette (each solid pixel → opaque 2×2). Premultiplied floats.
   const W2 = w * 2
-  const bigR = new Float32Array(W2 * h * 2)
-  const bigG = new Float32Array(W2 * h * 2)
-  const bigB = new Float32Array(W2 * h * 2)
-  const bigA = new Float32Array(W2 * h * 2)
+  const H2 = h * 2
+  const bigR = new Float32Array(W2 * H2)
+  const bigG = new Float32Array(W2 * H2)
+  const bigB = new Float32Array(W2 * H2)
+  const bigA = new Float32Array(W2 * H2)
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = (y * w + x) * 4
-      const solid = src[i + 3]! >= SMOOTH_AA_SOLID_MIN
-      const pr = solid ? src[i]! : 0
-      const pg = solid ? src[i + 1]! : 0
-      const pb = solid ? src[i + 2]! : 0
-      const pa = solid ? 1 : 0
+      if (src[i + 3]! < SMOOTH_AA_SOLID_MIN) continue
+      const pr = src[i]!
+      const pg = src[i + 1]!
+      const pb = src[i + 2]!
       for (let dy = 0; dy < 2; dy++) {
         for (let dx = 0; dx < 2; dx++) {
           const bp = (y * 2 + dy) * W2 + (x * 2 + dx)
+          // Premultiplied (a = 1).
           bigR[bp] = pr
           bigG[bp] = pg
           bigB[bp] = pb
-          bigA[bp] = pa
+          bigA[bp] = 1
         }
       }
     }
   }
 
+  // Overlapping 4×4 box on the 2× grid so each output mixes neighbouring
+  // source pixels (a self-only 2×2 box is a no-op and looks unchanged).
   const out = ctx.createImageData(w, h)
   const dst = out.data
+  const filter = 4
+  const half = filter / 2 // 2 → window starts at 2x-1
+  const samples = filter * filter
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       let sr = 0
       let sg = 0
       let sb = 0
       let sa = 0
-      for (let dy = 0; dy < 2; dy++) {
-        for (let dx = 0; dx < 2; dx++) {
-          const bp = (y * 2 + dy) * W2 + (x * 2 + dx)
-          const a = bigA[bp]!
-          sr += bigR[bp]! * a
-          sg += bigG[bp]! * a
-          sb += bigB[bp]! * a
-          sa += a
+      const x0 = x * 2 - (half - 1)
+      const y0 = y * 2 - (half - 1)
+      for (let fy = 0; fy < filter; fy++) {
+        for (let fx = 0; fx < filter; fx++) {
+          const bx = Math.min(W2 - 1, Math.max(0, x0 + fx))
+          const by = Math.min(H2 - 1, Math.max(0, y0 + fy))
+          const bp = by * W2 + bx
+          sr += bigR[bp]!
+          sg += bigG[bp]!
+          sb += bigB[bp]!
+          sa += bigA[bp]!
         }
       }
       const oi = (y * w + x) * 4
-      if (sa <= 0) {
+      if (sa <= 1e-6) {
         dst[oi] = 0
         dst[oi + 1] = 0
         dst[oi + 2] = 0
@@ -441,10 +451,10 @@ export async function smoothAaEdgesOnBitmap(dataUrl: string): Promise<string> {
         continue
       }
       const inv = 1 / sa
-      dst[oi] = Math.round(sr * inv)
-      dst[oi + 1] = Math.round(sg * inv)
-      dst[oi + 2] = Math.round(sb * inv)
-      dst[oi + 3] = Math.round((sa / 4) * 255)
+      dst[oi] = Math.min(255, Math.round(sr * inv))
+      dst[oi + 1] = Math.min(255, Math.round(sg * inv))
+      dst[oi + 2] = Math.min(255, Math.round(sb * inv))
+      dst[oi + 3] = Math.min(255, Math.round((sa / samples) * 255))
     }
   }
   ctx.putImageData(out, 0, 0)
