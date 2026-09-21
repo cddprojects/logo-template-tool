@@ -92,6 +92,7 @@ import {
   matchClickOnImageProxy,
   refreshStampFromMarks,
   setImageProxySlotColor,
+  assignUnmarkedInkToSlot,
   type MatchSectionLabel
 } from '../utils/imageColorMatch'
 import { bakeImageSoftAaBleed } from '../utils/imageRecolor'
@@ -11487,6 +11488,58 @@ export function IconPaintEditor({
                   </button>
                 )
               })}
+              <span
+                className="text-[10px] text-muted shrink-0"
+                title="Colour for ink that is not already marked as Color 1–5"
+              >
+                Unmarked
+              </span>
+              {([1, 2, 3, 4, 5] as const).map((slot) => (
+                <button
+                  key={`rest-${slot}`}
+                  type="button"
+                  title={`Paint unmarked sections with Color ${slot}`}
+                  onClick={() => {
+                    void (async () => {
+                      const source = matchObj.imageSourceDataUrl || matchObj.imageDataUrl
+                      if (!source) return
+                      const assigned = await assignUnmarkedInkToSlot({
+                        imageDataUrl: source,
+                        imageColorMarkPng: matchObj.colorMarkPng,
+                        imageColorRegionPng: matchObj.colorRegionPng,
+                        slot
+                      })
+                      if (!assigned) return
+                      const stamped = await refreshStampFromMarks({
+                        ...matchObj,
+                        imageUseOriginalColors: false,
+                        imageSourceDataUrl: source,
+                        colorMarkPng: assigned.imageColorMarkPng,
+                        colorRegionPng: assigned.imageColorRegionPng
+                      })
+                      commitLines(
+                        linesRef.current.map((l) => (l.id === stamped.id ? stamped : l))
+                      )
+                      if (stamped.imageDataUrl) {
+                        ensureStampImage(stamped.imageDataUrl, () => {
+                          redrawLinesRef.current()
+                          drawHandles()
+                        })
+                      }
+                      pushHistory()
+                      redrawLines()
+                      drawHandles()
+                      if (tool === 'match') {
+                        const labels = await buildMatchSectionLabels(stamped)
+                        setMatchLabels(labels)
+                      }
+                    })()
+                  }}
+                  className="h-8 w-6 rounded-lg text-[10px] font-medium shrink-0 bg-surface3 text-muted hover:text-text border border-border transition-colors"
+                >
+                  {slot}
+                </button>
+              ))}
               <button
                 type="button"
                 title="Strip soft AA outline halo (does not thicken the rim)"

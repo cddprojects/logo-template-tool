@@ -6,6 +6,7 @@ import {
   withImageStyle,
   type AiVisualStyle
 } from '../utils/aiStyles'
+import { assignUnmarkedInkToSlot } from '../utils/imageColorMatch'
 import {
   bakeImageSoftAaBleed,
   imageRecolorFieldsFromPalette,
@@ -1848,6 +1849,7 @@ interface ImageRecolorControlsProps {
   imageColor4?: string
   imageColor5?: string
   imageColorMarkPng?: string
+  imageColorRegionPng?: string
   onChange: (patch: ImageRecolorPatch) => void
 }
 
@@ -1861,10 +1863,12 @@ export function ImageRecolorControls({
   imageColor4 = '',
   imageColor5 = '',
   imageColorMarkPng,
+  imageColorRegionPng,
   onChange
 }: ImageRecolorControlsProps): JSX.Element | null {
   const [scanning, setScanning] = useState(false)
   const [bleeding, setBleeding] = useState(false)
+  const [assigningRest, setAssigningRest] = useState(false)
   const { armedIndex, onSwapClick, clearArmed } = useColorSlotSwap()
   if (!imageDataUrl) return null
 
@@ -1879,6 +1883,27 @@ export function ImageRecolorControls({
       clearArmed()
     } finally {
       setScanning(false)
+    }
+  }
+
+  const assignRest = async (slot: number) => {
+    setAssigningRest(true)
+    try {
+      const assigned = await assignUnmarkedInkToSlot({
+        imageDataUrl,
+        imageColorMarkPng,
+        imageColorRegionPng,
+        slot
+      })
+      if (!assigned) return
+      onChange({
+        imageUseOriginalColors: false,
+        imageColorMarkPng: assigned.imageColorMarkPng,
+        imageColorRegionPng: assigned.imageColorRegionPng
+      })
+      clearArmed()
+    } finally {
+      setAssigningRest(false)
     }
   }
 
@@ -1911,7 +1936,7 @@ export function ImageRecolorControls({
         <button
           type="button"
           onClick={scan}
-          disabled={scanning || bleeding}
+          disabled={scanning || bleeding || assigningRest}
           className="px-2 py-1 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
           title="Scan the image for up to 5 solid colours"
         >
@@ -1957,10 +1982,34 @@ export function ImageRecolorControls({
                 }
               />
             ))}
+          {!imageUseOriginalColors && (
+            <div className="flex items-center gap-1.5 py-1">
+              <span
+                className="text-[10px] text-muted shrink-0 w-16"
+                title="Colour for ink that is not already marked as Color 1–5"
+              >
+                Unmarked
+              </span>
+              <div className="flex flex-1 gap-1">
+                {([1, 2, 3, 4, 5] as const).map((slot) => (
+                  <button
+                    key={`rest-${slot}`}
+                    type="button"
+                    disabled={assigningRest || scanning || bleeding}
+                    onClick={() => void assignRest(slot)}
+                    className="flex-1 py-1 rounded text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
+                    title={`Paint unmarked sections with Color ${slot}`}
+                  >
+                    {assigningRest ? '…' : slot}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           <button
             type="button"
             onClick={() => void cleanEdges()}
-            disabled={bleeding || scanning}
+            disabled={bleeding || scanning || assigningRest}
             className="w-full px-2 py-1.5 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
             title="Strip soft anti-aliased outline (outer halo) and harden inward soft pixels — does not thicken the rim"
           >

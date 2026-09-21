@@ -253,6 +253,57 @@ function marksFromRegionSlots(
   return { marks, w: regionMap.w, h: regionMap.h }
 }
 
+/**
+ * Paint every region that is not already Color 1–5 with `slot`.
+ * Marked sections stay as they are. Builds a region map if Match has not yet.
+ */
+export async function assignUnmarkedInkToSlot(opts: {
+  imageDataUrl: string
+  imageColorMarkPng?: string
+  imageColorRegionPng?: string
+  slot: number
+}): Promise<{ imageColorMarkPng: string; imageColorRegionPng: string } | null> {
+  if (opts.slot < 1 || opts.slot > 5) return null
+  const source = (opts.imageDataUrl || '').trim()
+  if (!source) return null
+
+  let regionMap = await decodeRegionPng(opts.imageColorRegionPng)
+  if (!regionMap) {
+    regionMap = await buildImageRegions(source)
+    if (!regionMap) return null
+  }
+
+  const markMap = await decodeColorMarkPng(opts.imageColorMarkPng)
+  const hasMarks =
+    !!markMap &&
+    markMap.w === regionMap.w &&
+    markMap.h === regionMap.h &&
+    markMap.marks.some((m) => m >= 1 && m <= 5)
+
+  let regionSlot: Uint8Array
+  if (hasMarks && markMap) {
+    regionSlot = regionSlotsFromMarks(regionMap, markMap.marks)
+  } else {
+    // No Match yet: keep the five largest regions on Color 1–5, then the
+    // chosen slot only fills what those marks leave unmarked.
+    const seeded = await marksFromRegions(source, regionMap)
+    regionSlot = seeded
+      ? regionSlotsFromMarks(regionMap, seeded.marks)
+      : new Uint8Array(regionMap.count + 1)
+  }
+
+  for (let id = 1; id <= regionMap.count; id++) {
+    if (!regionSlot[id]) regionSlot[id] = opts.slot
+  }
+
+  const next = marksFromRegionSlots(regionMap, regionSlot)
+  return {
+    imageColorMarkPng: encodeColorMarkPng(next.marks, next.w, next.h),
+    imageColorRegionPng:
+      opts.imageColorRegionPng || encodeRegionPng(regionMap.regions, regionMap.w, regionMap.h)
+  }
+}
+
 function regionSlotsFromMarks(
   regionMap: ImageRegionMap,
   marks: Uint8Array

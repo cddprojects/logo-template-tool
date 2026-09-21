@@ -1428,6 +1428,7 @@ export function FaviconEditor({
                   imageColor4={config.content.imageColor4}
                   imageColor5={config.content.imageColor5}
                   imageColorMarkPng={config.content.imageColorMarkPng}
+                  imageColorRegionPng={config.content.imageColorRegionPng}
                   onChange={(patch) => setContent(patch)}
                 />
               </>
