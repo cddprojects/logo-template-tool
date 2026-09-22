@@ -1078,8 +1078,9 @@ function applyFingerprintReplacer(_key: string, value: unknown): unknown {
 
 /** Merge Paint session planes selected by Apply “Edit” + Layer checkboxes.
  * Inner = Inner paint + objects at/above it; Outer = everything below Inner paint.
- * When Colour is off, drop source-coloured rasters / contentBound image pixels so
- * each target keeps its own live image (Original colours) instead of the source remap.
+ * When Colour is off: keep brush/fill overlays (like Paint Save · Colour off), drop
+ * only remapped contentBound pixels, and turn live fillColor hints into paint ink
+ * so a full Inner Fill still travels as Edit instead of Colour settings.
  */
 async function mergePaintSessionForApplyOptions(
   sourceSession: PaintSession | null | undefined,
@@ -1098,84 +1099,49 @@ async function mergePaintSessionForApplyOptions(
     return targetSession
   }
   if (!opts.color && merged) {
-    merged = neutralizePaintSessionImageColors(merged, {
-      stripInner: !!opts.inner,
-      stripOuter: !!opts.outer
-    })
+    if (opts.inner) {
+      merged = materializeContentFillHintAsPaintInk(merged)
+    }
+    merged = clearPaintSessionBoundImagePixels(merged) ?? merged
   }
   return merged
 }
 
 /**
- * Remove baked image remaps from a paint session after Edit·without·Colour.
- * Keeps object geometry (shapes / text / free stamps) but clears overlay PNGs and
- * contentBound rasters so live Inner uses each target’s own image + colour slots.
+ * When Paint Save moved a solid Inner Fill into live fillColor and cleared the
+ * overlay, re-bake that fill as contentPng ink so Edit·without·Colour still
+ * carries the painted look (targets keep their own Color 1–5 / Original).
  */
-function neutralizePaintSessionImageColors(
-  session: PaintSession,
-  opts: { stripInner: boolean; stripOuter: boolean }
-): PaintSession {
-  const empty = emptyOverlayPng(session.resolution)
-  let next: PaintSession = { ...session }
+function materializeContentFillHintAsPaintInk(session: PaintSession): PaintSession {
+  const sync = session.contentSync
+  const fill = (sync?.fillColor || '').trim()
+  if (!fill) return session
+  const res = Math.max(1, session.resolution || 512)
+  const overlayGone =
+    !!sync?.clearContentOverlay ||
+    isBlankOverlayDataUrl(session.contentPng, res) ||
+    isBlankOverlayDataUrl(session.contentAboveDecorationsPng, res)
+  if (!overlayGone) return session
 
-  if (opts.stripInner) {
-    const below =
-      !opts.stripOuter && session.contentBelowDecorationsPng
-        ? session.contentBelowDecorationsPng
-        : empty
-    next = {
-      ...next,
-      contentPng: empty,
-      contentAboveDecorationsPng: empty,
-      contentDecorationsPng: below,
-      contentBelowDecorationsPng: opts.stripOuter
-        ? empty
-        : (session.contentBelowDecorationsPng ?? empty),
-      decorationsPng: undefined,
-      contentBakedInDecorations: false,
-      linkedTextInDecorations: false
-    }
+  const ink = solidColorOverlayPng(res, fill)
+  return {
+    ...session,
+    contentPng: ink,
+    contentAboveDecorationsPng: ink,
+    contentDecorationsPng: ink,
+    contentBakedInDecorations: false
   }
-  if (opts.stripOuter) {
-    const above =
-      !opts.stripInner &&
-      (session.contentAboveDecorationsPng ?? session.contentPng)
-        ? (session.contentAboveDecorationsPng ?? session.contentPng ?? empty)
-        : empty
-    next = {
-      ...next,
-      containerPng: empty,
-      containerDecorationsPng: empty,
-      contentBelowDecorationsPng: empty,
-      contentDecorationsPng: opts.stripInner ? empty : above,
-      decorationsPng: undefined
-    }
-  }
+}
 
-  next.vectors = (next.vectors ?? []).map((v) => {
-    if (v.punchMask) return v
-    // Live Inner image stand-in — never carry the source’s remapped pixels.
-    if (v.contentBound || v.contentProxySlot) {
-      const {
-        imageDataUrl: _img,
-        paintStrokes: _ps,
-        contentBound: _cb,
-        ...rest
-      } = v
-      return {
-        ...rest,
-        type: rest.type ?? 'stamp',
-        stampSource: rest.stampSource ?? 'image',
-        contentProxySlot: true,
-        contentBound: undefined,
-        imageDataUrl: undefined,
-        paintStrokes: undefined
-      }
-    }
-    return v
-  })
-
-  return stripPaintSessionColorHints(next) ?? next
+function solidColorOverlayPng(resolution: number, color: string): string {
+  const c = document.createElement('canvas')
+  c.width = resolution
+  c.height = resolution
+  const ctx = c.getContext('2d')
+  if (!ctx) return emptyOverlayPng(resolution)
+  ctx.fillStyle = color
+  ctx.fillRect(0, 0, resolution, resolution)
+  return c.toDataURL('image/png')
 }
 
 /**
@@ -1350,8 +1316,9 @@ function paintSessionHasColorRewriteHints(
 
 /**
  * Edit · Colour off — copy the source image bitmap, then:
- * - Target has Original off + custom Color 1–5 → keep that remap list
+ * - Target has Original off + custom Color 1–5 → keep that remap list + Match maps
  * - Otherwise → Original colours (pre paint-remap), not the source’s remapped look
+ * Never keep the source’s Match / Unmarked maps — those bake Colour settings.
  */
 function imageFieldsForEditWithoutColor(
   source: {
@@ -1363,6 +1330,9 @@ function imageFieldsForEditWithoutColor(
     imageColor3?: string
     imageColor4?: string
     imageColor5?: string
+    imageColorMarkPng?: string
+    imageColorRegionPng?: string
+    imageUnmarkedColorSlot?: number
   },
   target: {
     imageDataUrl?: string
@@ -1373,6 +1343,9 @@ function imageFieldsForEditWithoutColor(
     imageColor3?: string
     imageColor4?: string
     imageColor5?: string
+    imageColorMarkPng?: string
+    imageColorRegionPng?: string
+    imageUnmarkedColorSlot?: number
   }
 ): {
   imageDataUrl: string
@@ -1383,6 +1356,9 @@ function imageFieldsForEditWithoutColor(
   imageColor3: string
   imageColor4: string
   imageColor5: string
+  imageColorMarkPng?: string
+  imageColorRegionPng?: string
+  imageUnmarkedColorSlot?: number
 } {
   const copiedUrl = (source.imageDataUrl || target.imageDataUrl || '').trim()
   const palette =
@@ -1401,7 +1377,10 @@ function imageFieldsForEditWithoutColor(
       imageColor2: target.imageColor2 ?? '',
       imageColor3: target.imageColor3 ?? '',
       imageColor4: target.imageColor4 ?? '',
-      imageColor5: target.imageColor5 ?? ''
+      imageColor5: target.imageColor5 ?? '',
+      imageColorMarkPng: target.imageColorMarkPng,
+      imageColorRegionPng: target.imageColorRegionPng,
+      imageUnmarkedColorSlot: target.imageUnmarkedColorSlot
     }
   }
 
@@ -1409,7 +1388,10 @@ function imageFieldsForEditWithoutColor(
   const original = imageRecolorFieldsFromPalette(palette)
   return {
     imageDataUrl: copiedUrl,
-    ...original
+    ...original,
+    imageColorMarkPng: undefined,
+    imageColorRegionPng: undefined,
+    imageUnmarkedColorSlot: undefined
   }
 }
 
@@ -1454,7 +1436,7 @@ function finalizeIconEditColors(
       ...withIconTargetColors(next, target),
       paintSession: session
     }
-    // Image: copy source bitmap; colour from target custom list or Original.
+    // Image: copy source bitmap; colour + Match maps from target (or Original).
     if (source.sourceType === 'image' && (out.sourceType === 'image' || target.sourceType === 'image')) {
       out = {
         ...out,
