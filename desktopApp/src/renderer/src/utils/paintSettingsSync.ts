@@ -1078,9 +1078,9 @@ function applyFingerprintReplacer(_key: string, value: unknown): unknown {
 
 /** Merge Paint session planes selected by Apply “Edit” + Layer checkboxes.
  * Inner = Inner paint + objects at/above it; Outer = everything below Inner paint.
- * When Colour is off: keep brush/fill overlays (like Paint Save · Colour off), drop
- * only remapped contentBound pixels, and turn live fillColor hints into paint ink
- * so a full Inner Fill still travels as Edit instead of Colour settings.
+ * When Colour is off: keep real brush/object overlays, drop remapped contentBound
+ * pixels, and strip live fillColor hints — full Inner Fill / Color 1–5 remaps
+ * belong to Colour settings only, not Edit.
  */
 async function mergePaintSessionForApplyOptions(
   sourceSession: PaintSession | null | undefined,
@@ -1099,49 +1099,9 @@ async function mergePaintSessionForApplyOptions(
     return targetSession
   }
   if (!opts.color && merged) {
-    if (opts.inner) {
-      merged = materializeContentFillHintAsPaintInk(merged)
-    }
     merged = clearPaintSessionBoundImagePixels(merged) ?? merged
   }
   return merged
-}
-
-/**
- * When Paint Save moved a solid Inner Fill into live fillColor and cleared the
- * overlay, re-bake that fill as contentPng ink so Edit·without·Colour still
- * carries the painted look (targets keep their own Color 1–5 / Original).
- */
-function materializeContentFillHintAsPaintInk(session: PaintSession): PaintSession {
-  const sync = session.contentSync
-  const fill = (sync?.fillColor || '').trim()
-  if (!fill) return session
-  const res = Math.max(1, session.resolution || 512)
-  const overlayGone =
-    !!sync?.clearContentOverlay ||
-    isBlankOverlayDataUrl(session.contentPng, res) ||
-    isBlankOverlayDataUrl(session.contentAboveDecorationsPng, res)
-  if (!overlayGone) return session
-
-  const ink = solidColorOverlayPng(res, fill)
-  return {
-    ...session,
-    contentPng: ink,
-    contentAboveDecorationsPng: ink,
-    contentDecorationsPng: ink,
-    contentBakedInDecorations: false
-  }
-}
-
-function solidColorOverlayPng(resolution: number, color: string): string {
-  const c = document.createElement('canvas')
-  c.width = resolution
-  c.height = resolution
-  const ctx = c.getContext('2d')
-  if (!ctx) return emptyOverlayPng(resolution)
-  ctx.fillStyle = color
-  ctx.fillRect(0, 0, resolution, resolution)
-  return c.toDataURL('image/png')
 }
 
 /**
