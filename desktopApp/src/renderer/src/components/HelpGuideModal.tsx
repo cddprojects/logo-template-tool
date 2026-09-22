@@ -79,11 +79,11 @@ function UseGuide(): JSX.Element {
             names match, or the first favicon if they don’t, so you are never stuck without a twin name.
           </li>
           <li>
-            <span className="text-text">Apply to all</span> copies selected parts of the active
-            variant onto every other variant (one-time, not live sync). Choose{' '}
-            <span className="text-text">Content</span> (Shape &amp; settings, Colour settings,
-            and/or Edit), <span className="text-text">Layer</span> (Inner and/or Outer), and{' '}
-            <span className="text-text">App</span> (Favicon and/or Logo). Shape &amp; settings
+            <span className="text-text">Apply to all</span> opens a popup (like Group export) to
+            copy selected parts of the active variant onto every other variant (one-time, not live
+            sync). Choose <span className="text-text">Content</span> (Shape &amp; settings, Colour
+            settings, and/or Edit), <span className="text-text">Layer</span> (Inner and/or Outer),
+            and <span className="text-text">App</span> (Favicon and/or Logo). Shape &amp; settings
             includes Site title (and related logo text settings) when Logo is checked, plus border
             / shadow settings (width, radius, blur, offset, on/off) but not their colours — those
             go with <span className="text-text">Colour settings</span> (fill, border colour, shadow
