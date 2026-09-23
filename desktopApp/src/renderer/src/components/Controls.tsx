@@ -381,7 +381,7 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
   const activeTab = solidOnly ? 'solid' : tab
   const punchCtx = React.useContext(TransparentFillModeContext)
   const showPunchToggle = !!punchCtx && activeTab === 'solid' && isZeroAlphaHex(solidHex)
-  const POPUP_H = (activeTab === 'solid' ? (solidOnly ? 72 : 100) : activeTab === 'linear' ? 248 : 272)
+  const POPUP_H = (activeTab === 'solid' ? (solidOnly ? 72 : 100) + (showPunchToggle ? 36 : 0) : activeTab === 'linear' ? 248 : 272)
   const left = Math.min(rect.left, window.innerWidth - POPUP_W - 8)
   const topBelow = rect.bottom + 6
   const top = topBelow + POPUP_H > window.innerHeight - 8 ? rect.top - POPUP_H - 6 : topBelow
@@ -459,17 +459,15 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
               className="flex-1 min-w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs font-mono focus:outline-none focus:border-accent"
               maxLength={9}
             />
-            {showPunchToggle && punchCtx && (
-              <div className="ml-auto shrink-0">
-                <TransparentFillToggle
-                  mode={punchCtx.mode}
-                  onChange={punchCtx.setMode}
-                  showLabel={false}
-                  compact
-                />
-              </div>
-            )}
           </div>
+          {showPunchToggle && punchCtx && (
+            <TransparentFillToggle
+              mode={punchCtx.mode}
+              onChange={punchCtx.setMode}
+              showLabel={false}
+              compact
+            />
+          )}
         </div>
       )}
 
@@ -710,57 +708,57 @@ export function ColorRow({
 
   return (
     <Row label={label} leading={swapLeading} onLabelClick={onLabelClick} labelActive={labelActive}>
-      <div className="flex items-center gap-2 min-w-0 w-full">
-        {/* Swatch — shows gradient or solid color, opens popup */}
-        <button
-          ref={swatchRef}
-          onClick={openPopup}
-          className="w-7 h-7 shrink-0 rounded cursor-pointer border border-border/60 overflow-hidden"
-          style={{ background: effectiveValue }}
-          title="Click to edit color"
-        />
-
-        {isGrad ? (
-          /* Gradient: show a clickable label */
+      <div className="flex flex-col gap-1.5 min-w-0 w-full">
+        <div className="flex items-center gap-2 min-w-0 w-full">
+          {/* Swatch — shows gradient or solid color, opens popup */}
           <button
+            ref={swatchRef}
             onClick={openPopup}
-            className="flex-1 min-w-0 w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs text-muted font-mono text-left truncate hover:border-accent transition-colors"
-          >
-            gradient
-          </button>
-        ) : (
-          /* Solid: editable hex text input */
-          <input
-            type="text"
-            value={hexText}
-            onFocus={() => { hexFocused.current = true }}
-            onBlur={() => {
-              hexFocused.current = false
-              if (/^#[0-9a-fA-F]{6,8}$/.test(hexText) && hexText.toLowerCase() !== displayHex.toLowerCase()) {
-                emit(hexText)
-              } else {
-                setHexText(displayHex)
-              }
-            }}
-            onChange={e => {
-              setHexText(e.target.value)
-              if (/^#[0-9a-fA-F]{6,8}$/.test(e.target.value)) emit(e.target.value)
-            }}
-            onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
-            className="flex-1 min-w-0 w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs text-text font-mono focus:outline-none focus:border-accent"
-            maxLength={9}
+            className="w-7 h-7 shrink-0 rounded cursor-pointer border border-border/60 overflow-hidden"
+            style={{ background: effectiveValue }}
+            title="Click to edit color"
           />
-        )}
+
+          {isGrad ? (
+            /* Gradient: show a clickable label */
+            <button
+              onClick={openPopup}
+              className="flex-1 min-w-0 w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs text-muted font-mono text-left truncate hover:border-accent transition-colors"
+            >
+              gradient
+            </button>
+          ) : (
+            /* Solid: editable hex text input */
+            <input
+              type="text"
+              value={hexText}
+              onFocus={() => { hexFocused.current = true }}
+              onBlur={() => {
+                hexFocused.current = false
+                if (/^#[0-9a-fA-F]{6,8}$/.test(hexText) && hexText.toLowerCase() !== displayHex.toLowerCase()) {
+                  emit(hexText)
+                } else {
+                  setHexText(displayHex)
+                }
+              }}
+              onChange={e => {
+                setHexText(e.target.value)
+                if (/^#[0-9a-fA-F]{6,8}$/.test(e.target.value)) emit(e.target.value)
+              }}
+              onKeyDown={e => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur() }}
+              className="flex-1 min-w-0 w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs text-text font-mono focus:outline-none focus:border-accent"
+              maxLength={9}
+            />
+          )}
+        </div>
 
         {showPunchToggle && punchCtx && (
-          <div className="ml-auto shrink-0">
-            <TransparentFillToggle
-              mode={punchCtx.mode}
-              onChange={punchCtx.setMode}
-              showLabel={false}
-              compact
-            />
-          </div>
+          <TransparentFillToggle
+            mode={punchCtx.mode}
+            onChange={punchCtx.setMode}
+            showLabel={false}
+            compact
+          />
         )}
 
         {open && anchorRect && (

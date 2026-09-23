@@ -1,12 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject, type MouseEvent as ReactMouseEvent } from 'react'
 
-/**
- * Side panel outside Paint.
- * Minimum fits a colour row with a full #RRGGBBAA field plus the ST / PH toggle
- * that appears at 0% opacity (label column + swatch + code + toggle).
- */
-export const STYLE_PANEL_MIN_WIDTH = 420
-export const STYLE_PANEL_DEFAULT_WIDTH = 420
+/** Default style-panel width; also the minimum when dragging to resize. */
+export const STYLE_PANEL_MIN_WIDTH = 288
 export const STYLE_PANEL_MAX_WIDTH = 560
 
 export function useStylePanelResize(): {
@@ -14,9 +9,9 @@ export function useStylePanelResize(): {
   panelRef: RefObject<HTMLDivElement>
   onResizeStart: (e: ReactMouseEvent) => void
 } {
-  const [panelWidth, setPanelWidth] = useState(STYLE_PANEL_DEFAULT_WIDTH)
+  const [panelWidth, setPanelWidth] = useState(STYLE_PANEL_MIN_WIDTH)
   const panelRef = useRef<HTMLDivElement>(null)
-  const panelWidthRef = useRef(STYLE_PANEL_DEFAULT_WIDTH)
+  const panelWidthRef = useRef(STYLE_PANEL_MIN_WIDTH)
 
   useEffect(() => {
     panelWidthRef.current = panelWidth
