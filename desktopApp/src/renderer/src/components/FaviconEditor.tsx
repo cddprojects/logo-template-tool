@@ -17,7 +17,7 @@ const IconPaintEditor = lazyWithRetry(() =>
   import('./IconPaintEditor').then((m) => ({ default: m.IconPaintEditor }))
 )
 import { hasMultipleColors } from '../utils/iconUtils'
-import { seedUploadedImageColors } from '../utils/imageColorMatch'
+import { finishUploadedImageSeed, seedUploadedImageColors } from '../utils/imageColorMatch'
 import { readImageFile } from '../utils/imageFit'
 import {
   applyPaintSaveToFavicon,
@@ -1433,7 +1433,7 @@ export function FaviconEditor({
                     }
                     const paletteFields = await seedUploadedImageColors(dataUrl)
                     if (gen !== imageChangeGen.current) return
-                    setContent({ imageDataUrl: dataUrl, ...paletteFields })
+                    setContent(finishUploadedImageSeed(paletteFields, config.content))
                   }}
                   onSizeChange={(ratio) => setContent({ imageSizeRatio: ratio })}
                 />
@@ -1449,6 +1449,7 @@ export function FaviconEditor({
                   imageColorMarkPng={config.content.imageColorMarkPng}
                   imageColorRegionPng={config.content.imageColorRegionPng}
                   imageUnmarkedColorSlot={config.content.imageUnmarkedColorSlot}
+                  imageKeepColors={config.content.imageKeepColors}
                   onChange={(patch) => setContent(patch)}
                 />
               </>

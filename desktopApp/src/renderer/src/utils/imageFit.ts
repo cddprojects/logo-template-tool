@@ -58,10 +58,10 @@ function hasPartialAlpha(data: Uint8ClampedArray): boolean {
 export async function fitRasterDataUrl(
   dataUrl: string,
   maxEdge = MAX_EDGE,
-  opts?: { indexMap?: boolean }
+  opts?: { indexMap?: boolean; png?: boolean }
 ): Promise<string> {
   if (!dataUrl.startsWith('data:image/') || dataUrl.startsWith('data:image/svg')) return dataUrl
-  const cacheKey = opts?.indexMap ? `idx:${maxEdge}:${dataUrl}` : `${maxEdge}:${dataUrl}`
+  const cacheKey = `${opts?.indexMap ? 'idx' : opts?.png ? 'png' : 'fit'}:${maxEdge}:${dataUrl}`
   const cached = fitCache.get(cacheKey)
   if (cached) return cached
 
@@ -100,7 +100,7 @@ export async function fitRasterDataUrl(
     fitted = canvas.toDataURL('image/png')
   } else {
     const fittedPx = ctx.getImageData(0, 0, w, h).data
-    fitted = hasPartialAlpha(fittedPx)
+    fitted = opts?.png || hasPartialAlpha(fittedPx)
       ? canvas.toDataURL('image/png')
       : canvas.toDataURL('image/jpeg', 0.85)
   }
@@ -124,7 +124,7 @@ export function readImageFile(file: File): Promise<string> {
         resolve(result)
         return
       }
-      fitRasterDataUrl(result).then(resolve, reject)
+      fitRasterDataUrl(result, 1024, { png: true }).then(resolve, reject)
     }
     reader.readAsDataURL(file)
   })

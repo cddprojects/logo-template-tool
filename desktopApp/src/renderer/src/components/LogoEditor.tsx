@@ -7,7 +7,7 @@ import { sanitizePaintSessionProxies, syncOutsideLettersIntoPaintSession } from 
 import { exportLogoPng, exportLogoSvg, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
 import { hasMultipleColors } from '../utils/iconUtils'
-import { seedUploadedImageColors } from '../utils/imageColorMatch'
+import { finishUploadedImageSeed, seedUploadedImageColors } from '../utils/imageColorMatch'
 import { readImageFile } from '../utils/imageFit'
 import {
   applyPaintSaveToFavicon,
@@ -15,6 +15,7 @@ import {
   applyFaviconToAllOptions,
   applyIconToAllOptions,
   applyLogoShellToAllOptions,
+  clearFaviconUploadedImage,
   clearIconUploadedImage,
   iconConfigToFaviconConfig,
   mapFaviconStashToIconStash,
@@ -358,6 +359,21 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       })
     },
     [safeConfig?.icon, safeConfig?.iconLinked, updateConfig]
+  )
+
+  const patchMatchingFaviconContent = useCallback(
+    (patch: Partial<FaviconConfig['content']>) => {
+      if (!onFaviconChange || !matchingFaviconVariant) return
+      const id = matchingFaviconVariant.id
+      onFaviconChange(
+        faviconVariantsRef.current.map((v) =>
+          v.id === id
+            ? { ...v, config: { ...v.config, content: { ...v.config.content, ...patch } } }
+            : v
+        )
+      )
+    },
+    [onFaviconChange, matchingFaviconVariant]
   )
 
   // ── Paint editor ──────────────────────────────────────────────────────────
@@ -1359,6 +1375,60 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
               />
             )}
 
+            {isSyncedWithFavicon && faviconContent?.type === 'image' && safeConfig.icon.visible && (
+              <>
+                <IconImageUpload
+                  imageDataUrl={faviconContent.imageDataUrl ?? ''}
+                  imageSizeRatio={faviconContent.imageSizeRatio ?? 0.8}
+                  recolor={{
+                    imageUseOriginalColors: faviconContent.imageUseOriginalColors,
+                    imagePalette: faviconContent.imagePalette,
+                    imageColor1: faviconContent.imageColor1,
+                    imageColor2: faviconContent.imageColor2,
+                    imageColor3: faviconContent.imageColor3,
+                    imageColor4: faviconContent.imageColor4,
+                    imageColor5: faviconContent.imageColor5,
+                    imageColorMarkPng: faviconContent.imageColorMarkPng,
+                    imageColorRegionPng: faviconContent.imageColorRegionPng,
+                    imageUnmarkedColorSlot: faviconContent.imageUnmarkedColorSlot
+                  }}
+                  onImageChange={async (v) => {
+                    const gen = ++imageChangeGen.current
+                    if (!onFaviconChange || !matchingFaviconVariant) return
+                    const id = matchingFaviconVariant.id
+                    if (!v) {
+                      const cleared = clearFaviconUploadedImage(matchingFaviconVariant.config)
+                      onFaviconChange(
+                        faviconVariantsRef.current.map((fv) =>
+                          fv.id === id ? { ...fv, config: { ...fv.config, ...cleared } } : fv
+                        )
+                      )
+                      return
+                    }
+                    const paletteFields = await seedUploadedImageColors(v)
+                    if (gen !== imageChangeGen.current) return
+                    patchMatchingFaviconContent(finishUploadedImageSeed(paletteFields, faviconContent))
+                  }}
+                  onSizeChange={(v) => patchMatchingFaviconContent({ imageSizeRatio: v })}
+                />
+                <ImageRecolorControls
+                  imageDataUrl={faviconContent.imageDataUrl ?? ''}
+                  imageUseOriginalColors={faviconContent.imageUseOriginalColors ?? true}
+                  imagePalette={faviconContent.imagePalette ?? []}
+                  imageColor1={faviconContent.imageColor1}
+                  imageColor2={faviconContent.imageColor2}
+                  imageColor3={faviconContent.imageColor3}
+                  imageColor4={faviconContent.imageColor4}
+                  imageColor5={faviconContent.imageColor5}
+                  imageColorMarkPng={faviconContent.imageColorMarkPng}
+                  imageColorRegionPng={faviconContent.imageColorRegionPng}
+                  imageUnmarkedColorSlot={faviconContent.imageUnmarkedColorSlot}
+                  imageKeepColors={faviconContent.imageKeepColors}
+                  onChange={(patch) => patchMatchingFaviconContent(patch)}
+                />
+              </>
+            )}
+
             {!isSyncedWithFavicon && !isShowingFrozenSync && safeConfig.icon.visible && (
               <>
                 <SelectRow
@@ -1497,7 +1567,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                         }
                         const paletteFields = await seedUploadedImageColors(v)
                         if (gen !== imageChangeGen.current) return
-                        setIcon({ imageDataUrl: v, ...paletteFields })
+                        setIcon(finishUploadedImageSeed(paletteFields, safeConfig.icon))
                       }}
                       onSizeChange={(v) => setIcon({ imageSizeRatio: v })}
                     />
@@ -1513,6 +1583,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                       imageColorMarkPng={safeConfig.icon.imageColorMarkPng}
                       imageColorRegionPng={safeConfig.icon.imageColorRegionPng}
                       imageUnmarkedColorSlot={safeConfig.icon.imageUnmarkedColorSlot}
+                      imageKeepColors={safeConfig.icon.imageKeepColors}
                       onChange={(patch) => setIcon(patch)}
                     />
                   </>

@@ -9,6 +9,7 @@
  */
 
 import {
+  buildDefaultColorMarks,
   decodeColorMarkPng,
   encodeColorMarkPng,
   imageRecolorFieldsFromPalette,
@@ -229,7 +230,7 @@ export async function marksFromRegions(
   const centroids: Centroid[] = []
   const regionSlot = new Uint8Array(regionMap.count + 1)
   /** Manhattan distance — same scale as region flood tolerance, a bit looser for AA. */
-  const SLOT_DIST = 96
+  const SLOT_DIST = 48
   const distTo = (rgb: [number, number, number], c: Centroid): number =>
     Math.abs(rgb[0] - c.r) + Math.abs(rgb[1] - c.g) + Math.abs(rgb[2] - c.b)
 
@@ -626,27 +627,74 @@ export type UploadedImageColorSeed = {
  * repainted with a previous Color 1–5 palette.
  */
 export async function seedUploadedImageColors(dataUrl: string): Promise<UploadedImageColorSeed> {
-  const fitted = dataUrl ? await fitRasterDataUrl(dataUrl) : ''
+  const fitted = dataUrl ? await fitRasterDataUrl(dataUrl, 1024, { png: true }) : ''
+  // Largest colours in the bitmap, up to 5. This is what Color 1–5 show outside
+  // Paint — the big areas are tagged here, without a manual Match pass.
+  const histogram = fitted ? await scanImagePalette(fitted) : []
   const regionMap = fitted ? await buildImageRegions(fitted) : null
-  const built = regionMap ? await marksFromRegions(fitted, regionMap) : null
-  const slotColors = built?.slotColors ?? []
-  const fromSlots = slotColors.map((c) => c.trim()).filter(Boolean)
-  const palette = fromSlots.length ? fromSlots : await scanImagePalette(fitted)
+  const fromRegions = regionMap ? await marksFromRegions(fitted, regionMap) : null
+  const regionSlots = (fromRegions?.slotColors ?? []).map((c) => c.trim()).filter(Boolean)
+  const slotColors = histogram.length >= regionSlots.length ? histogram : regionSlots
+  const marked =
+    slotColors.length > 0
+      ? await buildDefaultColorMarks(fitted, slotColors, 140)
+      : null
+  const palette = slotColors.length ? slotColors : histogram
   const fields = imageRecolorFieldsFromPalette(palette)
   return {
     imageDataUrl: fitted,
     imagePalette: fields.imagePalette,
     imageUseOriginalColors: true,
-    imageColor1: (slotColors[0] || '').trim() || fields.imageColor1,
-    imageColor2: (slotColors[1] || '').trim() || fields.imageColor2,
-    imageColor3: (slotColors[2] || '').trim() || fields.imageColor3,
-    imageColor4: (slotColors[3] || '').trim() || fields.imageColor4,
-    imageColor5: (slotColors[4] || '').trim() || fields.imageColor5,
-    imageColorMarkPng: built ? encodeColorMarkPng(built.marks, built.w, built.h) : '',
+    imageColor1: fields.imageColor1,
+    imageColor2: fields.imageColor2,
+    imageColor3: fields.imageColor3,
+    imageColor4: fields.imageColor4,
+    imageColor5: fields.imageColor5,
+    imageColorMarkPng: marked ? encodeColorMarkPng(marked.marks, marked.w, marked.h) : '',
     imageColorRegionPng: regionMap
       ? encodeRegionPng(regionMap.regions, regionMap.w, regionMap.h)
       : '',
     imageUnmarkedColorSlot: undefined
+  }
+}
+
+/** Previous Color 1–5 held across an upload when Keep color is on. */
+export type PreviousImageColors = {
+  imageUseOriginalColors?: boolean
+  imageKeepColors?: boolean
+  imageColor1?: string
+  imageColor2?: string
+  imageColor3?: string
+  imageColor4?: string
+  imageColor5?: string
+}
+
+/**
+ * Apply a fresh scan to an upload.
+ * Color 1–5 become the new image’s colours unless Keep color is on.
+ * Original colors stays as the user left it, so turning it off still shows the scan.
+ */
+export function finishUploadedImageSeed(
+  seeded: UploadedImageColorSeed,
+  previous: PreviousImageColors
+): UploadedImageColorSeed & { imageKeepColors: boolean } {
+  const useOriginal = previous.imageUseOriginalColors !== false
+  if (previous.imageKeepColors) {
+    return {
+      ...seeded,
+      imageUseOriginalColors: useOriginal,
+      imageKeepColors: true,
+      imageColor1: previous.imageColor1 ?? '',
+      imageColor2: previous.imageColor2 ?? '',
+      imageColor3: previous.imageColor3 ?? '',
+      imageColor4: previous.imageColor4 ?? '',
+      imageColor5: previous.imageColor5 ?? ''
+    }
+  }
+  return {
+    ...seeded,
+    imageUseOriginalColors: useOriginal,
+    imageKeepColors: false
   }
 }
 

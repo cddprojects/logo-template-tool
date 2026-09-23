@@ -85,6 +85,7 @@ const FAVICON_TYPE_KEYS: Record<ContentType, readonly string[]> = {
   image: [
     'imageDataUrl', 'imageSizeRatio', 'imageUseOriginalColors', 'imagePalette',
     'imageColor1', 'imageColor2', 'imageColor3', 'imageColor4', 'imageColor5',
+    'imageKeepColors',
     'imageColorMarkPng', 'imageColorRegionPng', 'imageUnmarkedColorSlot',
     ...SHARED_CONTENT_KEYS
   ],
@@ -114,6 +115,7 @@ const ICON_TYPE_KEYS: Record<IconSourceType, readonly string[]> = {
   image: [
     'imageDataUrl', 'imageSizeRatio', 'imageUseOriginalColors', 'imagePalette',
     'imageColor1', 'imageColor2', 'imageColor3', 'imageColor4', 'imageColor5',
+    'imageKeepColors',
     'imageColorMarkPng', 'imageColorRegionPng', 'imageUnmarkedColorSlot',
     ...SHARED_CONTENT_KEYS
   ]

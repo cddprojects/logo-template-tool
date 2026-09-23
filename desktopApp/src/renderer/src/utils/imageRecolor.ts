@@ -761,7 +761,8 @@ export async function decodeColorMarkPng(
  */
 export async function buildDefaultColorMarks(
   dataUrl: string,
-  palette: string[]
+  palette: string[],
+  maxDist = Infinity
 ): Promise<ColorMarkMap | null> {
   if (!dataUrl || !palette.length) return null
   const img = await loadCachedImage(dataUrl)
@@ -797,6 +798,10 @@ export async function buildDefaultColorMarks(
         bestDist = d
         best = s
       }
+    }
+    if (bestDist > maxDist) {
+      marks[p] = 0
+      continue
     }
     marks[p] = (best + 1) as number
   }

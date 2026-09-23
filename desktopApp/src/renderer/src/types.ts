@@ -129,6 +129,8 @@ export interface IconConfig {
   imageColor3: string
   imageColor4: string
   imageColor5: string
+  /** When true, the next upload keeps Color 1–5 instead of replacing them with the scan. */
+  imageKeepColors?: boolean
   /**
    * Optional Paint Match map (PNG, red channel = 0 unmarked / 1–5 Color slot).
    * Same pixel size as imageDataUrl. Used instead of nearest-palette remap when set.
@@ -315,6 +317,8 @@ export interface FaviconContent {
   imageColor3: string
   imageColor4: string
   imageColor5: string
+  /** When true, the next upload keeps Color 1–5 instead of replacing them with the scan. */
+  imageKeepColors?: boolean
   /**
    * Optional Paint Match map (PNG, red channel = 0 unmarked / 1–5 Color slot).
    * Same pixel size as imageDataUrl.

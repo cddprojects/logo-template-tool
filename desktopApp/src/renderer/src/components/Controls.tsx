@@ -9,6 +9,7 @@ import {
 } from '../utils/aiStyles'
 import {
   assignUnmarkedInkToSlot,
+  finishUploadedImageSeed,
   inspectUnmarkedInk,
   recolorUnmarkedGroup,
   seedUploadedImageColors
@@ -1796,6 +1797,7 @@ export type ImageRecolorPatch = Partial<ImageRecolorFields> & {
   imageColorMarkPng?: string
   imageColorRegionPng?: string
   imageUnmarkedColorSlot?: number
+  imageKeepColors?: boolean
 }
 
 /** Two-click arm → swap for Colour 1–5 style lists. */
@@ -1922,6 +1924,7 @@ interface ImageRecolorControlsProps {
   imageColorMarkPng?: string
   imageColorRegionPng?: string
   imageUnmarkedColorSlot?: number
+  imageKeepColors?: boolean
   onChange: (patch: ImageRecolorPatch) => void
 }
 
@@ -1937,6 +1940,7 @@ export function ImageRecolorControls({
   imageColorMarkPng,
   imageColorRegionPng,
   imageUnmarkedColorSlot,
+  imageKeepColors = false,
   onChange
 }: ImageRecolorControlsProps): JSX.Element | null {
   const [scanning, setScanning] = useState(false)
@@ -1984,7 +1988,15 @@ export function ImageRecolorControls({
     setScanning(true)
     try {
       const seeded = await seedUploadedImageColors(imageDataUrl)
-      onChange(seeded)
+      onChange(finishUploadedImageSeed(seeded, {
+        imageUseOriginalColors,
+        imageKeepColors,
+        imageColor1,
+        imageColor2,
+        imageColor3,
+        imageColor4,
+        imageColor5
+      }))
       clearArmed()
     } finally {
       setScanning(false)
@@ -2083,30 +2095,67 @@ export function ImageRecolorControls({
       </div>
       {imagePalette.length > 0 && (
         <>
-          <ToggleRow
-            label="Original colors"
-            value={imageUseOriginalColors}
-            onChange={(v) => {
-              clearArmed()
-              if (v) {
-                onChange({ imageUseOriginalColors: true })
-                return
-              }
-              // Entering manual mode: seed empty slots from the scanned palette.
-              const patch: ImageRecolorPatch = { imageUseOriginalColors: false }
-              colorKeys.forEach((key, i) => {
-                if (!(colors[i] || '').trim() && imagePalette[i]) patch[key] = imagePalette[i]
-              })
-              onChange(patch)
-            }}
-          />
+          <Row label="Original colors">
+            <div className="flex items-center justify-end gap-1.5">
+              <button
+                type="button"
+                onClick={() => {
+                  clearArmed()
+                  onChange({ imageKeepColors: !imageKeepColors })
+                }}
+                className={`px-2 py-1 rounded-lg text-[10px] font-medium border transition-colors shrink-0 ${
+                  imageKeepColors
+                    ? 'bg-accent text-white border-accent'
+                    : 'bg-surface3 text-muted hover:text-text border-border'
+                }`}
+                title="Keep the current Color 1–5 when a new image is uploaded, instead of replacing them with that image’s scan"
+              >
+                Keep color
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  clearArmed()
+                  if (imageUseOriginalColors) {
+                    if (imageKeepColors) {
+                      onChange({ imageUseOriginalColors: false })
+                      return
+                    }
+                    onChange({
+                      imageUseOriginalColors: false,
+                      imageColor1: (imagePalette[0] || '').trim(),
+                      imageColor2: (imagePalette[1] || '').trim(),
+                      imageColor3: (imagePalette[2] || '').trim(),
+                      imageColor4: (imagePalette[3] || '').trim(),
+                      imageColor5: (imagePalette[4] || '').trim()
+                    })
+                    return
+                  }
+                  onChange({ imageUseOriginalColors: true })
+                }}
+                className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${
+                  imageUseOriginalColors ? 'bg-accent' : 'bg-surface3 border border-border'
+                }`}
+                title="Off — Color 1–5 replace the scanned colours on the image"
+              >
+                <span
+                  className={`absolute top-0.5 left-0 w-4 h-4 rounded-full bg-white shadow transition-transform ${
+                    imageUseOriginalColors ? 'translate-x-4' : 'translate-x-0.5'
+                  }`}
+                />
+              </button>
+            </div>
+          </Row>
           {!imageUseOriginalColors &&
-            imagePalette.map((orig, i) => (
+            colorKeys.map((key, i) => {
+              const orig = (imagePalette[i] || '').trim() || (colors[i] || '').trim()
+              if (!orig) return null
+              return (
               <ColorRow
-                key={colorKeys[i]}
+                key={key}
                 label={`Color ${i + 1}`}
                 value={(colors[i] || '').trim() || orig}
-                onChange={(v) => onChange({ [colorKeys[i]]: v === orig ? '' : v })}
+                onChange={(v) => onChange({ [key]: v === orig ? '' : v })}
                 swapLit={armedIndex === i}
                 onSwapClick={() =>
                   onSwapClick(i, (a, b) => {
@@ -2123,7 +2172,8 @@ export function ImageRecolorControls({
                   unmarkedPick ? () => void applyUnmarkedSlot(i + 1) : undefined
                 }
               />
-            ))}
+              )
+            })}
           {!imageUseOriginalColors && (
             <div className="flex items-center gap-1.5 py-1">
               <button
