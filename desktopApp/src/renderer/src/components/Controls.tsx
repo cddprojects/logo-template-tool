@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react'
 import { Sparkles, Loader, Info, ArrowLeftRight } from 'lucide-react'
 import { generateAIImage, removeImageBackground } from '../utils/iconUtils'
+import { fitRasterDataUrl } from '../utils/imageFit'
 import {
   AI_VISUAL_STYLES,
   withImageStyle,
@@ -15,6 +16,7 @@ import {
 import {
   bakeImageSoftAaBleed,
   bakeImageSmoothAa,
+  resolveImageDataUrl,
   type ImageRecolorFields
 } from '../utils/imageRecolor'
 import { FONT_FAMILIES, FONT_FAMILY_GROUPS, FONT_WEIGHTS, SHAPES, OUTER_SHAPE_CATEGORIES } from '../types'
@@ -1765,7 +1767,7 @@ export function RemoveBgButton({ imageDataUrl, onResult }: RemoveBgButtonProps):
     const result = await removeImageBackground(imageDataUrl)
     setLoading(false)
     if (result.success && result.dataUrl) {
-      onResult(result.dataUrl)
+      onResult(await fitRasterDataUrl(result.dataUrl))
     } else {
       setError(result.error ?? 'Failed')
     }
@@ -1861,6 +1863,51 @@ export function SwappableColorRows({
       ))}
     </>
   )
+}
+
+export interface ImagePreviewRecolor {
+  imageUseOriginalColors?: boolean
+  imagePalette?: string[]
+  imageColor1?: string
+  imageColor2?: string
+  imageColor3?: string
+  imageColor4?: string
+  imageColor5?: string
+  imageColorMarkPng?: string
+  imageColorRegionPng?: string
+  imageUnmarkedColorSlot?: number
+}
+
+/** Upload thumbnail source. Original colours shows the file; otherwise the Color 1–5 remap. */
+export function useResolvedImageSrc(imageDataUrl: string, recolor?: ImagePreviewRecolor): string {
+  const [src, setSrc] = useState(imageDataUrl)
+  const useOriginal = recolor?.imageUseOriginalColors !== false
+  useEffect(() => {
+    if (!imageDataUrl || useOriginal || !recolor) {
+      setSrc(imageDataUrl)
+      return
+    }
+    let cancel = false
+    void resolveImageDataUrl({ imageDataUrl, ...recolor }).then((url) => {
+      if (!cancel) setSrc(url || imageDataUrl)
+    })
+    return () => {
+      cancel = true
+    }
+  }, [
+    imageDataUrl,
+    useOriginal,
+    recolor?.imagePalette?.join('\n'),
+    recolor?.imageColor1,
+    recolor?.imageColor2,
+    recolor?.imageColor3,
+    recolor?.imageColor4,
+    recolor?.imageColor5,
+    recolor?.imageColorMarkPng,
+    recolor?.imageColorRegionPng,
+    recolor?.imageUnmarkedColorSlot
+  ])
+  return src
 }
 
 interface ImageRecolorControlsProps {

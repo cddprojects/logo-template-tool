@@ -97,6 +97,7 @@ import {
   recolorUnmarkedGroup,
   type MatchSectionLabel
 } from '../utils/imageColorMatch'
+import { fitRasterDataUrl } from '../utils/imageFit'
 import { bakeImageSoftAaBleed, bakeImageSmoothAa } from '../utils/imageRecolor'
 import { reshapeIsApplied } from '../utils/paintReshape'
 import {
@@ -8533,8 +8534,15 @@ export function IconPaintEditor({
     new Promise((resolve, reject) => {
       const reader = new FileReader()
       reader.onload = () => {
-        if (typeof reader.result === 'string') resolve(reader.result)
-        else reject(new Error('Failed to read image'))
+        if (typeof reader.result !== 'string') {
+          reject(new Error('Failed to read image'))
+          return
+        }
+        if (blob.type === 'image/svg+xml') {
+          resolve(reader.result)
+          return
+        }
+        fitRasterDataUrl(reader.result).then(resolve, reject)
       }
       reader.onerror = () => reject(reader.error ?? new Error('Failed to read image'))
       reader.readAsDataURL(blob)

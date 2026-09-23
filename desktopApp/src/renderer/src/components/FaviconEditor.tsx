@@ -5,7 +5,7 @@ import { FAVICON_SHAPE_OPTIONS, faviconOuterCategory, DEFAULT_ICON_CONFIG } from
 import { bakeFaviconPaintContentLayer, renderFavicon, faviconInnerDrawSize } from '../utils/renderer'
 import { exportFaviconPng, exportFaviconSvg, exportFaviconIco, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
-import { Section, ColorRow, SwappableColorRows, TransparentFillModeContext, SliderRow, ToggleRow, SelectRow, FontSelect, WeightSelect, FontStyleRow, TextRow, TextareaRow, ShapeGrid, NumberInputRow, AiImageGenPanel, RemoveBgButton, OuterCategoryTabs, ExportNameStyleToggle, ImageRecolorControls } from './Controls'
+import { Section, ColorRow, SwappableColorRows, TransparentFillModeContext, SliderRow, ToggleRow, SelectRow, FontSelect, WeightSelect, FontStyleRow, TextRow, TextareaRow, ShapeGrid, NumberInputRow, AiImageGenPanel, RemoveBgButton, OuterCategoryTabs, ExportNameStyleToggle, ImageRecolorControls, useResolvedImageSrc, type ImagePreviewRecolor } from './Controls'
 import { IconPicker } from './IconPicker'
 import { PreviewStage } from './PreviewStage'
 import { StylePanelResizeHandle } from './StylePanelResizeHandle'
@@ -18,6 +18,7 @@ const IconPaintEditor = lazyWithRetry(() =>
 )
 import { hasMultipleColors } from '../utils/iconUtils'
 import { seedUploadedImageColors } from '../utils/imageColorMatch'
+import { readImageFile } from '../utils/imageFit'
 import {
   applyPaintSaveToFavicon,
   applyFaviconToAllOptions,
@@ -455,7 +456,10 @@ export function FaviconEditor({
           imageColor2: icon.imageColor2 ?? '',
           imageColor3: icon.imageColor3 ?? '',
           imageColor4: icon.imageColor4 ?? '',
-          imageColor5: icon.imageColor5 ?? ''
+          imageColor5: icon.imageColor5 ?? '',
+          imageColorMarkPng: icon.imageColorMarkPng,
+          imageColorRegionPng: icon.imageColorRegionPng,
+          imageUnmarkedColorSlot: icon.imageUnmarkedColorSlot
         }
       })
       return
@@ -505,7 +509,10 @@ export function FaviconEditor({
         imageColor2: icon.imageColor2 ?? '',
         imageColor3: icon.imageColor3 ?? '',
         imageColor4: icon.imageColor4 ?? '',
-        imageColor5: icon.imageColor5 ?? ''
+        imageColor5: icon.imageColor5 ?? '',
+        imageColorMarkPng: icon.imageColorMarkPng,
+        imageColorRegionPng: icon.imageColorRegionPng,
+        imageUnmarkedColorSlot: icon.imageUnmarkedColorSlot
       }
     })
   }, [config, matchingLogoVariant, updateConfig])
@@ -1406,6 +1413,18 @@ export function FaviconEditor({
                 <ImageUploadContent
                   imageDataUrl={config.content.imageDataUrl}
                   imageSizeRatio={config.content.imageSizeRatio ?? 0.8}
+                  recolor={{
+                    imageUseOriginalColors: config.content.imageUseOriginalColors,
+                    imagePalette: config.content.imagePalette,
+                    imageColor1: config.content.imageColor1,
+                    imageColor2: config.content.imageColor2,
+                    imageColor3: config.content.imageColor3,
+                    imageColor4: config.content.imageColor4,
+                    imageColor5: config.content.imageColor5,
+                    imageColorMarkPng: config.content.imageColorMarkPng,
+                    imageColorRegionPng: config.content.imageColorRegionPng,
+                    imageUnmarkedColorSlot: config.content.imageUnmarkedColorSlot
+                  }}
                   onImageChange={async (dataUrl) => {
                     const gen = ++imageChangeGen.current
                     if (!dataUrl) {
@@ -1534,21 +1553,18 @@ function ExportButton({ label, icon, loading, done, onClick, accent }: ExportBut
 interface ImageUploadContentProps {
   imageDataUrl: string
   imageSizeRatio: number
+  recolor?: ImagePreviewRecolor
   onImageChange: (dataUrl: string) => void
   onSizeChange: (ratio: number) => void
 }
 
-function ImageUploadContent({ imageDataUrl, imageSizeRatio, onImageChange, onSizeChange }: ImageUploadContentProps): JSX.Element {
+function ImageUploadContent({ imageDataUrl, imageSizeRatio, recolor, onImageChange, onSizeChange }: ImageUploadContentProps): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = useState(false)
+  const previewSrc = useResolvedImageSrc(imageDataUrl, recolor)
 
   const readFile = (file: File) => {
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      const result = e.target?.result
-      if (typeof result === 'string') onImageChange(result)
-    }
-    reader.readAsDataURL(file)
+    void readImageFile(file).then(onImageChange).catch(() => {})
   }
 
   const handleFiles = (files: FileList | null) => {
@@ -1568,7 +1584,7 @@ function ImageUploadContent({ imageDataUrl, imageSizeRatio, onImageChange, onSiz
       {imageDataUrl ? (
         <div className="relative group">
           <img
-            src={imageDataUrl}
+            src={previewSrc || imageDataUrl}
             alt="Uploaded icon"
             className="w-full h-24 object-contain rounded-lg bg-surface3 border border-border"
           />
@@ -1641,9 +1657,7 @@ function FaviconImageUpload({ imageDataUrl, onChange }: FaviconImageUploadProps)
   const handleFiles = (files: FileList | null) => {
     const file = files?.[0]
     if (!file) return
-    const reader = new FileReader()
-    reader.onload = (e) => { if (typeof e.target?.result === 'string') onChange(e.target.result) }
-    reader.readAsDataURL(file)
+    void readImageFile(file).then(onChange).catch(() => {})
   }
 
   return (

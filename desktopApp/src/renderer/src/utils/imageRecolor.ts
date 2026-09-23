@@ -4,6 +4,7 @@
  */
 
 import { loadCachedImage } from './iconUtils'
+import { fitRasterDataUrl } from './imageFit'
 
 const MAX_PALETTE = 5
 const SCAN_MAX_DIM = 96
@@ -523,9 +524,12 @@ export async function resolveImageDataUrl(fields: {
   imageColorRegionPng?: string
   imageUnmarkedColorSlot?: number
 }): Promise<string> {
-  const src = fields.imageDataUrl ?? ''
-  if (!src) return ''
-  if (fields.imageUseOriginalColors !== false) return src
+  const raw = fields.imageDataUrl ?? ''
+  if (!raw) return ''
+  if (fields.imageUseOriginalColors !== false) return raw
+  // Draw from a capped bitmap. Full-size photos made recolour (and save) fail,
+  // so the canvas and the upload preview stayed on the original pixels.
+  const src = await fitRasterDataUrl(raw)
   const colors = [
     fields.imageColor1 || fields.imagePalette?.[0] || '',
     fields.imageColor2 || fields.imagePalette?.[1] || '',
@@ -533,19 +537,23 @@ export async function resolveImageDataUrl(fields: {
     fields.imageColor4 || fields.imagePalette?.[3] || '',
     fields.imageColor5 || fields.imagePalette?.[4] || ''
   ]
-  // Prefer Match marks whenever a map is stored (same path as Paint).
-  // All-zero marks → keep source (do not fall back to nearest-palette).
+  const palette = fields.imagePalette ?? []
+  const recolorByPalette = async (base: string): Promise<string> => {
+    if (!palette.length) return base
+    return applyImagePaletteRecolor(base, palette, imageReplacementColors(fields))
+  }
   let out = src
   if (fields.imageColorMarkPng) {
-    const mark = await decodeColorMarkPng(fields.imageColorMarkPng)
-    if (mark) {
+    const markPng = await fitRasterDataUrl(fields.imageColorMarkPng, 1024, { indexMap: true })
+    const mark = await decodeColorMarkPng(markPng)
+    const hasMarks = !!mark && mark.marks.some((v) => v > 0)
+    if (mark && hasMarks) {
       out = await applyColorMarksRecolor(src, mark.marks, mark.w, mark.h, colors)
+    } else {
+      out = await recolorByPalette(src)
     }
   } else {
-    const palette = fields.imagePalette ?? []
-    if (palette.length) {
-      out = await applyImagePaletteRecolor(src, palette, imageReplacementColors(fields))
-    }
+    out = await recolorByPalette(src)
   }
   const unmarkedSlot = fields.imageUnmarkedColorSlot
   if (
@@ -554,12 +562,8 @@ export async function resolveImageDataUrl(fields: {
     unmarkedSlot >= 1 &&
     unmarkedSlot <= MAX_PALETTE
   ) {
-    out = await applyUnmarkedRestRecolor(
-      out,
-      fields.imageColorRegionPng,
-      unmarkedSlot,
-      colors
-    )
+    const regionPng = await fitRasterDataUrl(fields.imageColorRegionPng, 1024, { indexMap: true })
+    out = await applyUnmarkedRestRecolor(out, regionPng, unmarkedSlot, colors)
   }
   return out
 }

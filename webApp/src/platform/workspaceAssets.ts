@@ -111,17 +111,26 @@ async function uploadOne(asset: PendingAsset): Promise<void> {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), ASSET_UPLOAD_TIMEOUT_MS)
   try {
-    const body =
-      asset.kind === 'b64'
-        ? { dataUrl: asset.dataUrl }
-        : { text: asset.text, mime: asset.mime, kind: 'utf8' }
-    const res = await fetch(`/api/workspace/assets/${asset.hash}`, {
-      method: 'PUT',
-      credentials: 'include',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    })
+    // Raw bytes, not a base64 JSON body — the JSON form is ~33% larger and
+    // was tripping the request size limit on images.
+    const res = await fetch(`/api/workspace/assets/${asset.hash}`, asset.kind === 'b64'
+      ? {
+          method: 'PUT',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/octet-stream',
+            'X-Asset-Mime': asset.mime
+          },
+          body: new Blob([base64ToBytes(DATA_URL_RE.exec(asset.dataUrl)?.[2] ?? '')]),
+          signal: controller.signal
+        }
+      : {
+          method: 'PUT',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: asset.text, mime: asset.mime, kind: 'utf8' }),
+          signal: controller.signal
+        })
     if (!res.ok) {
       const text = await res.text()
       let err = `HTTP ${res.status}`
@@ -156,6 +165,10 @@ async function mapPool<T>(items: T[], concurrency: number, fn: (item: T) => Prom
  */
 export async function externalizeWorkspaceVersions(versions: unknown[]): Promise<unknown[]> {
   const clone = structuredClone(versions)
+  // Shrink photos and full-size colour maps before they are uploaded, or each
+  // autosave resends a body the server rejects as too large.
+  const { shrinkRastersInValue } = await import('@renderer/utils/imageFit')
+  await shrinkRastersInValue(clone)
   const pending = new Map<string, PendingAsset>()
   await collectPending(clone, pending)
 

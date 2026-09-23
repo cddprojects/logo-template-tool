@@ -144,7 +144,10 @@ export function iconPatchForContentType(
         imageColor2: icon.imageColor2 ?? faviconContent?.imageColor2 ?? '',
         imageColor3: icon.imageColor3 ?? faviconContent?.imageColor3 ?? '',
         imageColor4: icon.imageColor4 ?? faviconContent?.imageColor4 ?? '',
-        imageColor5: icon.imageColor5 ?? faviconContent?.imageColor5 ?? ''
+        imageColor5: icon.imageColor5 ?? faviconContent?.imageColor5 ?? '',
+        imageColorMarkPng: icon.imageColorMarkPng ?? faviconContent?.imageColorMarkPng,
+        imageColorRegionPng: icon.imageColorRegionPng ?? faviconContent?.imageColorRegionPng,
+        imageUnmarkedColorSlot: icon.imageUnmarkedColorSlot ?? faviconContent?.imageUnmarkedColorSlot
       }
     case 'canva':
       // Keep the last icon so Canva image references (and the preview) still work.

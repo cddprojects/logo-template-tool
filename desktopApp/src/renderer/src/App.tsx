@@ -11,6 +11,7 @@ import { useVersions } from './hooks/useVersions'
 import type { Version, AssetVariant, LogoConfig, FaviconConfig } from './types'
 import { initFontLoading } from './utils/fontLoader'
 import { isIgTemplateFile } from './utils/templateFile'
+import { readImageFile } from './utils/imageFit'
 import { isBrowserWebBuild, isChunkLoadError, chunkReloadsExhausted, lazyWithRetry } from './utils/lazyWithRetry'
 import { installHorizontalWheelScroll } from './utils/horizontalWheelScroll'
 
@@ -419,14 +420,11 @@ export default function App(): JSX.Element {
     const file = e.target.files?.[0]
     e.target.value = '' // allow re-importing the same file
     if (!file) return
-    const reader = new FileReader()
-    reader.onload = () => {
-      const dataUrl = String(reader.result)
-      const baseName = file.name.replace(/\.[^./\\]+$/, '').slice(0, 40) || 'Imported'
+    const baseName = file.name.replace(/\.[^./\\]+$/, '').slice(0, 40) || 'Imported'
+    void readImageFile(file).then((dataUrl) => {
       const v = importImageVersion(baseName, dataUrl)
       setSelectedId(v.id)
-    }
-    reader.readAsDataURL(file)
+    }).catch(() => {})
   }
 
   // useCallback + selectedRef: stable identity that never changes after mount.

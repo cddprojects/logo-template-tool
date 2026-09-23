@@ -1,4 +1,4 @@
-import { Router } from 'express'
+import express, { Router } from 'express'
 import fs from 'fs'
 import path from 'path'
 import { requireAuth } from '../auth.js'
@@ -152,7 +152,10 @@ export function workspaceRoutes(_db, dataDir) {
   const router = Router()
   router.use(requireAuth(_db))
 
-  router.put('/assets/:hash', (req, res) => {
+  router.put(
+    '/assets/:hash',
+    express.raw({ type: 'application/octet-stream', limit: '32mb' }),
+    (req, res) => {
       const hash = String(req.params.hash || '').toLowerCase()
       if (!HASH_RE.test(hash)) {
         res.status(400).json({ error: 'hash must be sha256 hex' })
@@ -165,7 +168,10 @@ export function workspaceRoutes(_db, dataDir) {
           return
         }
         let result
-        if (typeof req.body?.dataUrl === 'string') {
+        if (Buffer.isBuffer(req.body)) {
+          const mime = String(req.headers['x-asset-mime'] || 'application/octet-stream')
+          result = putAssetFromBuffer(dataDir, userId, mime, req.body, 'b64')
+        } else if (typeof req.body?.dataUrl === 'string') {
           result = putAssetFromDataUrl(dataDir, userId, req.body.dataUrl)
         } else if (typeof req.body?.base64 === 'string') {
           const buf = Buffer.from(req.body.base64, 'base64')

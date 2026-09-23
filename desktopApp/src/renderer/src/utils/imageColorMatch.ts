@@ -17,6 +17,7 @@ import {
   type ColorMarkMap
 } from './imageRecolor'
 import { loadCachedImage } from './iconUtils'
+import { fitRasterDataUrl } from './imageFit'
 import type { OutsideContentSettings } from '../types'
 import type { LineObj } from '../components/iconPaint/paintHelpers'
 
@@ -606,6 +607,7 @@ export async function hydrateImageProxyColors(
 }
 
 export type UploadedImageColorSeed = {
+  imageDataUrl: string
   imagePalette: string[]
   imageUseOriginalColors: true
   imageColor1: string
@@ -624,13 +626,15 @@ export type UploadedImageColorSeed = {
  * repainted with a previous Color 1–5 palette.
  */
 export async function seedUploadedImageColors(dataUrl: string): Promise<UploadedImageColorSeed> {
-  const regionMap = dataUrl ? await buildImageRegions(dataUrl) : null
-  const built = regionMap ? await marksFromRegions(dataUrl, regionMap) : null
+  const fitted = dataUrl ? await fitRasterDataUrl(dataUrl) : ''
+  const regionMap = fitted ? await buildImageRegions(fitted) : null
+  const built = regionMap ? await marksFromRegions(fitted, regionMap) : null
   const slotColors = built?.slotColors ?? []
   const fromSlots = slotColors.map((c) => c.trim()).filter(Boolean)
-  const palette = fromSlots.length ? fromSlots : await scanImagePalette(dataUrl)
+  const palette = fromSlots.length ? fromSlots : await scanImagePalette(fitted)
   const fields = imageRecolorFieldsFromPalette(palette)
   return {
+    imageDataUrl: fitted,
     imagePalette: fields.imagePalette,
     imageUseOriginalColors: true,
     imageColor1: (slotColors[0] || '').trim() || fields.imageColor1,

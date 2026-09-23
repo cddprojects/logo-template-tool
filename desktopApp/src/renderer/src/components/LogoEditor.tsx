@@ -8,6 +8,7 @@ import { exportLogoPng, exportLogoSvg, getStoredExportNameStyle, setStoredExport
 import type { ExportNameStyle } from '../utils/exporter'
 import { hasMultipleColors } from '../utils/iconUtils'
 import { seedUploadedImageColors } from '../utils/imageColorMatch'
+import { readImageFile } from '../utils/imageFit'
 import {
   applyPaintSaveToFavicon,
   applyPaintSaveToIcon,
@@ -57,7 +58,9 @@ import {
   ExportNameStyleToggle,
   AiImageGenPanel,
   RemoveBgButton,
-  ImageRecolorControls
+  ImageRecolorControls,
+  useResolvedImageSrc,
+  type ImagePreviewRecolor
 } from './Controls'
 import { IconPicker } from './IconPicker'
 import { PreviewStage } from './PreviewStage'
@@ -1474,6 +1477,18 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                     <IconImageUpload
                       imageDataUrl={safeConfig.icon.imageDataUrl ?? ''}
                       imageSizeRatio={safeConfig.icon.imageSizeRatio ?? 0.8}
+                      recolor={{
+                        imageUseOriginalColors: safeConfig.icon.imageUseOriginalColors,
+                        imagePalette: safeConfig.icon.imagePalette,
+                        imageColor1: safeConfig.icon.imageColor1,
+                        imageColor2: safeConfig.icon.imageColor2,
+                        imageColor3: safeConfig.icon.imageColor3,
+                        imageColor4: safeConfig.icon.imageColor4,
+                        imageColor5: safeConfig.icon.imageColor5,
+                        imageColorMarkPng: safeConfig.icon.imageColorMarkPng,
+                        imageColorRegionPng: safeConfig.icon.imageColorRegionPng,
+                        imageUnmarkedColorSlot: safeConfig.icon.imageUnmarkedColorSlot
+                      }}
                       onImageChange={async (v) => {
                         const gen = ++imageChangeGen.current
                         if (!v) {
@@ -2036,6 +2051,9 @@ export function faviconContentToIconConfig(content: FaviconContent, base: IconCo
     imageColor3: content.imageColor3 ?? '',
     imageColor4: content.imageColor4 ?? '',
     imageColor5: content.imageColor5 ?? '',
+    imageColorMarkPng: content.imageColorMarkPng,
+    imageColorRegionPng: content.imageColorRegionPng,
+    imageUnmarkedColorSlot: content.imageUnmarkedColorSlot,
     // Offset: carry favicon inner content offset into logo icon offset
     offsetX: contentOffsetX,
     offsetY: contentOffsetY,
@@ -2086,17 +2104,17 @@ export function faviconContentToIconConfig(content: FaviconContent, base: IconCo
 interface IconImageUploadProps {
   imageDataUrl: string
   imageSizeRatio: number
+  recolor?: ImagePreviewRecolor
   onImageChange: (v: string) => void
   onSizeChange: (v: number) => void
 }
 
-function IconImageUpload({ imageDataUrl, imageSizeRatio, onImageChange, onSizeChange }: IconImageUploadProps): JSX.Element {
+function IconImageUpload({ imageDataUrl, imageSizeRatio, recolor, onImageChange, onSizeChange }: IconImageUploadProps): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const previewSrc = useResolvedImageSrc(imageDataUrl, recolor)
 
   const readFile = (file: File) => {
-    const reader = new FileReader()
-    reader.onload = (e) => { if (typeof e.target?.result === 'string') onImageChange(e.target.result) }
-    reader.readAsDataURL(file)
+    void readImageFile(file).then(onImageChange).catch(() => {})
   }
 
   return (
@@ -2104,7 +2122,7 @@ function IconImageUpload({ imageDataUrl, imageSizeRatio, onImageChange, onSizeCh
       <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={(e) => { if (e.target.files?.[0]) readFile(e.target.files[0]) }} />
       {imageDataUrl ? (
         <div className="relative group">
-          <img src={imageDataUrl} alt="Icon" className="w-full h-16 object-contain rounded-lg bg-surface3 border border-border" />
+          <img src={previewSrc || imageDataUrl} alt="Icon" className="w-full h-16 object-contain rounded-lg bg-surface3 border border-border" />
           <button
             type="button"
             onClick={(e) => {
@@ -2148,9 +2166,7 @@ function ContainerImageUpload({ imageDataUrl, onChange }: ContainerImageUploadPr
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const readFile = (file: File) => {
-    const reader = new FileReader()
-    reader.onload = (e) => { if (typeof e.target?.result === 'string') onChange(e.target.result) }
-    reader.readAsDataURL(file)
+    void readImageFile(file).then(onChange).catch(() => {})
   }
 
   return (
