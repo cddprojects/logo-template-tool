@@ -3577,14 +3577,9 @@ export function destOutObjectPunch(ctx: CanvasRenderingContext2D, l: LineObj): v
       }
     }
   }
-  // Punch-through cuts layers below in a later pass. Uploaded images must also
-  // lose those pixels here — otherwise the bitmap is redrawn solid over the hole.
-  if (l.punchThrough) {
-    if (l.contentBound && l.type === 'stamp' && (l.imageSourceDataUrl || l.imageDataUrl)) {
-      destOutLocalPunch(ctx, l, 'punch')
-    }
-    return
-  }
+  // Punch-through is applied on the stack after this object is drawn, so it
+  // also clears every layer already painted underneath (same as shapes/text).
+  if (l.punchThrough) return
   if (destOutLocalPunch(ctx, l, 'punch')) return
   if (destOutLocalPunch(ctx, l, 'see-through')) return
   // Canvas-fixed bits stay at the punch origin. After a move they leave a ghost
@@ -3918,6 +3913,16 @@ export function punchObjectFromComposite(
   if (item.type !== 'group' && (!item.punchThrough || !visible(item))) return
   const w = ctx.canvas.width
   const h = ctx.canvas.height
+  // Uploaded images keep the clicked section in display-space bits. Cut those
+  // pixels out of the whole stack (image + background + anything below). The
+  // local UV mask can miss that section and leave the background colour showing.
+  if (item.contentBound && item.type === 'stamp' && (item.imageSourceDataUrl || item.imageDataUrl)) {
+    const bits = punchMaskBits.get(item.id)
+    if (bits && bits.length === w * h && bits.some((v) => v)) {
+      destOutFilledMask(ctx, bits, w, h)
+      return
+    }
+  }
   if (destOutPunchThroughOnComposite(ctx, item)) return
   // Local-box objects normally punch via punchMaskCanvases. If that mask is
   // missing (e.g. select-object → transparent + Punch without a prior Fill),
