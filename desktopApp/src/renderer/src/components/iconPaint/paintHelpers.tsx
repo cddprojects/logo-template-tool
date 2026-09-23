@@ -3577,7 +3577,14 @@ export function destOutObjectPunch(ctx: CanvasRenderingContext2D, l: LineObj): v
       }
     }
   }
-  if (l.punchThrough) return
+  // Punch-through cuts layers below in a later pass. Uploaded images must also
+  // lose those pixels here — otherwise the bitmap is redrawn solid over the hole.
+  if (l.punchThrough) {
+    if (l.contentBound && l.type === 'stamp' && (l.imageSourceDataUrl || l.imageDataUrl)) {
+      destOutLocalPunch(ctx, l, 'punch')
+    }
+    return
+  }
   if (destOutLocalPunch(ctx, l, 'punch')) return
   if (destOutLocalPunch(ctx, l, 'see-through')) return
   // Canvas-fixed bits stay at the punch origin. After a move they leave a ghost

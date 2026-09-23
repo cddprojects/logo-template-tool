@@ -4703,6 +4703,60 @@ export function IconPaintEditor({
   }
 
   /**
+   * Clear the punched display region out of an uploaded image bitmap.
+   * Punch-through masks cut layers below; without this the image pixels stay solid.
+   */
+  const eraseUploadedImageRegion = (item: LineObj, displayRegion: Uint8Array): Partial<LineObj> | null => {
+    if (!isInnerUploadedImageProxy(item) || !item.imageDataUrl || item.pts.length < 2) return null
+    const image = ensureStampImage(item.imageDataUrl)
+    if (!image) return null
+    const a = item.pts[0]
+    const b = item.pts[1]
+    const x = Math.min(a.x, b.x)
+    const y = Math.min(a.y, b.y)
+    const displayW = Math.max(1, Math.abs(b.x - a.x))
+    const displayH = Math.max(1, Math.abs(b.y - a.y))
+    const width = Math.max(1, image.naturalWidth || image.width)
+    const height = Math.max(1, image.naturalHeight || image.height)
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    ctx.imageSmoothingEnabled = false
+    ctx.drawImage(image, 0, 0, width, height)
+    const imageData = ctx.getImageData(0, 0, width, height)
+    const data = imageData.data
+    let changed = false
+    for (let py = 0; py < height; py++) {
+      for (let px = 0; px < width; px++) {
+        const localX = x + ((px + 0.5) / width) * displayW
+        const localY = y + ((py + 0.5) / height) * displayH
+        const display = mapObjDisplayPt({ x: localX, y: localY }, item)
+        const dx = Math.floor(display.x)
+        const dy = Math.floor(display.y)
+        if (dx < 0 || dy < 0 || dx >= W || dy >= H) continue
+        if (!displayRegion[dy * W + dx]) continue
+        const i = (py * width + px) * 4
+        if (data[i + 3] === 0) continue
+        data[i + 3] = 0
+        changed = true
+      }
+    }
+    if (!changed) return null
+    ctx.putImageData(imageData, 0, 0)
+    const imageDataUrl = canvas.toDataURL('image/png')
+    ensureStampImage(imageDataUrl, () => redrawLinesRef.current())
+    return {
+      imageDataUrl,
+      rasterEdited: true,
+      sourceSvgMarkup: undefined,
+      sourceStampSize: undefined,
+      keepStrokeOnResize: undefined
+    }
+  }
+
+  /**
    * Flood-fill one connected region of a stamp/shape/text, stopping at brush/
    * eraser cuts on the object and at overlay paint that crosses it.
    */
@@ -4727,8 +4781,11 @@ export function IconPaintEditor({
       const clickI = (clickY * W + clickX) * 4
       // Soft fringe may receive the click, but flood must use a solid-ink
       // threshold so AA does not bridge separated islands (i-dot vs stem).
-      const inkHitT = item.type === 'text' ? 28 : 80
-      const inkT = item.type === 'text' ? 140 : 80
+      const imageProxy = isInnerUploadedImageProxy(item)
+      // Photos and soft image edges sit under the text/shape ink threshold, so
+      // Punch never started a region. Images use a lower alpha floor.
+      const inkHitT = item.type === 'text' ? 28 : imageProxy ? 16 : 80
+      const inkT = item.type === 'text' ? 140 : imageProxy ? 16 : 80
       // Counters (empty space inside "b") are not glyph ink. Do not spiral onto
       // the letter and punch the character instead of the hole.
       if (interior[clickI + 3] < inkHitT && od[clickI + 3] < inkHitT) return null
@@ -4760,7 +4817,8 @@ export function IconPaintEditor({
         if (interior[i + 3] < inkT) return false
         if (isCut(i)) return false
         if (item.type === 'text') return true
-        return Math.abs(interior[i] - tr) + Math.abs(interior[i + 1] - tg) + Math.abs(interior[i + 2] - tb) <= 48
+        const colorTol = imageProxy ? 96 : 48
+        return Math.abs(interior[i] - tr) + Math.abs(interior[i + 1] - tg) + Math.abs(interior[i + 2] - tb) <= colorTol
       })
       // Solid recolour on text: grow into soft AA so fringe does not remain.
       // One ring only — never iterative — so growth cannot bridge island gaps.
@@ -4862,9 +4920,11 @@ export function IconPaintEditor({
           }
         }
         setLocalPunchFromFilled(item, region, W, H, { mode: 'punch' })
+        const erased = eraseUploadedImageRegion(item, region)
+        const punched = erased ? { ...item, ...erased } : item
         if (nearlyWhole) {
           return {
-            ...item,
+            ...punched,
             punchThrough: hasPunchCoverage(item.id),
             punchEnclosedHole: false,
             ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {}),
@@ -4872,7 +4932,7 @@ export function IconPaintEditor({
           }
         }
         return {
-          ...item,
+          ...punched,
           punchThrough: hasPunchCoverage(item.id),
           punchEnclosedHole: false
         }
