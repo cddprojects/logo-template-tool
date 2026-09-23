@@ -1275,10 +1275,9 @@ function paintSessionHasColorRewriteHints(
 }
 
 /**
- * Edit · Colour off — copy the source image bitmap, then:
- * - Target has Original off + custom Color 1–5 → keep that remap list + Match maps
- * - Otherwise → Original colours (pre paint-remap), not the source’s remapped look
- * Never keep the source’s Match / Unmarked maps — those bake Colour settings.
+ * Edit · Colour off — copy the source image + Match/Unmarked structure so the
+ * same Color 1–5 regions apply, but remap with each target’s own Color 1–5.
+ * Example: source regions painted A–E → target keeps F–J and those regions show F–J.
  */
 function imageFieldsForEditWithoutColor(
   source: {
@@ -1328,30 +1327,40 @@ function imageFieldsForEditWithoutColor(
         ? [...target.imagePalette]
         : []
 
-  if (hasCustomImageRecolor(target)) {
+  // Structure (which pixels are Color 1–5) comes from the source / “original”.
+  const structure = {
+    imageColorMarkPng: source.imageColorMarkPng,
+    imageColorRegionPng: source.imageColorRegionPng,
+    imageUnmarkedColorSlot: source.imageUnmarkedColorSlot
+  }
+
+  // Target stays on Original → keep Original (maps still copied for later remap).
+  if (target.imageUseOriginalColors !== false) {
+    const original = imageRecolorFieldsFromPalette(palette)
     return {
       imageDataUrl: copiedUrl,
-      imagePalette: palette,
-      imageUseOriginalColors: false,
-      imageColor1: target.imageColor1 ?? '',
-      imageColor2: target.imageColor2 ?? '',
-      imageColor3: target.imageColor3 ?? '',
-      imageColor4: target.imageColor4 ?? '',
-      imageColor5: target.imageColor5 ?? '',
-      imageColorMarkPng: target.imageColorMarkPng,
-      imageColorRegionPng: target.imageColorRegionPng,
-      imageUnmarkedColorSlot: target.imageUnmarkedColorSlot
+      ...original,
+      ...structure
     }
   }
 
-  // Default / Original: show the copied image as it was before edit remapping.
-  const original = imageRecolorFieldsFromPalette(palette)
+  // Target is remapping: keep its Color 1–5 (F–J), apply source region structure.
+  const slot = (n: 1 | 2 | 3 | 4 | 5) => {
+    const key = `imageColor${n}` as const
+    const fromTarget = (target[key] || '').trim()
+    if (fromTarget) return fromTarget
+    return (palette[n - 1] || '').trim()
+  }
   return {
     imageDataUrl: copiedUrl,
-    ...original,
-    imageColorMarkPng: undefined,
-    imageColorRegionPng: undefined,
-    imageUnmarkedColorSlot: undefined
+    imagePalette: palette,
+    imageUseOriginalColors: false,
+    imageColor1: slot(1),
+    imageColor2: slot(2),
+    imageColor3: slot(3),
+    imageColor4: slot(4),
+    imageColor5: slot(5),
+    ...structure
   }
 }
 

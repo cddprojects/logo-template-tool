@@ -2385,12 +2385,16 @@ export function lineFromContentProxy(
   const shadow = outsideShadowToPaint(settings, resolution, innerDrawSize)
   const cx = resolution / 2 + off.x
   const cy = resolution / 2 + off.y
-  // Size from live sizeRatio; crop only supplies pixels + aspect (not bbox size).
+  // Uploaded images are drawn in a square box outside Paint. Size the stamp
+  // the same way — opaque-crop aspect includes only ink and stretches a square
+  // source into a rectangle once the full bitmap is restored.
+  const imageSquare =
+    settings.contentType === 'image' || !!settings.imageSourceDataUrl
   const { w, h } = proxyBoxFromSizeRatio(
     settings.sizeRatio,
     resolution,
-    crop.w,
-    crop.h,
+    imageSquare ? 1 : crop.w,
+    imageSquare ? 1 : crop.h,
     innerDrawSize
   )
   return {
@@ -2428,8 +2432,10 @@ export function applyOutsideContentToProxy(
   let w = Math.max(1, Math.abs((b?.x ?? 0) - (a?.x ?? 0)))
   let h = Math.max(1, Math.abs((b?.y ?? 0) - (a?.y ?? 0)))
   if (freshCrop || settings.sizeRatio != null) {
-    const aspectW = freshCrop?.w ?? w
-    const aspectH = freshCrop?.h ?? h
+    const imageSquare =
+      settings.contentType === 'image' || !!settings.imageSourceDataUrl
+    const aspectW = imageSquare ? 1 : (freshCrop?.w ?? w)
+    const aspectH = imageSquare ? 1 : (freshCrop?.h ?? h)
     ;({ w, h } = proxyBoxFromSizeRatio(
       settings.sizeRatio,
       resolution,

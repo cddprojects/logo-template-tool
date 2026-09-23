@@ -7,7 +7,7 @@ import { sanitizePaintSessionProxies, syncOutsideLettersIntoPaintSession } from 
 import { exportLogoPng, exportLogoSvg, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
 import { hasMultipleColors } from '../utils/iconUtils'
-import { recolorFieldsAfterImageChange } from '../utils/imageRecolor'
+import { seedUploadedImageColors } from '../utils/imageColorMatch'
 import {
   applyPaintSaveToFavicon,
   applyPaintSaveToIcon,
@@ -1480,7 +1480,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                           setIcon(clearIconUploadedImage(safeConfig.icon))
                           return
                         }
-                        const paletteFields = await recolorFieldsAfterImageChange(v, safeConfig.icon)
+                        const paletteFields = await seedUploadedImageColors(v)
                         if (gen !== imageChangeGen.current) return
                         setIcon({ imageDataUrl: v, ...paletteFields })
                       }}

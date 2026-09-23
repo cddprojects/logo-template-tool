@@ -138,7 +138,7 @@ export function ApplyToAllBar({
                     </label>
                     <label
                       className="flex items-center gap-2.5 text-sm text-text cursor-pointer select-none"
-                      title="Fill, border, shadow, and remapped image/SVG/Canva colours (including full Inner Fill saved as Color 1–5). Not Paint brush strokes or objects — those are Edit. Off + Edit: copies paint geometry and the source image bitmap; targets keep their own Color 1–5 or Original"
+                      title="Fill, border, shadow, and remapped Color 1–5 hex values. Off + Edit: copies image Match structure from the source but remaps with each target’s own Color 1–5 (regions that were Color 1 stay Color 1, using the target’s colour)"
                     >
                       <input
                         type="checkbox"
@@ -150,7 +150,7 @@ export function ApplyToAllBar({
                     </label>
                     <label
                       className="flex items-center gap-2.5 text-sm text-text cursor-pointer select-none"
-                      title="Paint strokes and objects: Inner = Inner paint + objects above it; Outer = everything below Inner paint. Does not copy Color 1–5 remaps or a full Inner Fill stored as Colour settings"
+                      title="Paint strokes and objects: Inner = Inner paint + objects above it; Outer = everything below Inner paint. Image Color 1–5 region structure is copied with Edit; each target’s Color 1–5 hex values are kept unless Colour settings is also on"
                     >
                       <input
                         type="checkbox"

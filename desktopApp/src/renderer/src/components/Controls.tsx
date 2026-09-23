@@ -9,13 +9,12 @@ import {
 import {
   assignUnmarkedInkToSlot,
   inspectUnmarkedInk,
-  recolorUnmarkedGroup
+  recolorUnmarkedGroup,
+  seedUploadedImageColors
 } from '../utils/imageColorMatch'
 import {
   bakeImageSoftAaBleed,
   bakeImageSmoothAa,
-  imageRecolorFieldsFromPalette,
-  scanImagePalette,
   type ImageRecolorFields
 } from '../utils/imageRecolor'
 import { FONT_FAMILIES, FONT_FAMILY_GROUPS, FONT_WEIGHTS, SHAPES, OUTER_SHAPE_CATEGORIES } from '../types'
@@ -1939,8 +1938,8 @@ export function ImageRecolorControls({
   const scan = async () => {
     setScanning(true)
     try {
-      const palette = await scanImagePalette(imageDataUrl)
-      onChange(imageRecolorFieldsFromPalette(palette))
+      const seeded = await seedUploadedImageColors(imageDataUrl)
+      onChange(seeded)
       clearArmed()
     } finally {
       setScanning(false)

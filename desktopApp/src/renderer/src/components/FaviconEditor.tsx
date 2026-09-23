@@ -17,7 +17,7 @@ const IconPaintEditor = lazyWithRetry(() =>
   import('./IconPaintEditor').then((m) => ({ default: m.IconPaintEditor }))
 )
 import { hasMultipleColors } from '../utils/iconUtils'
-import { recolorFieldsAfterImageChange } from '../utils/imageRecolor'
+import { seedUploadedImageColors } from '../utils/imageColorMatch'
 import {
   applyPaintSaveToFavicon,
   applyFaviconToAllOptions,
@@ -1412,7 +1412,7 @@ export function FaviconEditor({
                       updateConfig(clearFaviconUploadedImage(config))
                       return
                     }
-                    const paletteFields = await recolorFieldsAfterImageChange(dataUrl, config.content)
+                    const paletteFields = await seedUploadedImageColors(dataUrl)
                     if (gen !== imageChangeGen.current) return
                     setContent({ imageDataUrl: dataUrl, ...paletteFields })
                   }}

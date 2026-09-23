@@ -2,9 +2,10 @@
  * Paint Match tool helpers for Inner uploaded images (contentBound stamps).
  *
  * Regions are fixed connected components from the source bitmap. Auto-seed
- * assigns Color 1–5 only to the five largest regions (by area); smaller
- * regions stay unmarked until the user marks them. Marks never merge
- * neighbouring regions that share a slot.
+ * groups those regions into Color 1–5 by the colours actually in the image.
+ * Color 1–5 are filled from those image colours. The bitmap is not repainted
+ * to a previous Color 1–5 palette. Regions of a sixth distinct colour stay
+ * unmarked.
  */
 
 import {
@@ -145,7 +146,7 @@ export async function buildImageRegions(
 
   for (let seed = 0; seed < w * h; seed++) {
     if (regions[seed]) continue
-    if (data[seed * 4 + 3] < 40) continue
+    if (data[seed * 4 + 3] < 16) continue
     nextId++
     if (nextId > 65535) break
     const tr = data[seed * 4]
@@ -165,7 +166,7 @@ export async function buildImageRegions(
         const np = ny * w + nx
         if (regions[np]) continue
         const i = np * 4
-        if (data[i + 3] < 40) continue
+        if (data[i + 3] < 16) continue
         if (
           Math.abs(data[i] - tr) + Math.abs(data[i + 1] - tg) + Math.abs(data[i + 2] - tb) >
           colorTol
@@ -182,14 +183,15 @@ export async function buildImageRegions(
 
 /**
  * Build Color 1–5 marks from the region partition.
- * Only the five largest regions (by opaque area) are auto-marked:
- * largest → Color 1 … 5th → Color 5. Smaller regions stay unmarked (original)
- * until the user assigns them in Match.
+ * Slots are the image's own colours (largest regions first). Every region whose
+ * average colour is near a slot shares that mark, so split / AA pieces of the
+ * same colour share Color 1–5. A sixth distinct colour stays unmarked.
+ * Slot hex values are those image colours — callers must copy them into
+ * Color 1–5, not recolour the bitmap to a previous palette.
  */
 export async function marksFromRegions(
   dataUrl: string,
-  regionMap: ImageRegionMap,
-  _palette?: string[]
+  regionMap: ImageRegionMap
 ): Promise<(ColorMarkMap & { slotColors: string[] }) | null> {
   const img = await loadCachedImage(dataUrl)
   if (!img) return null
@@ -209,7 +211,7 @@ export async function marksFromRegions(
     const id = regionMap.regions[p]
     if (!id) continue
     const i = p * 4
-    if (data[i + 3] < 40) continue
+    if (data[i + 3] < 16) continue
     area[id]++
     sumR[id] += data[i]
     sumG[id] += data[i + 1]
@@ -222,23 +224,50 @@ export async function marksFromRegions(
   }
   ranked.sort((a, b) => b.area - a.area)
 
+  type Centroid = { r: number; g: number; b: number; w: number }
+  const centroids: Centroid[] = []
   const regionSlot = new Uint8Array(regionMap.count + 1)
-  const slotColors: string[] = ['', '', '', '', '']
-  const top = ranked.slice(0, 5)
-  for (let i = 0; i < top.length; i++) {
-    const { id } = top[i]!
-    const slot = i + 1
-    regionSlot[id] = slot
+  /** Manhattan distance — same scale as region flood tolerance, a bit looser for AA. */
+  const SLOT_DIST = 96
+  const distTo = (rgb: [number, number, number], c: Centroid): number =>
+    Math.abs(rgb[0] - c.r) + Math.abs(rgb[1] - c.g) + Math.abs(rgb[2] - c.b)
+
+  for (const { id } of ranked) {
     const n = Math.max(1, area[id] ?? 1)
-    slotColors[i] = toHex(sumR[id]! / n, sumG[id]! / n, sumB[id]! / n)
+    const rgb: [number, number, number] = [sumR[id]! / n, sumG[id]! / n, sumB[id]! / n]
+    let best = -1
+    let bestDist = Infinity
+    for (let s = 0; s < centroids.length; s++) {
+      const d = distTo(rgb, centroids[s]!)
+      if (d < bestDist) {
+        bestDist = d
+        best = s
+      }
+    }
+    if (best >= 0 && bestDist <= SLOT_DIST) {
+      regionSlot[id] = best + 1
+      const c = centroids[best]!
+      const tw = c.w + n
+      c.r = (c.r * c.w + rgb[0] * n) / tw
+      c.g = (c.g * c.w + rgb[1] * n) / tw
+      c.b = (c.b * c.w + rgb[2] * n) / tw
+      c.w = tw
+    } else if (centroids.length < 5) {
+      centroids.push({ r: rgb[0], g: rgb[1], b: rgb[2], w: n })
+      regionSlot[id] = centroids.length
+    }
   }
+  if (!centroids.length) return null
+
+  const slotColors: string[] = centroids.map((c) => toHex(c.r, c.g, c.b))
+  while (slotColors.length < 5) slotColors.push('')
 
   const marks = new Uint8Array(regionMap.w * regionMap.h)
   for (let p = 0; p < marks.length; p++) {
     const id = regionMap.regions[p]
     marks[p] = id ? regionSlot[id] ?? 0 : 0
   }
-  return { marks, w: regionMap.w, h: regionMap.h, slotColors }
+  return { marks, w: regionMap.w, h: regionMap.h, slotColors: slotColors.slice(0, 5) }
 }
 
 function marksFromRegionSlots(
@@ -576,6 +605,47 @@ export async function hydrateImageProxyColors(
   }
 }
 
+export type UploadedImageColorSeed = {
+  imagePalette: string[]
+  imageUseOriginalColors: true
+  imageColor1: string
+  imageColor2: string
+  imageColor3: string
+  imageColor4: string
+  imageColor5: string
+  imageColorMarkPng: string
+  imageColorRegionPng: string
+  imageUnmarkedColorSlot?: undefined
+}
+
+/**
+ * On upload / rescan: mark pixels 1–5 from the image's own colours and copy
+ * those colours into Color 1–5. Original colours stay on so the bitmap is not
+ * repainted with a previous Color 1–5 palette.
+ */
+export async function seedUploadedImageColors(dataUrl: string): Promise<UploadedImageColorSeed> {
+  const regionMap = dataUrl ? await buildImageRegions(dataUrl) : null
+  const built = regionMap ? await marksFromRegions(dataUrl, regionMap) : null
+  const slotColors = built?.slotColors ?? []
+  const fromSlots = slotColors.map((c) => c.trim()).filter(Boolean)
+  const palette = fromSlots.length ? fromSlots : await scanImagePalette(dataUrl)
+  const fields = imageRecolorFieldsFromPalette(palette)
+  return {
+    imagePalette: fields.imagePalette,
+    imageUseOriginalColors: true,
+    imageColor1: (slotColors[0] || '').trim() || fields.imageColor1,
+    imageColor2: (slotColors[1] || '').trim() || fields.imageColor2,
+    imageColor3: (slotColors[2] || '').trim() || fields.imageColor3,
+    imageColor4: (slotColors[3] || '').trim() || fields.imageColor4,
+    imageColor5: (slotColors[4] || '').trim() || fields.imageColor5,
+    imageColorMarkPng: built ? encodeColorMarkPng(built.marks, built.w, built.h) : '',
+    imageColorRegionPng: regionMap
+      ? encodeRegionPng(regionMap.regions, regionMap.w, regionMap.h)
+      : '',
+    imageUnmarkedColorSlot: undefined
+  }
+}
+
 /** Seed regions + Color 1–5 marks on a contentBound image stamp. */
 export async function enrichImageProxyWithMatch(
   item: LineObj,
@@ -619,16 +689,16 @@ export async function enrichImageProxyWithMatch(
     regionMap &&
     (!map || map.w !== stampSize.w || map.h !== stampSize.h)
   ) {
-    // Top-5 regions by area → Color 1–5; smaller regions stay unmarked.
-    const built = await marksFromRegions(source, regionMap, palette)
+    // Group regions by the colours in the image. Color 1–5 follow those colours.
+    const built = await marksFromRegions(source, regionMap)
     if (built) {
       map = built
       markPng = encodeColorMarkPng(built.marks, built.w, built.h)
       seededSlotColors = built.slotColors
     }
   } else if (regionMap && map && regionsRebuilt) {
-    // Region map was rebuilt — re-seed top-5 by area (do not keep tiny outline marks).
-    const built = await marksFromRegions(source, regionMap, palette)
+    // Region map was rebuilt — re-seed from the image colours.
+    const built = await marksFromRegions(source, regionMap)
     if (built) {
       map = built
       markPng = encodeColorMarkPng(built.marks, built.w, built.h)
@@ -636,31 +706,34 @@ export async function enrichImageProxyWithMatch(
     }
   }
 
-  const colors = {
-    imageColor1:
-      (settings?.imageColor1 || item.imageColor1 || '').trim() ||
-      seededSlotColors?.[0] ||
-      defaults.imageColor1,
-    imageColor2:
-      (settings?.imageColor2 || item.imageColor2 || '').trim() ||
-      seededSlotColors?.[1] ||
-      defaults.imageColor2,
-    imageColor3:
-      (settings?.imageColor3 || item.imageColor3 || '').trim() ||
-      seededSlotColors?.[2] ||
-      defaults.imageColor3,
-    imageColor4:
-      (settings?.imageColor4 || item.imageColor4 || '').trim() ||
-      seededSlotColors?.[3] ||
-      defaults.imageColor4,
-    imageColor5:
-      (settings?.imageColor5 || item.imageColor5 || '').trim() ||
-      seededSlotColors?.[4] ||
-      defaults.imageColor5
-  }
-
-  const unmarkedSlot =
-    settings?.imageUnmarkedColorSlot ?? item.unmarkedColorSlot
+  // Fresh marks: Color 1–5 become the image colours, and the bitmap stays as-is.
+  // Existing marks keep the user's Color 1–5 so a later remap still applies.
+  const fromImage = seededSlotColors?.map((c) => c.trim()).filter(Boolean) ?? []
+  if (fromImage.length) palette = fromImage
+  const colors = seededSlotColors
+    ? {
+        imageColor1: (seededSlotColors[0] || '').trim(),
+        imageColor2: (seededSlotColors[1] || '').trim(),
+        imageColor3: (seededSlotColors[2] || '').trim(),
+        imageColor4: (seededSlotColors[3] || '').trim(),
+        imageColor5: (seededSlotColors[4] || '').trim()
+      }
+    : {
+        imageColor1:
+          (settings?.imageColor1 || item.imageColor1 || '').trim() || defaults.imageColor1,
+        imageColor2:
+          (settings?.imageColor2 || item.imageColor2 || '').trim() || defaults.imageColor2,
+        imageColor3:
+          (settings?.imageColor3 || item.imageColor3 || '').trim() || defaults.imageColor3,
+        imageColor4:
+          (settings?.imageColor4 || item.imageColor4 || '').trim() || defaults.imageColor4,
+        imageColor5:
+          (settings?.imageColor5 || item.imageColor5 || '').trim() || defaults.imageColor5
+      }
+  const showOriginal = seededSlotColors ? true : useOriginal
+  const unmarkedSlot = seededSlotColors
+    ? undefined
+    : settings?.imageUnmarkedColorSlot ?? item.unmarkedColorSlot
   const next: LineObj = {
     ...item,
     imageSourceDataUrl: source,
@@ -669,7 +742,7 @@ export async function enrichImageProxyWithMatch(
     colorMarkPng: markPng,
     colorRegionPng: regionPng,
     unmarkedColorSlot: unmarkedSlot,
-    imageUseOriginalColors: useOriginal,
+    imageUseOriginalColors: showOriginal,
     stampSource: item.stampSource ?? 'image'
   }
   return refreshStampFromMarks(next)

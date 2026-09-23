@@ -1046,6 +1046,8 @@ export function IconPaintEditor({
    * it as punch/see-through — never wipe the whole glyph or Outer under it.
    */
   const fillEnclosedCounterAtPoint = (item: LineObj, canvasPoint: Pt, punch: boolean): boolean => {
+    // Uploaded images have no letter counters — see-through must cut the bitmap.
+    if (isInnerUploadedImageProxy(item)) return false
     if (!pointInObjectEnclosedCounter(item, canvasPoint.x, canvasPoint.y)) return false
     const mode: HoleFillMode = punch ? 'punch' : 'see-through'
     const px = Math.max(0, Math.min(W - 1, Math.floor(canvasPoint.x)))
@@ -4889,7 +4891,7 @@ export function IconPaintEditor({
           return {
             ...item,
             punchThrough: hasPunchCoverage(item.id),
-            punchEnclosedHole: true,
+            punchEnclosedHole: isInnerUploadedImageProxy(item) ? false : true,
             ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {})
           }
         }
@@ -4899,7 +4901,7 @@ export function IconPaintEditor({
           return {
             ...item,
             punchThrough: hasPunchCoverage(item.id),
-            punchEnclosedHole: true,
+            punchEnclosedHole: isInnerUploadedImageProxy(item) ? false : true,
             ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {})
           }
         }
@@ -4916,7 +4918,9 @@ export function IconPaintEditor({
         return {
           ...item,
           punchThrough: hasPunchCoverage(item.id),
-          punchEnclosedHole: !!item.punchEnclosedHole || hasSeeThroughCoverage(item.id),
+          punchEnclosedHole: isInnerUploadedImageProxy(item)
+            ? false
+            : !!item.punchEnclosedHole || hasSeeThroughCoverage(item.id),
           ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {}),
           ...(item.type === 'stamp' || item.type === 'text' ? {} : { borderColor: item.borderColor })
         }
@@ -5213,7 +5217,7 @@ export function IconPaintEditor({
           return {
             ...item,
             punchThrough: hasPunchCoverage(item.id),
-            punchEnclosedHole: true,
+            punchEnclosedHole: isInnerUploadedImageProxy(item) ? false : true,
             ...(item.type === 'shape' || item.type === 'poly' ? { fill: true } : {})
           }
         }
@@ -5225,7 +5229,7 @@ export function IconPaintEditor({
           return {
             ...item,
             punchThrough: hasPunchCoverage(item.id),
-            punchEnclosedHole: true
+            punchEnclosedHole: isInnerUploadedImageProxy(item) ? false : true
           }
         }
         // Empty letter counters are not glyph ink — leave for layer floodFill

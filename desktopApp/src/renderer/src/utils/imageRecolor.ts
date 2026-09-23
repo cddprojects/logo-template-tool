@@ -122,36 +122,16 @@ export function imageRecolorFieldsFromPalette(palette: string[]): ImageRecolorFi
 }
 
 /**
- * After a paint/upload: scan the new bitmap.
- * - Original colours ON → store palette for later, show image as-is.
- * - Original colours OFF → store new palette and keep the user's Color 1–5
- *   replacements so remapping applies immediately to the new pixels.
+ * After a paint/upload when Match maps are not rebuilt here.
+ * Stores the new image's own colours and leaves Original colours on so a
+ * previous Color 1–5 palette is not painted onto the bitmap.
+ * Prefer seedUploadedImageColors when marks should be written too.
  */
 export async function recolorFieldsAfterImageChange(
-  dataUrl: string,
-  previous: {
-    imageUseOriginalColors?: boolean
-    imageColor1?: string
-    imageColor2?: string
-    imageColor3?: string
-    imageColor4?: string
-    imageColor5?: string
-  } | null | undefined
+  dataUrl: string
 ): Promise<ImageRecolorFields> {
   const palette = await scanImagePalette(dataUrl)
-  const useOriginal = previous?.imageUseOriginalColors !== false
-  if (useOriginal || !palette.length) {
-    return imageRecolorFieldsFromPalette(palette)
-  }
-  return {
-    imagePalette: palette,
-    imageUseOriginalColors: false,
-    imageColor1: (previous?.imageColor1 || '').trim() || palette[0] || '',
-    imageColor2: (previous?.imageColor2 || '').trim() || palette[1] || '',
-    imageColor3: (previous?.imageColor3 || '').trim() || palette[2] || '',
-    imageColor4: (previous?.imageColor4 || '').trim() || palette[3] || '',
-    imageColor5: (previous?.imageColor5 || '').trim() || palette[4] || ''
-  }
+  return imageRecolorFieldsFromPalette(palette)
 }
 
 export function imageReplacementColors(fields: {
