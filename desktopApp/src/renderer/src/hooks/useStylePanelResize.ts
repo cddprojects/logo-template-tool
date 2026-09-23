@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type RefObject, type MouseEvent as ReactMouseEvent } from 'react'
 
 /** Default style-panel width; also the minimum when dragging to resize. */
-export const STYLE_PANEL_MIN_WIDTH = 300
+export const STYLE_PANEL_MIN_WIDTH = 310
 export const STYLE_PANEL_MAX_WIDTH = 560
 
 export function useStylePanelResize(): {
