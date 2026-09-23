@@ -1546,6 +1546,18 @@ export function IconPaintEditor({
         // Drop the baked see-through plane so the live Color 1–5 image shows.
         ct.clearRect(0, 0, W, H)
       }
+      if (seededProxy) {
+        // One Inner image. A leftover bake was a second layer (fringe vs punch).
+        restored = restored.filter(
+          (l) =>
+            l.id === seededProxy!.id ||
+            l.punchMask ||
+            !(
+              l.type === 'stamp' &&
+              (l.name === 'Inner content' || l.contentBound || l.contentProxySlot)
+            )
+        )
+      }
 
       // Never auto-select on paint open — user picks what to edit.
       selectedIdRef.current = null
@@ -1600,36 +1612,77 @@ export function IconPaintEditor({
             imageUnmarkedColorSlot: proxy.unmarkedColorSlot
           })
           const mask = maskUrl ? await ensureStampImageDecoded(maskUrl) : null
-          if (mask) {
-            const bitsCanvas = document.createElement('canvas')
-            bitsCanvas.width = W
-            bitsCanvas.height = H
-            const bctx = bitsCanvas.getContext('2d')
-            if (bctx) {
-              bctx.imageSmoothingEnabled = false
-              const pa = proxy.pts[0]
-              const pb = proxy.pts[1]
-              bctx.drawImage(
-                mask,
-                Math.min(pa.x, pb.x),
-                Math.min(pa.y, pb.y),
-                Math.max(1, Math.abs(pb.x - pa.x)),
-                Math.max(1, Math.abs(pb.y - pa.y))
-              )
-              const px = bctx.getImageData(0, 0, W, H).data
-              const bits = new Uint8Array(W * H)
-              let n = 0
-              for (let p = 0; p < bits.length; p++) {
-                if (px[p * 4 + 3] > 8) {
-                  bits[p] = 1
-                  n++
+          if (mask && mask.naturalWidth > 0 && mask.naturalHeight > 0) {
+            // Keep the hole in the stamp's own pixels. A canvas-fixed mask is a
+            // second layer and drifts when the image is moved.
+            const local = document.createElement('canvas')
+            local.width = mask.naturalWidth
+            local.height = mask.naturalHeight
+            const lctx = local.getContext('2d')
+            if (lctx) {
+              lctx.imageSmoothingEnabled = false
+              lctx.drawImage(mask, 0, 0)
+              const mw = local.width
+              const mh = local.height
+              const mdata = lctx.getImageData(0, 0, mw, mh)
+              const core = new Uint8Array(mw * mh)
+              for (let p = 0; p < core.length; p++) core[p] = mdata.data[p * 4 + 3] > 8 ? 1 : 0
+              const rad = 2
+              for (let y = 0; y < mh; y++) {
+                for (let x = 0; x < mw; x++) {
+                  if (core[y * mw + x]) continue
+                  let hit = false
+                  for (let dy = -rad; dy <= rad && !hit; dy++) {
+                    const ny = y + dy
+                    if (ny < 0 || ny >= mh) continue
+                    for (let dx = -rad; dx <= rad; dx++) {
+                      const nx = x + dx
+                      if (nx < 0 || nx >= mw) continue
+                      if (core[ny * mw + nx]) {
+                        hit = true
+                        break
+                      }
+                    }
+                  }
+                  if (!hit) continue
+                  const i = (y * mw + x) * 4
+                  mdata.data[i] = 255
+                  mdata.data[i + 1] = 255
+                  mdata.data[i + 2] = 255
+                  mdata.data[i + 3] = 255
                 }
               }
-              if (n > 0) {
-                setLocalPunchFromFilled(proxy, bits, W, H, { mode: 'punch', replace: true })
-                proxy.derivedSlotPunch = true
-                proxy.punchEnclosedHole = false
+              lctx.putImageData(mdata, 0, 0)
+              const displayUrl = proxy.imageDataUrl
+              const display = displayUrl ? await ensureStampImageDecoded(displayUrl) : null
+              if (display && display.naturalWidth > 0 && display.naturalHeight > 0) {
+                const ic = document.createElement('canvas')
+                ic.width = display.naturalWidth
+                ic.height = display.naturalHeight
+                const ictx = ic.getContext('2d')
+                if (ictx) {
+                  ictx.drawImage(display, 0, 0)
+                  const idata = ictx.getImageData(0, 0, ic.width, ic.height)
+                  const same = ic.width === mw && ic.height === mh
+                  for (let y = 0; y < ic.height; y++) {
+                    for (let x = 0; x < ic.width; x++) {
+                      const mx = same ? x : Math.min(mw - 1, Math.floor((x / ic.width) * mw))
+                      const my = same ? y : Math.min(mh - 1, Math.floor((y / ic.height) * mh))
+                      if (mdata.data[(my * mw + mx) * 4 + 3] <= 8) continue
+                      idata.data[(y * ic.width + x) * 4 + 3] = 0
+                    }
+                  }
+                  ictx.putImageData(idata, 0, 0)
+                  const nextUrl = ic.toDataURL('image/png')
+                  proxy.imageDataUrl = nextUrl
+                  ensureStampImage(nextUrl)
+                }
               }
+              punchMaskCanvases.set(proxy.id, local)
+              rewriteDisplayBits(proxy, W, H, holeGeom, 'punch')
+              syncHoleFlags(proxy)
+              proxy.derivedSlotPunch = true
+              proxy.punchEnclosedHole = false
             }
           }
         }
