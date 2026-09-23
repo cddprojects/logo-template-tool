@@ -1,6 +1,6 @@
 import type { ShapeType, LogoConfig, FaviconConfig, FaviconOuterShape, IconConfig } from '../types'
 import { renderLucideToSvg, applySvgColor, drawSvgOnCanvas, loadCachedImage, svgPaintFromCssColor } from './iconUtils'
-import { resolveImageDataUrl } from './imageRecolor'
+import { imageZeroAlphaPunchMask, resolveImageDataUrl } from './imageRecolor'
 import {
   applyPaintDecorations,
   applyPaintLayerDecorations,
@@ -117,6 +117,37 @@ function destOutSilhouette(
   ctx.globalCompositeOperation = 'destination-out'
   draw(ctx)
   ctx.restore()
+}
+
+/** Punch only Color 1–5 regions that are 0% opacity, in the image's draw rect. */
+async function destOutImageColorPunch(
+  ctx: CanvasRenderingContext2D,
+  fields: Parameters<typeof imageZeroAlphaPunchMask>[0],
+  destX: number,
+  destY: number,
+  destSize: number,
+  localCx: number,
+  localCy: number,
+  drawSize: number,
+  maskCanvasSize: number
+): Promise<void> {
+  if (drawSize <= 0) return
+  const maskUrl = await imageZeroAlphaPunchMask(fields)
+  if (!maskUrl) return
+  const mask = await loadCachedImage(maskUrl)
+  if (!mask) return
+  const punchCanvas = takeCanvas(maskCanvasSize, maskCanvasSize)
+  try {
+    const pCtx = punchCanvas.getContext('2d')!
+    pCtx.imageSmoothingEnabled = true
+    pCtx.imageSmoothingQuality = 'high'
+    pCtx.drawImage(mask, localCx - drawSize / 2, localCy - drawSize / 2, drawSize, drawSize)
+    destOutSilhouette(ctx, (c) => {
+      c.drawImage(punchCanvas, destX, destY, destSize, destSize)
+    })
+  } finally {
+    releaseCanvas(punchCanvas)
+  }
 }
 
 function iconInnerFillColor(icon: IconConfig): string {
@@ -1102,6 +1133,25 @@ export async function drawIcon(
     } finally {
       releaseCanvas(punchCanvas)
     }
+  }
+
+  if (
+    !skipLiveInner &&
+    icon.sourceType === 'image' &&
+    icon.transparentFillMode === 'punch' &&
+    !sessionHasPunchMask(icon.paintSession, 'content')
+  ) {
+    await destOutImageColorPunch(
+      ctx,
+      icon,
+      x,
+      y,
+      size,
+      localCx,
+      localCy,
+      iconOtherDrawSize,
+      size * SUPER
+    )
   }
 
   if (clipContent) {
@@ -2583,6 +2633,13 @@ async function drawFaviconContent(
     } finally {
       releaseCanvas(punch)
     }
+  }
+
+  if (punchMode === 'punch' && !skipLiveInner && punchType === 'image') {
+    const drawSize = areaSize * (content.imageSizeRatio ?? 0.8)
+    const cx = areaSize / 2 + (content.offsetX ?? 0)
+    const cy = areaSize / 2 + (content.offsetY ?? 0)
+    await destOutImageColorPunch(ctx, content, areaX, areaY, areaSize, cx, cy, drawSize, areaSize)
   }
 }
 

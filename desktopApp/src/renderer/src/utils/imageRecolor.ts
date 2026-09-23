@@ -11,7 +11,9 @@ const SCAN_MAX_DIM = 96
 const MERGE_DIST = 48
 const MAP_DIST = 96
 
-function rgbDist(a: [number, number, number], b: [number, number, number]): number {
+type Rgba = [number, number, number, number]
+
+function rgbDist(a: ArrayLike<number>, b: ArrayLike<number>): number {
   return Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2])
 }
 
@@ -24,14 +26,27 @@ function toHex(r: number, g: number, b: number): string {
   )
 }
 
-function parseHex(hex: string): [number, number, number] | null {
+function parseHex(hex: string): Rgba | null {
   const h = hex.trim().replace('#', '')
   if (h.length < 6) return null
   const r = parseInt(h.slice(0, 2), 16)
   const g = parseInt(h.slice(2, 4), 16)
   const b = parseInt(h.slice(4, 6), 16)
   if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) return null
-  return [r, g, b]
+  let a = 255
+  if (h.length >= 8) {
+    const parsed = parseInt(h.slice(6, 8), 16)
+    if (!Number.isNaN(parsed)) a = parsed
+  }
+  return [r, g, b, a]
+}
+
+/** Scale the source pixel alpha by the slot opacity so soft edges stay soft. */
+function paintSlot(data: Uint8ClampedArray, i: number, rgba: Rgba): void {
+  data[i] = rgba[0]
+  data[i + 1] = rgba[1]
+  data[i + 2] = rgba[2]
+  if (rgba[3] < 255) data[i + 3] = Math.round((data[i + 3] * rgba[3]) / 255)
 }
 
 /** Quantize to reduce anti-alias / JPEG noise before clustering. */
@@ -453,8 +468,8 @@ export async function applyImagePaletteRecolor(
 ): Promise<string> {
   if (!dataUrl || !palette.length) return dataUrl
 
-  const fromRgb: [number, number, number][] = []
-  const toRgb: [number, number, number][] = []
+  const fromRgb: Rgba[] = []
+  const toRgb: Rgba[] = []
   let changed = false
   for (let i = 0; i < palette.length; i++) {
     const from = parseHex(palette[i])
@@ -462,7 +477,7 @@ export async function applyImagePaletteRecolor(
     if (!from || !to) continue
     fromRgb.push(from)
     toRgb.push(to)
-    if (from[0] !== to[0] || from[1] !== to[1] || from[2] !== to[2]) changed = true
+    if (from[0] !== to[0] || from[1] !== to[1] || from[2] !== to[2] || from[3] !== to[3]) changed = true
   }
   if (!fromRgb.length || !changed) return dataUrl
 
@@ -495,10 +510,7 @@ export async function applyImagePaletteRecolor(
       }
     }
     if (bestDist > MAP_DIST) continue
-    const [nr, ng, nb] = toRgb[best]
-    data[i] = nr
-    data[i + 1] = ng
-    data[i + 2] = nb
+    paintSlot(data, i, toRgb[best])
   }
 
   ctx.putImageData(imageData, 0, 0)
@@ -568,6 +580,140 @@ export async function resolveImageDataUrl(fields: {
   return out
 }
 
+type ImageSlotFields = Parameters<typeof resolveImageDataUrl>[0]
+
+function imageSlotColors(fields: ImageSlotFields): string[] {
+  return [
+    fields.imageColor1 || fields.imagePalette?.[0] || '',
+    fields.imageColor2 || fields.imagePalette?.[1] || '',
+    fields.imageColor3 || fields.imagePalette?.[2] || '',
+    fields.imageColor4 || fields.imagePalette?.[3] || '',
+    fields.imageColor5 || fields.imagePalette?.[4] || ''
+  ]
+}
+
+/**
+ * Opaque mask of Color 1–5 pixels whose slot is 0% opacity.
+ * Used to punch those regions through layers already drawn under the image.
+ * Empty when Original colours is on, or no slot is fully transparent.
+ */
+export async function imageZeroAlphaPunchMask(fields: ImageSlotFields): Promise<string> {
+  if (fields.imageUseOriginalColors !== false || !fields.imageDataUrl) return ''
+  const colors = imageSlotColors(fields)
+  const zero = colors.map((hex) => {
+    const rgba = parseHex(hex)
+    return !!rgba && rgba[3] === 0
+  })
+  if (!zero.some(Boolean)) return ''
+
+  const src = await fitRasterDataUrl(fields.imageDataUrl)
+  const img = await loadCachedImage(src)
+  if (!img || !img.width || !img.height) return ''
+
+  let marks: Uint8Array | null = null
+  let mw = 0
+  let mh = 0
+  if (fields.imageColorMarkPng) {
+    const markPng = await fitRasterDataUrl(fields.imageColorMarkPng, 1024, { indexMap: true })
+    const decoded = await decodeColorMarkPng(markPng)
+    if (decoded && decoded.marks.some((v) => v > 0)) {
+      marks = decoded.marks
+      mw = decoded.w
+      mh = decoded.h
+    }
+  }
+
+  const paletteRgb: Rgba[] = []
+  if (!marks) {
+    for (const hex of fields.imagePalette ?? []) {
+      const rgba = parseHex(hex)
+      if (rgba) paletteRgb.push(rgba)
+    }
+    if (!paletteRgb.length) return ''
+  }
+
+  const unmarkedSlot = fields.imageUnmarkedColorSlot
+  const useUnmarked =
+    !!fields.imageColorRegionPng &&
+    unmarkedSlot != null &&
+    unmarkedSlot >= 1 &&
+    unmarkedSlot <= MAX_PALETTE
+  let region: Uint8ClampedArray | null = null
+  let rw = 0
+  let rh = 0
+  if (useUnmarked && fields.imageColorRegionPng) {
+    const regionPng = await fitRasterDataUrl(fields.imageColorRegionPng, 1024, { indexMap: true })
+    const regionImg = await loadCachedImage(regionPng)
+    if (regionImg) {
+      const rc = document.createElement('canvas')
+      rc.width = regionImg.width
+      rc.height = regionImg.height
+      const rctx = rc.getContext('2d', { willReadFrequently: true })
+      if (rctx) {
+        rctx.drawImage(regionImg, 0, 0)
+        region = rctx.getImageData(0, 0, rc.width, rc.height).data
+        rw = rc.width
+        rh = rc.height
+      }
+    }
+  }
+
+  const canvas = document.createElement('canvas')
+  canvas.width = img.width
+  canvas.height = img.height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return ''
+  ctx.drawImage(img, 0, 0)
+  const srcData = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+  const out = ctx.createImageData(canvas.width, canvas.height)
+  let any = false
+
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      const i = (y * canvas.width + x) * 4
+      if (srcData[i + 3] === 0) continue
+      let slot = 0
+      if (region && unmarkedSlot) {
+        let ri = i
+        if (rw !== canvas.width || rh !== canvas.height) {
+          const mx = Math.min(rw - 1, Math.floor((x / canvas.width) * rw))
+          const my = Math.min(rh - 1, Math.floor((y / canvas.height) * rh))
+          ri = (my * rw + mx) * 4
+        }
+        if (region[ri + 2]! > 0) slot = unmarkedSlot
+      }
+      if (!slot && marks) {
+        let mark = 0
+        if (mw === canvas.width && mh === canvas.height) {
+          mark = marks[y * mw + x] ?? 0
+        } else {
+          const mx = Math.min(mw - 1, Math.floor((x / canvas.width) * mw))
+          const my = Math.min(mh - 1, Math.floor((y / canvas.height) * mh))
+          mark = marks[my * mw + mx] ?? 0
+        }
+        if (mark >= 1 && mark <= MAX_PALETTE) slot = mark
+      } else if (!slot && paletteRgb.length) {
+        let best = 0
+        let bestDist = rgbDist(srcData.subarray(i, i + 3), paletteRgb[0])
+        for (let s = 1; s < paletteRgb.length; s++) {
+          const d = rgbDist(srcData.subarray(i, i + 3), paletteRgb[s])
+          if (d < bestDist) {
+            bestDist = d
+            best = s
+          }
+        }
+        if (bestDist <= MAP_DIST) slot = best + 1
+      }
+      if (slot < 1 || !zero[slot - 1]) continue
+      out.data[i + 3] = 255
+      any = true
+    }
+  }
+  if (!any) return ''
+  ctx.putImageData(out, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
 /**
  * Recolour Unmarked leftover regions (region PNG blue flag) with Color slot.
  * Does not use the Match mark map — leftovers stay Match-unmarked.
@@ -616,9 +762,7 @@ export async function applyUnmarkedRestRecolor(
       }
       // Blue channel flags Unmarked leftovers.
       if (rd[ri + 2]! <= 0) continue
-      data[i] = rgb[0]
-      data[i + 1] = rgb[1]
-      data[i + 2] = rgb[2]
+      paintSlot(data, i, rgb)
     }
   }
   ctx.putImageData(imageData, 0, 0)
@@ -776,7 +920,7 @@ export async function buildDefaultColorMarks(
   if (!ctx) return null
   ctx.drawImage(img, 0, 0)
   const { data } = ctx.getImageData(0, 0, w, h)
-  const fromRgb: [number, number, number][] = []
+  const fromRgb: Rgba[] = []
   for (const hex of palette.slice(0, MAX_PALETTE)) {
     const rgb = parseHex(hex)
     if (rgb) fromRgb.push(rgb)
@@ -827,7 +971,7 @@ export async function applyColorMarksRecolor(
   ctx.drawImage(img, 0, 0)
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
   const data = imageData.data
-  const toRgb: ([number, number, number] | null)[] = []
+  const toRgb: (Rgba | null)[] = []
   for (let s = 0; s < MAX_PALETTE; s++) {
     toRgb.push(parseHex(colors[s] || '') )
   }
@@ -849,9 +993,7 @@ export async function applyColorMarksRecolor(
       if (mark < 1 || mark > MAX_PALETTE) continue
       const rgb = toRgb[mark - 1]
       if (!rgb) continue
-      data[i] = rgb[0]
-      data[i + 1] = rgb[1]
-      data[i + 2] = rgb[2]
+      paintSlot(data, i, rgb)
     }
   }
   ctx.putImageData(imageData, 0, 0)
