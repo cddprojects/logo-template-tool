@@ -2844,7 +2844,9 @@ export function buildPaintContentSync(opts: {
     sync.sizeRatio = clampSizeRatio(Math.max(w, h) / drawArea)
     // Partial stamp fills set rasterEdited and must not push fillColor — that
     // remaps the whole live image (including enclosed islands left unpainted).
-    if (proxy.color && !proxy.rasterEdited) sync.fillColor = proxy.color
+    // Color 1–5 own the image. The stamp colour is only an opaque stand-in so
+    // a 0% slot is not saved as a see-through fill of the whole picture.
+    if (proxy.color && !proxy.rasterEdited && !proxy.colorMarkPng) sync.fillColor = proxy.color
     if (proxy.imageSourceDataUrl || proxy.colorMarkPng || proxy.colorRegionPng || proxy.imagePalette?.length || proxy.unmarkedColorSlot != null) {
       if (proxy.imageUseOriginalColors !== undefined) {
         sync.imageUseOriginalColors = proxy.imageUseOriginalColors

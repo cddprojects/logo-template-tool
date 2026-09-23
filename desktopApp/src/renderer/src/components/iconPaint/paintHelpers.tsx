@@ -452,6 +452,11 @@ export interface LineObj {
   colorRegionPng?: string
   /** Color 1–5 for Unmarked leftovers; mark map stays 0 for those regions. */
   unmarkedColorSlot?: number
+  /**
+   * Punch bits were derived from outside Color 1–5 at 0% opacity.
+   * Save must not bake them — those slots still own the pixels outside Paint.
+   */
+  derivedSlotPunch?: boolean
   /** Tight unwarped source rect in canvas space (TL + size). */
   reshapeSrc?: { x: number; y: number; w: number; h: number }
   /** Destination quad in canvas space: TL, TR, BR, BL. */

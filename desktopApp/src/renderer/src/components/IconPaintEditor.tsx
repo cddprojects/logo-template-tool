@@ -98,7 +98,7 @@ import {
   type MatchSectionLabel
 } from '../utils/imageColorMatch'
 import { fitRasterDataUrl } from '../utils/imageFit'
-import { bakeImageSoftAaBleed, bakeImageSmoothAa } from '../utils/imageRecolor'
+import { bakeImageSoftAaBleed, bakeImageSmoothAa, imageZeroAlphaPunchMask } from '../utils/imageRecolor'
 import { reshapeIsApplied } from '../utils/paintReshape'
 import {
   reuseCanvas,
@@ -1460,8 +1460,36 @@ export function IconPaintEditor({
 
       // Non-letter Inner: lift centered bake into a movable/resizable contentBound stamp.
       // Skip only when Save baked Inner into decorations (see-through / punch / warp).
+      // A Color 1–5 punch that was saved as see-through still has its mark map and
+      // no raster edit — put that image back on the live slots instead of the bake.
+      const recoverSlotImage =
+        !!initialContentBakedInDecorations &&
+        outsideAll?.kind === 'proxy' &&
+        !!outsideAll.imageColorMarkPng &&
+        restored.some(
+          (l) =>
+            l.type === 'stamp' &&
+            l.name === 'Inner content' &&
+            !l.contentBound &&
+            !l.contentProxySlot &&
+            !!l.colorMarkPng &&
+            !l.rasterEdited &&
+            !(l.paintStrokes && l.paintStrokes.length)
+        )
+      if (recoverSlotImage) {
+        restored = restored.filter(
+          (l) =>
+            !(
+              l.type === 'stamp' &&
+              l.name === 'Inner content' &&
+              !l.contentBound &&
+              !l.contentProxySlot &&
+              !l.rasterEdited
+            )
+        )
+      }
       // Rehydrate contentProxySlot in place so z-order / nesting survive Save → re-open.
-      if (outsideAll?.kind === 'proxy' && !initialContentBakedInDecorations) {
+      if (outsideAll?.kind === 'proxy' && (!initialContentBakedInDecorations || recoverSlotImage)) {
         const crop = cropOpaqueToDataUrl(baseCt.canvas)
         if (crop) {
           const existing = restored.find(
@@ -1483,6 +1511,11 @@ export function IconPaintEditor({
           ) {
             // Same source + Color/marks resolve as outside preview (no region rebuild).
             seededProxy = await hydrateImageProxyColors(seededProxy, outsideAll)
+            // Object colour must stay opaque. A 0% Color slot is not a see-through
+            // fill of the whole image — Save would bake it and Color 1–5 would
+            // stop owning that section.
+            const slotHex = (seededProxy.imageColor1 || seededProxy.color || '#ffffff').trim()
+            seededProxy.color = /^#[0-9a-fA-F]{6,8}$/i.test(slotHex) ? slotHex.slice(0, 7) : '#ffffff'
             restored = restored.map((l) => (l.id === seededProxy!.id ? seededProxy! : l))
             if (seededProxy.imageDataUrl) {
               ensureStampImage(seededProxy.imageDataUrl, () => {
@@ -1508,6 +1541,10 @@ export function IconPaintEditor({
         // Baked Inner owns the pixels — keep live base clear; drop leftover slots.
         baseCt.clearRect(0, 0, W, H)
         restored = restored.filter((l) => !l.contentProxySlot && !l.contentBound)
+      }
+      if (recoverSlotImage) {
+        // Drop the baked see-through plane so the live Color 1–5 image shows.
+        ct.clearRect(0, 0, W, H)
       }
 
       // Never auto-select on paint open — user picks what to edit.
@@ -1540,6 +1577,63 @@ export function IconPaintEditor({
       // Restore holes while vectors still match the saved outer size / hole PNGs.
       clearAllHoles()
       restored = await restorePunchMasks(restored, initialPunchMasks, W, H)
+
+      // 0% Color slots + PH: punch those regions through layers under the image.
+      // Applied after clearAllHoles so the open-restore does not wipe it.
+      // derivedSlotPunch tells Save this hole still belongs to Color 1–5.
+      if (transparentFillModeRef.current === 'punch') {
+        const proxy = restored.find(
+          (l) => isInnerUploadedImageProxy(l) && l.imageUseOriginalColors === false && !l.rasterEdited
+        )
+        if (proxy && proxy.pts.length >= 2) {
+          const maskUrl = await imageZeroAlphaPunchMask({
+            imageDataUrl: proxy.imageSourceDataUrl || proxy.imageDataUrl,
+            imageUseOriginalColors: false,
+            imagePalette: proxy.imagePalette,
+            imageColor1: proxy.imageColor1,
+            imageColor2: proxy.imageColor2,
+            imageColor3: proxy.imageColor3,
+            imageColor4: proxy.imageColor4,
+            imageColor5: proxy.imageColor5,
+            imageColorMarkPng: proxy.colorMarkPng,
+            imageColorRegionPng: proxy.colorRegionPng,
+            imageUnmarkedColorSlot: proxy.unmarkedColorSlot
+          })
+          const mask = maskUrl ? await ensureStampImageDecoded(maskUrl) : null
+          if (mask) {
+            const bitsCanvas = document.createElement('canvas')
+            bitsCanvas.width = W
+            bitsCanvas.height = H
+            const bctx = bitsCanvas.getContext('2d')
+            if (bctx) {
+              bctx.imageSmoothingEnabled = false
+              const pa = proxy.pts[0]
+              const pb = proxy.pts[1]
+              bctx.drawImage(
+                mask,
+                Math.min(pa.x, pb.x),
+                Math.min(pa.y, pb.y),
+                Math.max(1, Math.abs(pb.x - pa.x)),
+                Math.max(1, Math.abs(pb.y - pa.y))
+              )
+              const px = bctx.getImageData(0, 0, W, H).data
+              const bits = new Uint8Array(W * H)
+              let n = 0
+              for (let p = 0; p < bits.length; p++) {
+                if (px[p * 4 + 3] > 8) {
+                  bits[p] = 1
+                  n++
+                }
+              }
+              if (n > 0) {
+                setLocalPunchFromFilled(proxy, bits, W, H, { mode: 'punch', replace: true })
+                proxy.derivedSlotPunch = true
+                proxy.punchEnclosedHole = false
+              }
+            }
+          }
+        }
+      }
 
       if (Number.isFinite(reopenScale) && Math.abs(reopenScale - 1) > 0.001) {
         restored = restored.map((l) => {
@@ -5695,7 +5789,8 @@ export function IconPaintEditor({
           : item.type === 'stamp'
             ? {}
             : { borderColor: nextColor }),
-        punchThrough: punch
+        punchThrough: punch,
+        derivedSlotPunch: undefined
       }
     }
     // Vector see-through: hide the fill; drop any prior punch silhouette.
@@ -9425,6 +9520,18 @@ export function IconPaintEditor({
       const all = new Uint8Array(W * H)
       all.fill(1)
       clearPunchHolesOverlapping(all, 'container', { clearAllOnLayer: true })
+    }
+    // Color 1–5 punch is derived from the slots. Drop it before Save so it is
+    // not baked into decorations — outside Color 1–5 must keep owning the pixels.
+    for (const l of linesRef.current) {
+      if (!l.derivedSlotPunch || l.rasterEdited) continue
+      clearObjectHoles(l as HoleItem)
+      l.punchThrough = false
+      l.punchEnclosedHole = false
+      l.holeMaskPng = undefined
+      l.seeThroughHoleMaskPng = undefined
+      l.holeMaskMode = undefined
+      l.derivedSlotPunch = undefined
     }
     // Bake see-through holes into stamp pixels and detach modified live-Inner
     // proxies so Save/re-open cannot restore the original unpunched colour.
