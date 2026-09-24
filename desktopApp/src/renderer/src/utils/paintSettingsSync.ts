@@ -2028,18 +2028,19 @@ export function stripContentProxyVectors(vectors: PaintVector[] | null | undefin
 
 /**
  * Convert contentBound rasters into hierarchy slots for Save.
- * Keeps id / parentId / belowBase / layer / pose so Paint reopen restores stack order.
+ * Keeps id / parentId / belowBase / layer / pose and brush strokes so Paint
+ * reopen restores stack order and redraws strokes on the recoloured image.
  */
 export function persistContentProxyVectors(
   vectors: PaintVector[] | null | undefined
 ): PaintVector[] {
   return (vectors ?? []).map((v) => {
     if (isContentProxySlotVector(v) && !isContentProxyVector(v)) {
-      const { imageDataUrl: _img, paintStrokes: _ps, contentBound: _cb, ...rest } = v
+      const { imageDataUrl: _img, contentBound: _cb, ...rest } = v
       return { ...rest, contentProxySlot: true, contentBound: undefined, imageDataUrl: undefined }
     }
     if (!isContentProxyVector(v)) return v
-    const { imageDataUrl: _img, paintStrokes: _ps, contentBound: _cb, ...rest } = v
+    const { imageDataUrl: _img, contentBound: _cb, ...rest } = v
     return {
       ...rest,
       type: 'stamp',
@@ -3541,7 +3542,6 @@ function clearPaintSessionBoundImagePixels(
       if (v.contentBound || v.contentProxySlot) {
         const {
           imageDataUrl: _img,
-          paintStrokes: _ps,
           contentBound: _cb,
           ...rest
         } = v
@@ -3551,8 +3551,7 @@ function clearPaintSessionBoundImagePixels(
           stampSource: rest.stampSource ?? 'image',
           contentProxySlot: true,
           contentBound: undefined,
-          imageDataUrl: undefined,
-          paintStrokes: undefined
+          imageDataUrl: undefined
         }
       }
       return v

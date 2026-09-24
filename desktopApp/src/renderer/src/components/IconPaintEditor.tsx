@@ -91,6 +91,7 @@ import {
   isInnerUploadedImageProxy,
   matchClickOnImageProxy,
   refreshStampFromMarks,
+  retintMatchingStrokes,
   setImageProxySlotColor,
   assignUnmarkedInkToSlot,
   inspectUnmarkedInk,
@@ -9664,13 +9665,15 @@ export function IconPaintEditor({
       }
       if (item.type === 'group' || item.marqueeItem) return [item]
       const seeThrough = objectHasSeeThroughHole(item)
+      // Brush strokes stay vectors on the live image. Baking them detaches
+      // Color 1–5, and the next outside colour edit rebuilds the picture
+      // without the brush.
       const modifiedProxy =
         !!item.contentBound &&
         (!!item.rasterEdited ||
           seeThrough ||
           !!item.punchThrough ||
           hasPunchCoverage(item.id) ||
-          !!item.paintStrokes?.length ||
           reshapeIsApplied(item.reshapeQuad, item.reshapeSrc) ||
           isTransparentPaintColor(item.color ?? ''))
       if (seeThrough) {
@@ -11700,7 +11703,7 @@ export function IconPaintEditor({
               : 'Amber box — drag corners to stretch the selection'}
           </span>
         </div>
-      ) : tool === 'brush' ? (
+      ) : tool === 'brush' && !(editingContentProxy && selectedObj) ? (
         <div className="flex items-center gap-1 px-4 h-11 flex-nowrap shrink-0" title="Brush tip shape">
           <span className="text-[11px] text-muted mr-0.5">Tip</span>
           {BRUSH_TIPS.map((t) => (
@@ -11717,7 +11720,7 @@ export function IconPaintEditor({
             </button>
           ))}
         </div>
-      ) : tool === 'eraser' ? (
+      ) : tool === 'eraser' && !(editingContentProxy && selectedObj) ? (
         <div className="flex items-center gap-1 px-4 h-11 flex-nowrap shrink-0" title="Eraser shape">
           <span className="text-[11px] text-muted mr-0.5">Shape</span>
           {([
@@ -11740,6 +11743,48 @@ export function IconPaintEditor({
         </div>
       ) : ((editingContentProxy && selectedObj) || tool === 'match') ? (
         <div className="flex items-center gap-2.5 px-4 h-11 flex-nowrap shrink-0 overflow-x-auto">
+          {tool === 'brush' && (
+            <>
+              <span className="text-[11px] text-muted shrink-0">Tip</span>
+              {BRUSH_TIPS.map((t) => (
+                <button
+                  key={t.value}
+                  type="button"
+                  title={t.label}
+                  onClick={() => setBrushTip(t.value)}
+                  className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 transition-colors ${
+                    brushTip === t.value ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+                  }`}
+                >
+                  <BrushTipIcon tip={t.value} />
+                </button>
+              ))}
+              <div className="w-px h-6 bg-border shrink-0" />
+            </>
+          )}
+          {tool === 'eraser' && (
+            <>
+              <span className="text-[11px] text-muted shrink-0">Shape</span>
+              {([
+                { value: 'round' as const, label: 'Circle' },
+                { value: 'square' as const, label: 'Square' }
+              ]).map((t) => (
+                <button
+                  key={t.value}
+                  type="button"
+                  title={t.label}
+                  onClick={() => setEraserTip(t.value)}
+                  className={`h-8 px-2 rounded-lg flex items-center gap-1.5 text-[11px] font-medium shrink-0 transition-colors ${
+                    eraserTip === t.value ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+                  }`}
+                >
+                  <BrushTipIcon tip={t.value} />
+                  {t.label}
+                </button>
+              ))}
+              <div className="w-px h-6 bg-border shrink-0" />
+            </>
+          )}
           <span className="text-[11px] font-semibold text-text shrink-0">Inner content</span>
           {showMatchChrome && (() => {
             const matchObj =
@@ -11863,13 +11908,32 @@ export function IconPaintEditor({
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => {
                         const v = e.target.value
+                        const proxyId = matchObj.id
                         void (async () => {
-                          const next = await setImageProxySlotColor(matchObj, slot, v)
+                          const live =
+                            linesRef.current.find((l) => l.id === proxyId) ?? matchObj
+                          const slotKey = `imageColor${slot}` as
+                            | 'imageColor1'
+                            | 'imageColor2'
+                            | 'imageColor3'
+                            | 'imageColor4'
+                            | 'imageColor5'
+                          const previous = (live[slotKey] || live.imagePalette?.[slot - 1] || '').trim()
+                          const next = await setImageProxySlotColor(live, slot, v)
                           if (!next) return
-                          const stored =
-                            tool === 'match'
-                              ? { ...next, imageDataUrl: matchObj.imageDataUrl }
-                              : next
+                          const current = linesRef.current.find((l) => l.id === proxyId)
+                          const stored = {
+                            ...next,
+                            paintStrokes: retintMatchingStrokes(
+                              current?.paintStrokes ?? next.paintStrokes,
+                              [previous],
+                              [v]
+                            ),
+                            ...(tool === 'match'
+                              ? { imageDataUrl: current?.imageDataUrl ?? matchObj.imageDataUrl }
+                              : {})
+                          }
+                          stampStrokeLiveCache.delete(stored.id)
                           commitLines(
                             linesRef.current.map((l) => (l.id === stored.id ? stored : l))
                           )

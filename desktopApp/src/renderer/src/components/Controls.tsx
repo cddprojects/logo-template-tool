@@ -9,10 +9,10 @@ import {
 } from '../utils/aiStyles'
 import {
   assignUnmarkedInkToSlot,
-  finishUploadedImageSeed,
   inspectUnmarkedInk,
   recolorUnmarkedGroup,
-  seedUploadedImageColors
+  rescanBaseLayerColors,
+  retintBaseImageStrokes
 } from '../utils/imageColorMatch'
 import {
   bakeImageSoftAaBleed,
@@ -21,7 +21,7 @@ import {
   type ImageRecolorFields
 } from '../utils/imageRecolor'
 import { FONT_FAMILIES, FONT_FAMILY_GROUPS, FONT_WEIGHTS, SHAPES, OUTER_SHAPE_CATEGORIES } from '../types'
-import type { ShapeType, OuterShapeCategory } from '../types'
+import type { ShapeType, OuterShapeCategory, PaintSession } from '../types'
 import type { ExportNameStyle } from '../utils/exporter'
 import { loadFont } from '../utils/fontLoader'
 
@@ -1959,6 +1959,9 @@ interface ImageRecolorControlsProps {
   imageColorRegionPng?: string
   imageUnmarkedColorSlot?: number
   imageKeepColors?: boolean
+  /** Saved paint, so Rescan can see brush strokes and other base-layer edits. */
+  paintSession?: PaintSession | null
+  onPaintSession?: (session: PaintSession) => void
   onChange: (patch: ImageRecolorPatch) => void
 }
 
@@ -1975,6 +1978,8 @@ export function ImageRecolorControls({
   imageColorRegionPng,
   imageUnmarkedColorSlot,
   imageKeepColors = false,
+  paintSession = null,
+  onPaintSession,
   onChange
 }: ImageRecolorControlsProps): JSX.Element | null {
   const [scanning, setScanning] = useState(false)
@@ -2021,16 +2026,24 @@ export function ImageRecolorControls({
   const scan = async () => {
     setScanning(true)
     try {
-      const seeded = await seedUploadedImageColors(imageDataUrl)
-      onChange(finishUploadedImageSeed(seeded, {
+      const result = await rescanBaseLayerColors({
+        imageDataUrl,
         imageUseOriginalColors,
-        imageKeepColors,
+        imagePalette,
         imageColor1,
         imageColor2,
         imageColor3,
         imageColor4,
-        imageColor5
-      }))
+        imageColor5,
+        imageColorMarkPng,
+        imageColorRegionPng,
+        imageUnmarkedColorSlot,
+        imageKeepColors,
+        session: paintSession
+      })
+      if (!result) return
+      onChange(result.patch)
+      if (result.session && onPaintSession) onPaintSession(result.session)
       clearArmed()
     } finally {
       setScanning(false)
@@ -2120,10 +2133,14 @@ export function ImageRecolorControls({
           <span className="text-xs text-muted">Image colours</span>
           <RowInfo label="Scan and rescan colours">
             <p className="font-semibold">Scan / Rescan</p>
-            <p className="mt-0.5">Reads the image already on screen and splits it into up to 5 colour sections. The first press is Scan colours. After that, the same button is Rescan colours and rebuilds those sections.</p>
+            <p className="mt-0.5">Reads the base image together with brush strokes and other paint on that base layer. New paint is matched onto Color 1–5 by how many pixels it covers. Those slots stay the colours from when the image was first uploaded.</p>
+            <div className="mt-2 border-t border-border pt-2">
+              <p className="font-semibold">Before rescan</p>
+              <p className="mt-0.5">Changing a Color 1–5 slot recolours the image. A brush stroke stays as it is, unless that stroke already uses the same colour — then the stroke changes with the slot.</p>
+            </div>
             <div className="mt-2 border-t border-border pt-2">
               <p className="font-semibold">Color 1–5</p>
-              <p className="mt-0.5">Keep color off: Color 1–5 become the colours found in the image.</p>
+              <p className="mt-0.5">Keep color off: Color 1–5 stay the colours from the upload. Rescan matches new paint onto them.</p>
               <p className="mt-1">Keep color on: Color 1–5 stay and fill the new sections.</p>
               <p className="mt-1">Original colors stays as you set it, so the picture updates when that switch is off.</p>
             </div>
@@ -2134,7 +2151,7 @@ export function ImageRecolorControls({
           onClick={scan}
           disabled={scanning || bleeding || smoothing || assigningRest}
           className="px-2 py-1 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
-          title="Scan the image for up to 5 solid colours"
+          title="Match base-layer paint onto the original Color 1–5"
         >
           {scanning ? 'Scanning…' : imagePalette.length ? 'Rescan colours' : 'Scan colours'}
         </button>
@@ -2216,16 +2233,30 @@ export function ImageRecolorControls({
                 key={key}
                 label={`Color ${i + 1}`}
                 value={(colors[i] || '').trim() || orig}
-                onChange={(v) => onChange({ [key]: v === orig ? '' : v })}
+                onChange={(v) => {
+                  const shown = (colors[i] || imagePalette[i] || '').trim()
+                  const stored = v === orig ? '' : v
+                  const visibleNext = (stored || orig).trim()
+                  onChange({ [key]: stored })
+                  if (paintSession && onPaintSession && shown && visibleNext) {
+                    const next = retintBaseImageStrokes(paintSession, [shown], [visibleNext])
+                    if (next && next !== paintSession) onPaintSession(next)
+                  }
+                }}
                 swapLit={armedIndex === i}
                 onSwapClick={() =>
                   onSwapClick(i, (a, b) => {
-                    const ea = (colors[a] || '').trim() || imagePalette[a] || ''
-                    const eb = (colors[b] || '').trim() || imagePalette[b] || ''
+                    const shown = colors.map((c, n) => (c || '').trim() || imagePalette[n] || '')
+                    const ea = shown[a] || ''
+                    const eb = shown[b] || ''
                     onChange({
                       [colorKeys[a]]: eb,
                       [colorKeys[b]]: ea
                     } as ImageRecolorPatch)
+                    if (paintSession && onPaintSession) {
+                      const next = retintBaseImageStrokes(paintSession, [ea, eb], [eb, ea])
+                      if (next && next !== paintSession) onPaintSession(next)
+                    }
                   })
                 }
                 labelActive={!!unmarkedPick}

@@ -19,8 +19,8 @@ import {
 } from './imageRecolor'
 import { loadCachedImage } from './iconUtils'
 import { fitRasterDataUrl } from './imageFit'
-import type { OutsideContentSettings } from '../types'
-import type { LineObj } from '../components/iconPaint/paintHelpers'
+import type { OutsideContentSettings, PaintSession, PaintVector } from '../types'
+import { drawPaintStrokesInBox, type BrushTip, type LineObj } from '../components/iconPaint/paintHelpers'
 
 const COLOR_TOL = 40
 
@@ -1131,6 +1131,451 @@ export async function fillMarkedSectionsOnImageProxy(
   }
 }
 
+export function solidColorKey(hex: string): string {
+  const h = hex.trim().toLowerCase()
+  if (!h.startsWith('#')) return h
+  return h.slice(0, 7)
+}
+
+export function sameSolidColor(a: string, b: string): boolean {
+  const aa = solidColorKey(a)
+  const bb = solidColorKey(b)
+  return /^#[0-9a-f]{6}$/.test(aa) && aa === bb
+}
+
+type StrokeLike = {
+  tool: 'brush' | 'eraser'
+  pts: { x: number; y: number }[]
+  size: number
+  color: string
+  tip: string
+}
+
+/** Brush ink that already uses one of `fromColors` takes the paired colour. */
+export function retintMatchingStrokes<T extends StrokeLike>(
+  strokes: T[] | undefined,
+  fromColors: string[],
+  toColors: string[]
+): T[] | undefined {
+  if (!strokes?.length) return strokes
+  const pairs = fromColors
+    .map((from, i) => ({ from: solidColorKey(from), to: solidColorKey(toColors[i] || '') }))
+    .filter((p) => /^#[0-9a-f]{6}$/.test(p.from) && /^#[0-9a-f]{6}$/.test(p.to) && p.from !== p.to)
+  if (!pairs.length) return strokes
+  let changed = false
+  const next = strokes.map((stroke) => {
+    if (stroke.tool === 'eraser') return stroke
+    const pair = pairs.find((p) => p.from === solidColorKey(stroke.color))
+    if (!pair) return stroke
+    changed = true
+    const alpha = stroke.color.trim().length >= 9 ? stroke.color.trim().slice(7, 9) : ''
+    return { ...stroke, color: pair.to + alpha }
+  })
+  return changed ? next : strokes
+}
+
+function isBaseImageVector(v: PaintVector): boolean {
+  return !!(v.contentBound || v.contentProxySlot)
+}
+
+async function pngBoxHasOpaque(
+  dataUrl: string,
+  box: { x: number; y: number; w: number; h: number }
+): Promise<boolean> {
+  const img = await loadCachedImage(dataUrl)
+  if (!img?.width || !img.height) return false
+  const w = Math.max(1, Math.ceil(box.w))
+  const h = Math.max(1, Math.ceil(box.h))
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return false
+  ctx.drawImage(img, box.x, box.y, box.w, box.h, 0, 0, w, h)
+  const data = ctx.getImageData(0, 0, w, h).data
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] > 16) return true
+  }
+  return false
+}
+
+function baseLayerPlanes(session: PaintSession | null | undefined): {
+  below?: string
+  above?: string
+} {
+  if (!session) return {}
+  if (session.contentBelowDecorationsPng || session.contentAboveDecorationsPng) {
+    return {
+      below: session.contentBelowDecorationsPng,
+      above: session.contentAboveDecorationsPng
+    }
+  }
+  return { above: session.contentDecorationsPng || session.contentPng }
+}
+
+async function drawPlaneInBox(
+  ctx: CanvasRenderingContext2D,
+  dataUrl: string | undefined,
+  box: { x: number; y: number; w: number; h: number } | null,
+  destW: number,
+  destH: number
+): Promise<void> {
+  if (!dataUrl || !box) return
+  const ov = await loadCachedImage(dataUrl)
+  if (!ov) return
+  ctx.drawImage(ov, box.x, box.y, box.w, box.h, 0, 0, destW, destH)
+}
+
+function stampBoxOf(v: PaintVector): { x: number; y: number; w: number; h: number } | null {
+  if (!v.pts || v.pts.length < 2) return null
+  const a = v.pts[0]
+  const b = v.pts[1]
+  const w = Math.abs(b.x - a.x)
+  const h = Math.abs(b.y - a.y)
+  if (w < 1 || h < 1) return null
+  return { x: Math.min(a.x, b.x), y: Math.min(a.y, b.y), w, h }
+}
+
+/** Color 1–5 edits move matching brush ink on the base image. Other strokes stay. */
+export function retintBaseImageStrokes(
+  session: PaintSession | null | undefined,
+  fromColors: string[],
+  toColors: string[]
+): PaintSession | null | undefined {
+  if (!session?.vectors?.length) return session
+  let changed = false
+  const vectors = session.vectors.map((v) => {
+    if (!isBaseImageVector(v) || !v.paintStrokes?.length) return v
+    const paintStrokes = retintMatchingStrokes(v.paintStrokes, fromColors, toColors)
+    if (paintStrokes === v.paintStrokes) return v
+    changed = true
+    return { ...v, paintStrokes }
+  })
+  return changed ? { ...session, vectors } : session
+}
+
+function colorDist(a: string, b: string): number {
+  const pa = parseHex(a)
+  const pb = parseHex(b)
+  if (!pa || !pb) return Infinity
+  return Math.abs(pa[0] - pb[0]) + Math.abs(pa[1] - pb[1]) + Math.abs(pa[2] - pb[2])
+}
+
+function snapBaseStrokesToSlots(
+  session: PaintSession,
+  slots: string[],
+  maxDist = 48
+): PaintSession {
+  const vectors = session.vectors.map((v) => {
+    if (!isBaseImageVector(v) || !v.paintStrokes?.length) return v
+    let changed = false
+    const paintStrokes = v.paintStrokes.map((stroke) => {
+      if (stroke.tool === 'eraser') return stroke
+      let best = -1
+      let bestDist = Infinity
+      slots.forEach((slot, i) => {
+        const d = colorDist(stroke.color, slot)
+        if (d < bestDist) {
+          bestDist = d
+          best = i
+        }
+      })
+      if (best < 0 || bestDist > maxDist) return stroke
+      const next = solidColorKey(slots[best] || '')
+      if (!next || sameSolidColor(stroke.color, next)) return stroke
+      changed = true
+      const alpha = stroke.color.trim().length >= 9 ? stroke.color.trim().slice(7, 9) : ''
+      return { ...stroke, color: next + alpha }
+    })
+    return changed ? { ...v, paintStrokes } : v
+  })
+  return { ...session, vectors }
+}
+
+async function replaceRgbInPngBox(
+  dataUrl: string | undefined,
+  box: { x: number; y: number; w: number; h: number },
+  fromHex: string,
+  toHex: string
+): Promise<string | undefined> {
+  if (!dataUrl || sameSolidColor(fromHex, toHex)) return dataUrl
+  const from = parseHex(fromHex)
+  const to = parseHex(toHex)
+  if (!from || !to) return dataUrl
+  const img = await loadCachedImage(dataUrl)
+  if (!img?.width || !img.height) return dataUrl
+  const canvas = document.createElement('canvas')
+  canvas.width = img.width
+  canvas.height = img.height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return dataUrl
+  ctx.drawImage(img, 0, 0)
+  const x0 = Math.max(0, Math.floor(box.x))
+  const y0 = Math.max(0, Math.floor(box.y))
+  const x1 = Math.min(canvas.width, Math.ceil(box.x + box.w))
+  const y1 = Math.min(canvas.height, Math.ceil(box.y + box.h))
+  if (x1 <= x0 || y1 <= y0) return dataUrl
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  const data = image.data
+  let hit = false
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const i = (y * canvas.width + x) * 4
+      if (data[i + 3] < 16) continue
+      const d =
+        Math.abs(data[i] - from[0]) + Math.abs(data[i + 1] - from[1]) + Math.abs(data[i + 2] - from[2])
+      if (d > 18) continue
+      data[i] = to[0]
+      data[i + 1] = to[1]
+      data[i + 2] = to[2]
+      hit = true
+    }
+  }
+  if (!hit) return dataUrl
+  ctx.putImageData(image, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
+async function rewireBaseRaster(
+  session: PaintSession,
+  box: { x: number; y: number; w: number; h: number },
+  fromColors: string[],
+  toColors: string[]
+): Promise<PaintSession> {
+  const pairs = fromColors
+    .map((from, i) => ({ from, to: toColors[i] || '' }))
+    .filter((p) => p.from && p.to && !sameSolidColor(p.from, p.to))
+  if (!pairs.length) return session
+  let next = session
+  const keys = [
+    'contentPng',
+    'contentDecorationsPng',
+    'contentAboveDecorationsPng',
+    'contentBelowDecorationsPng'
+  ] as const
+  for (const key of keys) {
+    let url = next[key]
+    for (const pair of pairs) {
+      url = await replaceRgbInPngBox(url, box, pair.from, pair.to)
+    }
+    if (url !== next[key]) next = { ...next, [key]: url }
+  }
+  return next
+}
+
+export type BaseLayerRescanInput = {
+  imageDataUrl: string
+  imageUseOriginalColors?: boolean
+  imagePalette?: string[]
+  imageColor1?: string
+  imageColor2?: string
+  imageColor3?: string
+  imageColor4?: string
+  imageColor5?: string
+  imageColorMarkPng?: string
+  imageColorRegionPng?: string
+  imageUnmarkedColorSlot?: number
+  imageKeepColors?: boolean
+  session?: PaintSession | null
+}
+
+export type BaseLayerRescanResult = {
+  patch: {
+    imagePalette: string[]
+    imageUseOriginalColors: boolean
+    imageKeepColors: boolean
+    imageColor1: string
+    imageColor2: string
+    imageColor3: string
+    imageColor4: string
+    imageColor5: string
+    imageColorMarkPng: string
+    imageColorRegionPng: string
+    imageUnmarkedColorSlot?: undefined
+  }
+  session?: PaintSession | null
+}
+
+function uploadPalette(input: BaseLayerRescanInput): string[] {
+  return (input.imagePalette ?? []).map((c) => c.trim()).filter(Boolean).slice(0, 5)
+}
+
+/** Color 1–5 from the first upload. Later edits stay; a rescan must not replace them. */
+function lockedSlotColors(input: BaseLayerRescanInput, fallback: string[]): string[] {
+  const palette = uploadPalette(input)
+  if (!palette.length) return fallback.slice(0, 5)
+  const current = [
+    input.imageColor1,
+    input.imageColor2,
+    input.imageColor3,
+    input.imageColor4,
+    input.imageColor5
+  ]
+  return palette.map((orig, i) => (current[i] || '').trim() || orig)
+}
+
+function seedWithLockedColors(
+  seeded: UploadedImageColorSeed,
+  input: BaseLayerRescanInput
+): UploadedImageColorSeed {
+  const palette = uploadPalette(input)
+  if (!palette.length) return seeded
+  const slots = lockedSlotColors(input, palette)
+  return {
+    ...seeded,
+    imagePalette: palette,
+    imageColor1: slots[0] ?? '',
+    imageColor2: slots[1] ?? '',
+    imageColor3: slots[2] ?? '',
+    imageColor4: slots[3] ?? '',
+    imageColor5: slots[4] ?? ''
+  }
+}
+/**
+ * Rank brush strokes and other base-layer paint by pixel count and match them
+ * onto Color 1–5. Those slots stay the colours from when the image was uploaded.
+ */
+export async function rescanBaseLayerColors(
+  input: BaseLayerRescanInput
+): Promise<BaseLayerRescanResult | null> {
+  const source = input.imageDataUrl
+  if (!source) return null
+  const base = input.session?.vectors?.find(isBaseImageVector)
+  const strokes = base?.paintStrokes
+  const box = base ? stampBoxOf(base) : null
+  const planes = baseLayerPlanes(input.session)
+  const hasStrokes = !!strokes?.some((s) => s.pts.length > 0)
+  const hasOverlay = !!(
+    box &&
+    ((planes.below && (await pngBoxHasOpaque(planes.below, box))) ||
+      (planes.above && (await pngBoxHasOpaque(planes.above, box))))
+  )
+  if (!hasStrokes && !hasOverlay) {
+    const seeded = await seedUploadedImageColors(source)
+    const palette = uploadPalette(input)
+    const kept = palette.length
+      ? seedWithLockedColors(
+          {
+            ...seeded,
+            imageColorMarkPng: input.imageColorMarkPng || seeded.imageColorMarkPng,
+            imageColorRegionPng: input.imageColorRegionPng || seeded.imageColorRegionPng
+          },
+          input
+        )
+      : seeded
+    return { patch: finishUploadedImageSeed(kept, input), session: input.session }
+  }
+  const visible = await resolveImageDataUrl({
+    imageDataUrl: source,
+    imageUseOriginalColors: input.imageUseOriginalColors,
+    imagePalette: input.imagePalette,
+    imageColor1: input.imageColor1,
+    imageColor2: input.imageColor2,
+    imageColor3: input.imageColor3,
+    imageColor4: input.imageColor4,
+    imageColor5: input.imageColor5,
+    imageColorMarkPng: input.imageColorMarkPng,
+    imageColorRegionPng: input.imageColorRegionPng,
+    imageUnmarkedColorSlot: input.imageUnmarkedColorSlot
+  })
+  let composite = visible || source
+  if (visible) {
+    const img = await loadCachedImage(visible)
+    if (img?.width && img?.height) {
+      const canvas = document.createElement('canvas')
+      canvas.width = img.width
+      canvas.height = img.height
+      const ctx = canvas.getContext('2d')
+      if (ctx) {
+        await drawPlaneInBox(ctx, planes.below, box, canvas.width, canvas.height)
+        ctx.drawImage(img, 0, 0)
+        await drawPlaneInBox(ctx, planes.above, box, canvas.width, canvas.height)
+        if (strokes?.length) {
+          drawPaintStrokesInBox(
+            ctx,
+            { x: 0, y: 0, w: canvas.width, h: canvas.height },
+            strokes.map((s) => ({
+              ...s,
+              tip: (s.tip === 'flat' || s.tip === 'calligraphy' ? 'round' : s.tip) as BrushTip
+            }))
+          )
+        }
+        composite = canvas.toDataURL('image/png')
+      }
+    }
+  }
+  const histogram = composite ? await scanImagePalette(composite) : []
+  if (!histogram.length) {
+    const seeded = await seedUploadedImageColors(source)
+    const finished = finishUploadedImageSeed(seedWithLockedColors(seeded, input), input)
+    return { patch: finished, session: input.session }
+  }
+  const slotColors = lockedSlotColors(input, histogram)
+  const marked = await buildDefaultColorMarks(visible || source, slotColors, 140)
+  const regionMap = await buildImageRegions(visible || source)
+  const seeded = seedWithLockedColors(
+    {
+      imageDataUrl: source,
+      imagePalette: slotColors,
+      imageUseOriginalColors: true as const,
+      imageColor1: slotColors[0] ?? '',
+      imageColor2: slotColors[1] ?? '',
+      imageColor3: slotColors[2] ?? '',
+      imageColor4: slotColors[3] ?? '',
+      imageColor5: slotColors[4] ?? '',
+      imageColorMarkPng: marked ? encodeColorMarkPng(marked.marks, marked.w, marked.h) : '',
+      imageColorRegionPng: regionMap
+        ? encodeRegionPng(regionMap.regions, regionMap.w, regionMap.h)
+        : input.imageColorRegionPng || '',
+      imageUnmarkedColorSlot: undefined
+    },
+    input
+  )
+  const finished = finishUploadedImageSeed(seeded, input)
+  const slots = [
+    finished.imageColor1,
+    finished.imageColor2,
+    finished.imageColor3,
+    finished.imageColor4,
+    finished.imageColor5
+  ]
+  let session = input.session
+  if (session) {
+    const before = (session.vectors ?? [])
+      .filter(isBaseImageVector)
+      .flatMap((v) => v.paintStrokes ?? [])
+      .filter((s) => s.tool !== 'eraser')
+      .map((s) => s.color)
+    session = snapBaseStrokesToSlots(session, slots, Number.POSITIVE_INFINITY)
+    const after = (session.vectors ?? [])
+      .filter(isBaseImageVector)
+      .flatMap((v) => v.paintStrokes ?? [])
+      .filter((s) => s.tool !== 'eraser')
+      .map((s) => s.color)
+    if (box && before.length === after.length) {
+      session = await rewireBaseRaster(session, box, before, after)
+    }
+    if (box) {
+      const extras = histogram.filter(
+        (color) => color && !slots.some((slot) => sameSolidColor(color, slot))
+      )
+      for (const color of extras) {
+        let best = ''
+        let bestDist = Infinity
+        for (const slot of slots) {
+          const d = colorDist(color, slot)
+          if (d < bestDist) {
+            bestDist = d
+            best = slot
+          }
+        }
+        if (best) session = await rewireBaseRaster(session, box, [color], [best])
+      }
+    }
+  }
+  return { patch: finished, session }
+}
+
 export async function setImageProxySlotColor(
   item: LineObj,
   slot: number,
@@ -1143,9 +1588,11 @@ export async function setImageProxySlotColor(
     | 'imageColor3'
     | 'imageColor4'
     | 'imageColor5'
+  const previous = (item[key] || item.imagePalette?.[slot - 1] || '').trim()
   return refreshStampFromMarks({
     ...item,
     [key]: hex,
-    imageUseOriginalColors: false
+    imageUseOriginalColors: false,
+    paintStrokes: retintMatchingStrokes(item.paintStrokes, [previous], [hex])
   })
 }

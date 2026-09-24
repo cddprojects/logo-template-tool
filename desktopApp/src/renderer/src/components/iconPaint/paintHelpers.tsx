@@ -151,6 +151,38 @@ export function strokeBrushTip(
   }
 }
 
+/** Brush/eraser ink in a stamp box. `pts` are 0–1 inside that box. */
+export function drawPaintStrokesInBox(
+  ctx: CanvasRenderingContext2D,
+  box: { x: number; y: number; w: number; h: number },
+  strokes: { tool: 'brush' | 'eraser'; pts: { x: number; y: number }[]; size: number; color: string; tip: BrushTip }[],
+  opts?: { brushesOnly?: boolean }
+): void {
+  const x = box.x
+  const y = box.y
+  const w = Math.max(1, box.w)
+  const h = Math.max(1, box.h)
+  for (const stroke of strokes) {
+    if (opts?.brushesOnly && stroke.tool === 'eraser') continue
+    const points = stroke.pts.map((p) => ({ x: x + p.x * w, y: y + p.y * h }))
+    if (!points.length) continue
+    const brushSize = Math.max(0.5, stroke.size * Math.min(w, h))
+    const erase = stroke.tool === 'eraser'
+    if (points.length === 1) {
+      stampBrushTip(ctx, stroke.tip, points[0].x, points[0].y, brushSize, stroke.color, erase)
+      continue
+    }
+    for (let i = 1; i < points.length; i++) {
+      strokeBrushTip(
+        ctx, stroke.tip,
+        points[i - 1].x, points[i - 1].y,
+        points[i].x, points[i].y,
+        brushSize, stroke.color, erase
+      )
+    }
+  }
+}
+
 export function strokeBrushTipOutline(p: CanvasRenderingContext2D, tip: BrushTip, x: number, y: number, brushSize: number): void {
   const r = Math.max(1, brushSize / 2)
   p.beginPath()

@@ -11,6 +11,7 @@ import {
 } from './paintVectorRender'
 import { reshapeIsApplied } from './paintReshape'
 import { takeCanvas, releaseCanvas } from './canvasPool'
+import { drawPaintStrokesInBox, type BrushTip } from '../components/iconPaint/paintHelpers'
 
 export type { InnerContentDecor }
 
@@ -744,6 +745,46 @@ async function drawOverlayLayers(
   await drawScaledPng(ctx, session.contentPng, x, y, size, session, shapeFallback)
 }
 
+/** Brush ink on the base image, drawn above live Color 1–5 so a slot edit can retint it. */
+function drawBaseImageBrushStrokes(
+  ctx: CanvasRenderingContext2D,
+  session: PaintSession,
+  x: number,
+  y: number,
+  size: number,
+  layer: PaintLayerId,
+  shapeFallback?: number
+): void {
+  if (layer !== 'content') return
+  const items = (session.vectors ?? []).filter(
+    (v) =>
+      (v.contentBound || v.contentProxySlot) &&
+      v.paintStrokes?.some((s) => s.tool !== 'eraser') &&
+      v.pts &&
+      v.pts.length >= 2
+  )
+  if (!items.length) return
+  ctx.save()
+  applyPaintSpaceTransform(ctx, session, x, y, size, shapeFallback)
+  for (const v of items) {
+    const a = v.pts![0]
+    const b = v.pts![1]
+    const strokes = (v.paintStrokes ?? []).filter((s) => s.tool !== 'eraser')
+    drawPaintStrokesInBox(
+      ctx,
+      {
+        x: Math.min(a.x, b.x),
+        y: Math.min(a.y, b.y),
+        w: Math.abs(b.x - a.x),
+        h: Math.abs(b.y - a.y)
+      },
+      strokes.map((s) => ({ ...s, tip: s.tip as BrushTip })),
+      { brushesOnly: true }
+    )
+  }
+  ctx.restore()
+}
+
 /**
  * Draw one paint layer's decorations (overlay + vectors flatten) at the correct
  * z-slot: Outer after live Outer / before Inner; Inner after live Inner.
@@ -765,6 +806,7 @@ export async function applyPaintLayerDecorations(
     // Proxies: overlays only until next Paint save regenerates decorations.
     const png = layer === 'container' ? session.containerPng : session.contentPng
     await drawScaledPng(ctx, png, x, y, size, session, shapeFallback)
+    drawBaseImageBrushStrokes(ctx, session, x, y, size, layer, shapeFallback)
     return
   }
 
@@ -790,6 +832,8 @@ export async function applyPaintLayerDecorations(
     // Pre-layered sessions: fall back to raw overlay for this layer only.
     await drawScaledPng(ctx, session.containerPng, x, y, size, session, shapeFallback)
   }
+
+  drawBaseImageBrushStrokes(ctx, session, x, y, size, layer, shapeFallback)
 
   if (layer === 'content' && shouldRenderContentVectorsLive(session)) {
     const liveVectors = contentVectorsForLiveRender(session.vectors)

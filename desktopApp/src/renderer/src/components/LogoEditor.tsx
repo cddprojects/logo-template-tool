@@ -1424,6 +1424,16 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                   imageColorRegionPng={faviconContent.imageColorRegionPng}
                   imageUnmarkedColorSlot={faviconContent.imageUnmarkedColorSlot}
                   imageKeepColors={faviconContent.imageKeepColors}
+                  paintSession={matchingFaviconVariant?.config.paintSession}
+                  onPaintSession={(session) => {
+                    if (!onFaviconChange || !matchingFaviconVariant) return
+                    const id = matchingFaviconVariant.id
+                    onFaviconChange(
+                      faviconVariantsRef.current.map((v) =>
+                        v.id === id ? { ...v, config: { ...v.config, paintSession: session } } : v
+                      )
+                    )
+                  }}
                   onChange={(patch) => patchMatchingFaviconContent(patch)}
                 />
               </>
@@ -1584,6 +1594,8 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                       imageColorRegionPng={safeConfig.icon.imageColorRegionPng}
                       imageUnmarkedColorSlot={safeConfig.icon.imageUnmarkedColorSlot}
                       imageKeepColors={safeConfig.icon.imageKeepColors}
+                      paintSession={safeConfig.icon.paintSession}
+                      onPaintSession={(session) => setIcon({ paintSession: session })}
                       onChange={(patch) => setIcon(patch)}
                     />
                   </>

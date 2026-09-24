@@ -1450,6 +1450,8 @@ export function FaviconEditor({
                   imageColorRegionPng={config.content.imageColorRegionPng}
                   imageUnmarkedColorSlot={config.content.imageUnmarkedColorSlot}
                   imageKeepColors={config.content.imageKeepColors}
+                  paintSession={config.paintSession}
+                  onPaintSession={(session) => updateConfig({ paintSession: session })}
                   onChange={(patch) => setContent(patch)}
                 />
               </>
