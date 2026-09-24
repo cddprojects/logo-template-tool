@@ -2133,14 +2133,15 @@ export function ImageRecolorControls({
           <span className="text-xs text-muted">Image colours</span>
           <RowInfo label="Scan and rescan colours">
             <p className="font-semibold">Scan / Rescan</p>
-            <p className="mt-0.5">Reads the base image together with brush strokes and other paint on that base layer. New paint is matched onto Color 1–5 by how many pixels it covers. Those slots stay the colours from when the image was first uploaded.</p>
+            <p className="mt-0.5">Reads the base image together with brush strokes and other paint on that base layer. Colours are ranked by how many pixels they cover, then Color 1–5 are rewired to the largest ones.</p>
             <div className="mt-2 border-t border-border pt-2">
               <p className="font-semibold">Before rescan</p>
               <p className="mt-0.5">Changing a Color 1–5 slot recolours the image. A brush stroke stays as it is, unless that stroke already uses the same colour — then the stroke changes with the slot.</p>
             </div>
             <div className="mt-2 border-t border-border pt-2">
               <p className="font-semibold">Color 1–5</p>
-              <p className="mt-0.5">Keep color off: Color 1–5 stay the colours from the upload. Rescan matches new paint onto them.</p>
+              <p className="mt-0.5">Keep color off: Color 1–5 become the colours found, including brush strokes and other base-layer paint.</p>
+              <p className="mt-1">Original colors on, or switched off while Keep color is off: Color 1–5 go back to the colours from the first upload.</p>
               <p className="mt-1">Keep color on: Color 1–5 stay and fill the new sections.</p>
               <p className="mt-1">Original colors stays as you set it, so the picture updates when that switch is off.</p>
             </div>
@@ -2151,7 +2152,7 @@ export function ImageRecolorControls({
           onClick={scan}
           disabled={scanning || bleeding || smoothing || assigningRest}
           className="px-2 py-1 rounded-lg text-[10px] font-medium bg-surface3 text-muted hover:text-text border border-border disabled:opacity-50 transition-colors"
-          title="Match base-layer paint onto the original Color 1–5"
+          title="Rank base-layer colours, including brush strokes, and rewire Color 1–5"
         >
           {scanning ? 'Scanning…' : imagePalette.length ? 'Rescan colours' : 'Scan colours'}
         </button>
@@ -2168,8 +2169,9 @@ export function ImageRecolorControls({
                 <p className="mt-1">The new image is still split into sections. These Color 1–5 stay and fill those sections.</p>
                 <div className="mt-2 border-t border-border pt-2">
                   <p className="font-semibold">Original colors</p>
-                  <p className="mt-0.5">On: the picture keeps the colours from the file. Color 1–5 do not recolour it.</p>
-                  <p className="mt-1">Off: Color 1–5 replace the scanned colours on the image.</p>
+                  <p className="mt-0.5">On: the picture keeps the colours from the file, and Color 1–5 are the colours from the first upload.</p>
+                  <p className="mt-1">Off, with Keep color off: Color 1–5 return to those first-upload colours, then replace them on the image.</p>
+                  <p className="mt-1">Off, with Keep color on: Color 1–5 stay as they are.</p>
                 </div>
               </RowInfo>
             }
@@ -2209,7 +2211,14 @@ export function ImageRecolorControls({
                     })
                     return
                   }
-                  onChange({ imageUseOriginalColors: true })
+                  onChange({
+                    imageUseOriginalColors: true,
+                    imageColor1: (imagePalette[0] || '').trim(),
+                    imageColor2: (imagePalette[1] || '').trim(),
+                    imageColor3: (imagePalette[2] || '').trim(),
+                    imageColor4: (imagePalette[3] || '').trim(),
+                    imageColor5: (imagePalette[4] || '').trim()
+                  })
                 }}
                 className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${
                   imageUseOriginalColors ? 'bg-accent' : 'bg-surface3 border border-border'

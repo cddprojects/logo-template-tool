@@ -1400,10 +1400,7 @@ function uploadPalette(input: BaseLayerRescanInput): string[] {
   return (input.imagePalette ?? []).map((c) => c.trim()).filter(Boolean).slice(0, 5)
 }
 
-/** Color 1–5 from the first upload. Later edits stay; a rescan must not replace them. */
-function lockedSlotColors(input: BaseLayerRescanInput, fallback: string[]): string[] {
-  const palette = uploadPalette(input)
-  if (!palette.length) return fallback.slice(0, 5)
+function currentSlotColors(input: BaseLayerRescanInput, fallback: string[]): string[] {
   const current = [
     input.imageColor1,
     input.imageColor2,
@@ -1411,29 +1408,34 @@ function lockedSlotColors(input: BaseLayerRescanInput, fallback: string[]): stri
     input.imageColor4,
     input.imageColor5
   ]
-  return palette.map((orig, i) => (current[i] || '').trim() || orig)
+  return [0, 1, 2, 3, 4].map((i) => (current[i] || '').trim() || fallback[i] || '')
 }
 
-function seedWithLockedColors(
+/** First-upload colours. Rescan must not replace this list. */
+function withFirstPalette(
   seeded: UploadedImageColorSeed,
   input: BaseLayerRescanInput
 ): UploadedImageColorSeed {
   const palette = uploadPalette(input)
   if (!palette.length) return seeded
-  const slots = lockedSlotColors(input, palette)
+  return { ...seeded, imagePalette: palette }
+}
+
+function slotsFromPalette(palette: string[]): Pick<
+  UploadedImageColorSeed,
+  'imageColor1' | 'imageColor2' | 'imageColor3' | 'imageColor4' | 'imageColor5'
+> {
   return {
-    ...seeded,
-    imagePalette: palette,
-    imageColor1: slots[0] ?? '',
-    imageColor2: slots[1] ?? '',
-    imageColor3: slots[2] ?? '',
-    imageColor4: slots[3] ?? '',
-    imageColor5: slots[4] ?? ''
+    imageColor1: palette[0] ?? '',
+    imageColor2: palette[1] ?? '',
+    imageColor3: palette[2] ?? '',
+    imageColor4: palette[3] ?? '',
+    imageColor5: palette[4] ?? ''
   }
 }
 /**
- * Rank brush strokes and other base-layer paint by pixel count and match them
- * onto Color 1–5. Those slots stay the colours from when the image was uploaded.
+ * Rank brush strokes and other base-layer paint by pixel count and rewire Color 1–5.
+ * The first-upload palette stays, and is what Original colors uses.
  */
 export async function rescanBaseLayerColors(
   input: BaseLayerRescanInput
@@ -1453,16 +1455,17 @@ export async function rescanBaseLayerColors(
   if (!hasStrokes && !hasOverlay) {
     const seeded = await seedUploadedImageColors(source)
     const palette = uploadPalette(input)
-    const kept = palette.length
-      ? seedWithLockedColors(
-          {
+    const kept = withFirstPalette(
+      palette.length && input.imageUseOriginalColors !== false
+        ? {
             ...seeded,
+            ...slotsFromPalette(palette),
             imageColorMarkPng: input.imageColorMarkPng || seeded.imageColorMarkPng,
             imageColorRegionPng: input.imageColorRegionPng || seeded.imageColorRegionPng
-          },
-          input
-        )
-      : seeded
+          }
+        : seeded,
+      input
+    )
     return { patch: finishUploadedImageSeed(kept, input), session: input.session }
   }
   const visible = await resolveImageDataUrl({
@@ -1507,16 +1510,22 @@ export async function rescanBaseLayerColors(
   const histogram = composite ? await scanImagePalette(composite) : []
   if (!histogram.length) {
     const seeded = await seedUploadedImageColors(source)
-    const finished = finishUploadedImageSeed(seedWithLockedColors(seeded, input), input)
+    const finished = finishUploadedImageSeed(withFirstPalette(seeded, input), input)
     return { patch: finished, session: input.session }
   }
-  const slotColors = lockedSlotColors(input, histogram)
+  const first = uploadPalette(input)
+  const useOriginal = input.imageUseOriginalColors !== false
+  const slotColors = useOriginal
+    ? (first.length ? first : histogram)
+    : input.imageKeepColors
+      ? currentSlotColors(input, first.length ? first : histogram)
+      : histogram
   const marked = await buildDefaultColorMarks(visible || source, slotColors, 140)
   const regionMap = await buildImageRegions(visible || source)
-  const seeded = seedWithLockedColors(
+  const seeded = withFirstPalette(
     {
       imageDataUrl: source,
-      imagePalette: slotColors,
+      imagePalette: first.length ? first : histogram,
       imageUseOriginalColors: true as const,
       imageColor1: slotColors[0] ?? '',
       imageColor2: slotColors[1] ?? '',
@@ -1531,7 +1540,10 @@ export async function rescanBaseLayerColors(
     },
     input
   )
-  const finished = finishUploadedImageSeed(seeded, input)
+  let finished = finishUploadedImageSeed(seeded, input)
+  if (useOriginal && first.length) {
+    finished = { ...finished, imagePalette: first, ...slotsFromPalette(first) }
+  }
   const slots = [
     finished.imageColor1,
     finished.imageColor2,
@@ -1546,7 +1558,12 @@ export async function rescanBaseLayerColors(
       .flatMap((v) => v.paintStrokes ?? [])
       .filter((s) => s.tool !== 'eraser')
       .map((s) => s.color)
-    session = snapBaseStrokesToSlots(session, slots, Number.POSITIVE_INFINITY)
+    const rewireSlots = !useOriginal && !input.imageKeepColors
+    session = snapBaseStrokesToSlots(
+      session,
+      slots,
+      rewireSlots ? Number.POSITIVE_INFINITY : 48
+    )
     const after = (session.vectors ?? [])
       .filter(isBaseImageVector)
       .flatMap((v) => v.paintStrokes ?? [])
@@ -1555,7 +1572,7 @@ export async function rescanBaseLayerColors(
     if (box && before.length === after.length) {
       session = await rewireBaseRaster(session, box, before, after)
     }
-    if (box) {
+    if (box && rewireSlots) {
       const extras = histogram.filter(
         (color) => color && !slots.some((slot) => sameSolidColor(color, slot))
       )
