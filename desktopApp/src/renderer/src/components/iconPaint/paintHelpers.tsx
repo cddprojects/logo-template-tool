@@ -439,6 +439,11 @@ export interface LineObj {
   rasterEdited?: boolean
   /** Original pixels for Match / Color 1–5 (contentBound uploaded image). */
   imageSourceDataUrl?: string
+  /**
+   * Stamp pixels before the opacity slider rewrote alpha.
+   * Later opacity changes scale this, so 0% can return to 100% without undo.
+   */
+  inkSourceDataUrl?: string
   imageUseOriginalColors?: boolean
   imagePalette?: string[]
   imageColor1?: string
@@ -1622,11 +1627,11 @@ export function marqueeFloatRotatePinPoints(f: MarqueeFloatLike): { anchor: Pt; 
   const dx = anchor.x - dp.x
   const dy = anchor.y - dp.y
   const len = Math.hypot(dx, dy)
-  const tip =
+  const outward =
     len > 0.5
       ? { x: anchor.x + (dx / len) * ROTATE_PIN_LEN, y: anchor.y + (dy / len) * ROTATE_PIN_LEN }
       : { x: anchor.x, y: anchor.y - ROTATE_PIN_LEN }
-  return { anchor, tip }
+  return { anchor, tip: visibleRotatePinTip(anchor, outward) }
 }
 
 export function drawRotatePinAt(p: CanvasRenderingContext2D, anchor: Pt, tip: Pt) {
@@ -3529,7 +3534,9 @@ export function applyStampColorKeepHoles(item: LineObj, nextColor: string): Part
   const b = item.pts[1]
   const w = Math.max(1, Math.round(Math.abs(b.x - a.x)))
   const h = Math.max(1, Math.round(Math.abs(b.y - a.y)))
-  const src = ensureStampImage(item.imageDataUrl)
+  // Always scale the pre-opacity ink. The live bitmap may already be 0% alpha.
+  const inkUrl = item.inkSourceDataUrl || item.imageDataUrl
+  const src = ensureStampImage(inkUrl)
   const canvas = document.createElement('canvas')
   canvas.width = w
   canvas.height = h
@@ -3538,7 +3545,7 @@ export function applyStampColorKeepHoles(item: LineObj, nextColor: string): Part
     ctx.drawImage(src, 0, 0, w, h)
   } else {
     // Decode pending — fall back to vector-style colour only.
-    return { color: nextColor }
+    return { color: nextColor, inkSourceDataUrl: item.inkSourceDataUrl || item.imageDataUrl }
   }
   const img = ctx.getImageData(0, 0, w, h)
   const d = img.data
@@ -3548,7 +3555,7 @@ export function applyStampColorKeepHoles(item: LineObj, nextColor: string): Part
   const fb = parseInt(fill.slice(5, 7), 16)
   const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
   for (let i = 0; i < d.length; i += 4) {
-    if (d[i + 3] <= 8) continue
+    if (d[i + 3] === 0) continue
     const srcA = d[i + 3]
     d[i] = fr
     d[i + 1] = fg
@@ -3560,7 +3567,11 @@ export function applyStampColorKeepHoles(item: LineObj, nextColor: string): Part
   const imageDataUrl = canvas.toDataURL('image/png')
   const placed = ensureStampImage(imageDataUrl)
   if (placed) stampStrokeLiveCache.set(item.id, placed)
-  const patch: Partial<LineObj> = { imageDataUrl, color: fill }
+  const patch: Partial<LineObj> = {
+    imageDataUrl,
+    color: fill,
+    inkSourceDataUrl: item.inkSourceDataUrl || inkUrl
+  }
   // Keep SVG source in sync so keepStrokeOnResize re-rasters use the new colour
   // (otherwise resize / live SVG path snaps back to the placement tint).
   if (item.sourceSvgMarkup) {
@@ -4996,6 +5007,55 @@ export const ROTATE_PIN_LEN = 30
 export const ROTATE_PIN_HIT_HEAD = 20
 export const ROTATE_PIN_HIT_STEM = 14
 export const ROTATE_PIN_HIT_PAD = 10
+/** Head radius plus stroke, so a pulled-in pin stays fully on the canvas. */
+const ROTATE_PIN_INSET = 10
+
+let rotatePinFrame = { w: 0, h: 0 }
+
+/** Canvas the rotate pin must stay inside. A full-canvas object otherwise parks it off screen. */
+export function setRotatePinFrame(w: number, h: number): void {
+  rotatePinFrame = { w, h }
+}
+
+function pinInsideFrame(p: Pt): boolean {
+  const { w, h } = rotatePinFrame
+  if (w < ROTATE_PIN_INSET * 2 || h < ROTATE_PIN_INSET * 2) return true
+  return p.x >= ROTATE_PIN_INSET && p.y >= ROTATE_PIN_INSET && p.x <= w - ROTATE_PIN_INSET && p.y <= h - ROTATE_PIN_INSET
+}
+
+/**
+ * Keep the pin head on the canvas. When the outward pin would leave the frame
+ * (a full-canvas object), flip it back through the anchor by the same length.
+ */
+export function visibleRotatePinTip(anchor: Pt, tip: Pt): Pt {
+  if (pinInsideFrame(tip)) return tip
+  const flipped = { x: anchor.x * 2 - tip.x, y: anchor.y * 2 - tip.y }
+  if (pinInsideFrame(flipped)) return flipped
+  const { w, h } = rotatePinFrame
+  if (w < 2 || h < 2) return tip
+  const dx = anchor.x - tip.x
+  const dy = anchor.y - tip.y
+  const minX = ROTATE_PIN_INSET
+  const minY = ROTATE_PIN_INSET
+  const maxX = w - ROTATE_PIN_INSET
+  const maxY = h - ROTATE_PIN_INSET
+  const ts: number[] = []
+  if (Math.abs(dx) > 1e-6) ts.push((minX - tip.x) / dx, (maxX - tip.x) / dx)
+  if (Math.abs(dy) > 1e-6) ts.push((minY - tip.y) / dy, (maxY - tip.y) / dy)
+  for (const t of ts.filter((n) => n > 0).sort((a, b) => a - b)) {
+    const p = { x: tip.x + dx * t, y: tip.y + dy * t }
+    if (p.x >= minX - 0.5 && p.y >= minY - 0.5 && p.x <= maxX + 0.5 && p.y <= maxY + 0.5) {
+      return {
+        x: Math.min(maxX, Math.max(minX, p.x)),
+        y: Math.min(maxY, Math.max(minY, p.y))
+      }
+    }
+  }
+  return {
+    x: Math.min(maxX, Math.max(minX, tip.x)),
+    y: Math.min(maxY, Math.max(minY, tip.y))
+  }
+}
 
 export function rotatePinAnchor(l: LineObj): Pt {
   const quad = l.reshapeQuad
@@ -5014,9 +5074,16 @@ export function rotatePinTip(l: LineObj): Pt {
     const dx = anchor.x - cx
     const dy = anchor.y - cy
     const len = Math.hypot(dx, dy) || 1
-    return { x: anchor.x + (dx / len) * ROTATE_PIN_LEN, y: anchor.y + (dy / len) * ROTATE_PIN_LEN }
+    return visibleRotatePinTip(anchor, {
+      x: anchor.x + (dx / len) * ROTATE_PIN_LEN,
+      y: anchor.y + (dy / len) * ROTATE_PIN_LEN
+    })
   }
-  return mapObjDisplayPt({ ...objTopCenter(l), y: objTopCenter(l).y - ROTATE_PIN_LEN }, l)
+  const top = objTopCenter(l)
+  return visibleRotatePinTip(
+    mapObjDisplayPt(top, l),
+    mapObjDisplayPt({ ...top, y: top.y - ROTATE_PIN_LEN }, l)
+  )
 }
 
 /** Hit-test the rotate pin head and stem (generous targets so empty-canvas deselect doesn't steal the click). */
@@ -5037,7 +5104,7 @@ export function contentRotatePinHit(
   pt: Pt
 ): boolean {
   const anchor = { x: bounds.x + bounds.w / 2, y: bounds.y }
-  const tip = { x: anchor.x, y: anchor.y - ROTATE_PIN_LEN }
+  const tip = visibleRotatePinTip(anchor, { x: anchor.x, y: anchor.y - ROTATE_PIN_LEN })
   if (dist(pt, tip) <= ROTATE_PIN_HIT_HEAD) return true
   return distPtToSegment(pt, anchor, tip) <= ROTATE_PIN_HIT_STEM
 }
@@ -5073,9 +5140,12 @@ export function rectRotatePinTip(
   const dy = anchor.y - c.y
   const len = Math.hypot(dx, dy)
   if (len > 0.5) {
-    return { x: anchor.x + (dx / len) * ROTATE_PIN_LEN, y: anchor.y + (dy / len) * ROTATE_PIN_LEN }
+    return visibleRotatePinTip(anchor, {
+      x: anchor.x + (dx / len) * ROTATE_PIN_LEN,
+      y: anchor.y + (dy / len) * ROTATE_PIN_LEN
+    })
   }
-  return { x: anchor.x, y: anchor.y - ROTATE_PIN_LEN }
+  return visibleRotatePinTip(anchor, { x: anchor.x, y: anchor.y - ROTATE_PIN_LEN })
 }
 
 export function rectRotatePinHit(

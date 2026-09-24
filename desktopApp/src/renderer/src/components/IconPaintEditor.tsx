@@ -268,6 +268,7 @@ import {
   serializeHoleMaskPng,
   serializeSeeThroughMaskPng,
   setLocalPunchFromFilled,
+  setRotatePinFrame,
   setMarqueeFloatPosition,
   ShapeMenu,
   shapeSupportsRadius,
@@ -277,6 +278,7 @@ import {
   stampLocalRect,
   stampRenderDataUrl,
   stampStrokeLiveCache,
+  visibleRotatePinTip,
   stampStrokeRelockPaused,
   strokeBrushTip,
   strokeBrushTipOutline,
@@ -708,6 +710,7 @@ export function IconPaintEditor({
 
   const W = resolution
   const H = resolution
+  setRotatePinFrame(W, H)
   const innerDraw = Math.max(16, innerDrawSize ?? W)
   /** Visible container on the paint canvas (shadow inset only — not Size % / content pad). */
   const containerDraw = Math.max(16, paintOuterSize ?? innerDraw)
@@ -3019,7 +3022,7 @@ export function IconPaintEditor({
       p.stroke()
     }
     const anchor = { x: bounds.x + bounds.w / 2, y: bounds.y }
-    const pin = { x: anchor.x, y: anchor.y - ROTATE_PIN_LEN }
+    const pin = visibleRotatePinTip(anchor, { x: anchor.x, y: anchor.y - ROTATE_PIN_LEN })
     p.strokeStyle = '#10b981'
     p.beginPath()
     p.moveTo(anchor.x, anchor.y)
@@ -5800,19 +5803,36 @@ export function IconPaintEditor({
    */
   const applySelectedObjectColor = (item: LineObj, nextColor: string): Partial<LineObj> => {
     if (isTransparentPaintColor(nextColor)) {
-      return transparentObjectPatch(item, nextColor)
+      const patch = transparentObjectPatch(item, nextColor)
+      if (item.type === 'stamp' && item.imageDataUrl && !item.inkSourceDataUrl) {
+        patch.inkSourceDataUrl = item.imageDataUrl
+      }
+      return patch
     }
+    // 0% replaced the object with a hole. Drop that hole and repaint from the
+    // original ink so raising opacity does not stay stuck at empty.
+    const fromZero = isTransparentPaintColor(item.color ?? '')
+    if (fromZero) clearObjectHoles(item as HoleItem)
     if (item.type === 'stamp' && item.imageDataUrl) {
-      return applyStampColorKeepHoles(item, nextColor)
+      return {
+        ...applyStampColorKeepHoles(item, nextColor),
+        punchThrough: fromZero ? false : hasPunchCoverage(item.id),
+        punchEnclosedHole: fromZero ? false : !!item.punchEnclosedHole,
+        holeMaskMode: fromZero ? undefined : item.holeMaskMode,
+        holeMaskPng: fromZero ? undefined : item.holeMaskPng,
+        seeThroughHoleMaskPng: fromZero ? undefined : item.seeThroughHoleMaskPng
+      }
     }
     return {
       color: nextColor,
       ...(item.type === 'poly' || item.type === 'shape' ? {} : { borderColor: nextColor }),
-      punchThrough: hasPunchCoverage(item.id),
-      punchEnclosedHole:
-        hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
+      punchThrough: fromZero ? false : hasPunchCoverage(item.id),
+      punchEnclosedHole: fromZero
+        ? false
+        : hasPunchCoverage(item.id) || hasSeeThroughCoverage(item.id)
           ? item.punchEnclosedHole
-          : false
+          : false,
+      holeMaskMode: fromZero ? undefined : item.holeMaskMode
     }
   }
 
