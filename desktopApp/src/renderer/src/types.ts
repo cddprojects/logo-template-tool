@@ -441,6 +441,8 @@ export interface PaintVector {
   thickness: number
   color: string
   fill?: boolean
+  /** Group id whose gradient this shape shares. Absent when the shape has its own colour. */
+  groupFillId?: string
   borderColor?: string
   borderWidth?: number
   borderRadius?: number

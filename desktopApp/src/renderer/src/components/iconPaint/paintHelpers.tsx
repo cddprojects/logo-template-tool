@@ -403,6 +403,11 @@ export interface LineObj {
   color: string
   /** poly & shape: closed + optionally filled */
   fill?: boolean
+  /**
+   * When set to a group id, this shape uses that group's gradient across the
+   * group's area. Cleared when the shape is selected on its own and recolored.
+   */
+  groupFillId?: string
   /** Stroke / border colour (poly, shape, and optionally lines). Falls back to `color`. */
   borderColor?: string
   /** Stroke / border width in px. Falls back to `thickness`. 0 = no border (fill-only shapes). */
@@ -2416,29 +2421,18 @@ export function scalePaintLineAround(l: LineObj, cx: number, cy: number, s: numb
   }
 }
 
-function placeStampBox(
+function stampPtsAt(
   cx: number,
   cy: number,
   w: number,
-  h: number,
-  canvas: number
+  h: number
 ): [{ x: number; y: number }, { x: number; y: number }] {
-  const limit = Math.max(8, canvas)
-  const maxEdge = limit * 0.96
-  if (w > maxEdge || h > maxEdge) {
-    const s = maxEdge / Math.max(w, h)
-    w *= s
-    h *= s
-  }
-  const halfW = w / 2
-  const halfH = h / 2
-  const x = Math.min(limit - halfW, Math.max(halfW, cx))
-  const y = Math.min(limit - halfH, Math.max(halfH, cy))
   return [
-    { x: x - halfW, y: y - halfH },
-    { x: x + halfW, y: y + halfH }
+    { x: cx - w / 2, y: cy - h / 2 },
+    { x: cx + w / 2, y: cy + h / 2 }
   ]
 }
+
 export function lineFromContentProxy(
   crop: { dataUrl: string; w: number; h: number },
   settings: OutsideContentSettings,
@@ -2464,7 +2458,7 @@ export function lineFromContentProxy(
   return {
     id: genId(),
     type: 'stamp',
-    pts: placeStampBox(cx, cy, w, h, resolution),
+    pts: stampPtsAt(cx, cy, w, h),
     startCap: 'none',
     endCap: 'none',
     dash: 'solid',
@@ -2492,14 +2486,12 @@ export function applyOutsideContentToProxy(
   const a = l.pts[0], b = l.pts[1]
   let w = Math.max(1, Math.abs((b?.x ?? 0) - (a?.x ?? 0)))
   let h = Math.max(1, Math.abs((b?.y ?? 0) - (a?.y ?? 0)))
-  const savedOnCanvas =
-    w >= 8 &&
-    h >= 8 &&
-    w <= resolution * 1.25 &&
-    h <= resolution * 1.25
+  // A previous paint box is the position the image already had. Do not shrink
+  // it or pull it back inside the canvas — that is a different size and place.
+  const savedBox = !!(a && b && w >= 1 && h >= 1)
   let pts: { x: number; y: number }[]
-  if (savedOnCanvas && a && b) {
-    pts = placeStampBox((a.x + b.x) / 2, (a.y + b.y) / 2, w, h, resolution)
+  if (savedBox) {
+    pts = [{ x: a.x, y: a.y }, { x: b.x, y: b.y }]
   } else {
     if (freshCrop || settings.sizeRatio != null) {
       const imageSquare =
@@ -2516,7 +2508,7 @@ export function applyOutsideContentToProxy(
     }
     const cx = resolution / 2 + off.x
     const cy = resolution / 2 + off.y
-    pts = placeStampBox(cx, cy, w, h, resolution)
+    pts = stampPtsAt(cx, cy, w, h)
   }
   return {
     ...l,
@@ -2945,7 +2937,26 @@ export function objTopCenter(l: LineObj): Pt {
   return { x: (minX + maxX) / 2, y: minY }
 }
 
-export function renderLineBase(ctx: CanvasRenderingContext2D, l: LineObj): void {
+export function renderLineBase(
+  ctx: CanvasRenderingContext2D,
+  l: LineObj,
+  shared?: { color: string; frame: { x: number; y: number; w: number; h: number } }
+): void {
+  // Build the gradient in canvas space before this shape's own rotation, so
+  // every shape in a group samples one gradient across the group's area.
+  const sharedPaint =
+    shared &&
+    (l.type === 'shape' || l.type === 'poly') &&
+    isGradientColor(shared.color)
+      ? resolveCanvasColor(
+          ctx,
+          shared.color,
+          shared.frame.x,
+          shared.frame.y,
+          Math.max(1, shared.frame.w),
+          Math.max(1, shared.frame.h)
+        )
+      : undefined
   const c = objCenter(l)
   const rot = l.rot ?? 0
   const sx = l.scaleX ?? 1
@@ -2956,11 +2967,11 @@ export function renderLineBase(ctx: CanvasRenderingContext2D, l: LineObj): void 
     ctx.rotate(rot)
     ctx.scale(sx, sy)
     ctx.translate(-c.x, -c.y)
-    renderLineBody(ctx, l)
+    renderLineBody(ctx, l, sharedPaint)
     ctx.restore()
     return
   }
-  renderLineBody(ctx, l)
+  renderLineBody(ctx, l, sharedPaint)
 }
 
 export function punchLocalBox(l: LineObj): { x: number; y: number; w: number; h: number } | null {
@@ -3728,7 +3739,14 @@ export function renderLineBodyThenHole(ctx: CanvasRenderingContext2D, l: LineObj
   destOutObjectPunch(ctx, l)
 }
 
-export function renderLine(ctx: CanvasRenderingContext2D, l: LineObj, opts?: { skipHole?: boolean }): void {
+export function renderLine(
+  ctx: CanvasRenderingContext2D,
+  l: LineObj,
+  opts?: {
+    skipHole?: boolean
+    sharedGradient?: { color: string; frame: { x: number; y: number; w: number; h: number } }
+  }
+): void {
   // Punch-mask stamps are hole operators, not visible pixels.
   if (l.punchMask) return
   // Punch in unwarped space, then reshape once — otherwise the hole mask stays
@@ -3762,7 +3780,7 @@ export function renderLine(ctx: CanvasRenderingContext2D, l: LineObj, opts?: { s
       renderLineWithReshape(c, l)
       return
     }
-    renderLineBase(c, l)
+    renderLineBase(c, l, opts?.sharedGradient)
     const supportsObjectPaint = (l.type === 'shape' || l.type === 'stamp') && !!l.paintStrokes?.length && l.pts.length >= 2
     if (!supportsObjectPaint) return
     const a = l.pts[0], b = l.pts[1]
@@ -3805,14 +3823,87 @@ export function renderLine(ctx: CanvasRenderingContext2D, l: LineObj, opts?: { s
   renderLineBodyThenHole(ctx, l, paintBody)
 }
 
+function shapeCoverageBox(l: LineObj): { x: number; y: number; w: number; h: number } | null {
+  if ((l.type !== 'shape' && l.type !== 'poly') || l.pts.length < 2) return null
+  const center = objCenter(l)
+  const rot = l.rot ?? 0
+  const corners: Pt[] =
+    l.type === 'shape'
+      ? [
+          l.pts[0],
+          l.pts[1],
+          { x: l.pts[0].x, y: l.pts[1].y },
+          { x: l.pts[1].x, y: l.pts[0].y }
+        ]
+      : l.pts
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  for (const p of corners) {
+    const q = rot ? rotatePt(p, center, rot) : p
+    minX = Math.min(minX, q.x)
+    minY = Math.min(minY, q.y)
+    maxX = Math.max(maxX, q.x)
+    maxY = Math.max(maxY, q.y)
+  }
+  if (!Number.isFinite(minX)) return null
+  return {
+    x: minX,
+    y: minY,
+    w: Math.max(1, maxX - minX),
+    h: Math.max(1, maxY - minY)
+  }
+}
+
+/** Union of shape/polygon bounds under a group, in canvas pixels. */
+function groupShapeCoverage(
+  group: LineObj,
+  all: LineObj[],
+  fillId?: string
+): { x: number; y: number; w: number; h: number } | null {
+  let minX = Infinity
+  let minY = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  const walk = (id: string) => {
+    for (const child of all) {
+      if (child.parentId !== id) continue
+      if (child.type === 'group') {
+        walk(child.id)
+        continue
+      }
+      if (fillId && child.groupFillId !== fillId) continue
+      const box = shapeCoverageBox(child)
+      if (!box) continue
+      minX = Math.min(minX, box.x)
+      minY = Math.min(minY, box.y)
+      maxX = Math.max(maxX, box.x + box.w)
+      maxY = Math.max(maxY, box.y + box.h)
+    }
+  }
+  walk(group.id)
+  if (!Number.isFinite(minX)) return null
+  return { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) }
+}
+
 export function renderGroup(
   ctx: CanvasRenderingContext2D,
   group: LineObj,
   all: LineObj[],
   visible?: (item: LineObj) => boolean,
-  applyGroupPaint = true
+  applyGroupPaint = true,
+  inheritedGradient?: {
+    id: string
+    color: string
+    frame: { x: number; y: number; w: number; h: number }
+  }
 ): void {
   if (group.pts.length < 2) return
+  const ownFrame = isGradientColor(group.color) ? groupShapeCoverage(group, all, group.id) : null
+  const ownGradient = ownFrame
+    ? { id: group.id, color: group.color, frame: ownFrame }
+    : null
   // Render and erase in an isolated surface. destination-out therefore affects
   // only this group's composite and can never punch through unrelated layers.
   const canvas = takeCanvas(ctx.canvas.width, ctx.canvas.height)
@@ -3826,9 +3917,18 @@ export function renderGroup(
       if (child.type === 'group') {
         // An unchecked group does not suppress checked descendants; it only
         // disables that group's own paint/edit surface.
-        renderGroup(layerCtx, child, all, visible, childVisible)
+        renderGroup(layerCtx, child, all, visible, childVisible, ownGradient ?? inheritedGradient)
       } else if (childVisible) {
-        renderLine(layerCtx, child)
+        const grouped =
+          (ownGradient && child.groupFillId === group.id ? ownGradient : null) ??
+          (inheritedGradient && child.groupFillId === inheritedGradient.id ? inheritedGradient : null)
+        renderLine(
+          layerCtx,
+          child,
+          grouped && (child.type === 'shape' || child.type === 'poly')
+            ? { sharedGradient: grouped }
+            : undefined
+        )
       }
     }
     if (!applyGroupPaint) {
@@ -4045,7 +4145,11 @@ export function punchObjectFromComposite(
   }
 }
 
-export function renderLineBody(ctx: CanvasRenderingContext2D, l: LineObj): void {
+export function renderLineBody(
+  ctx: CanvasRenderingContext2D,
+  l: LineObj,
+  sharedPaint?: string | CanvasGradient
+): void {
   if (l.type === 'text') { renderText(ctx, l); return }
   // Library / SVG stamp: draw the raster into the bounding box.
   if (l.type === 'stamp' && l.imageDataUrl && l.pts.length >= 2) {
@@ -4090,15 +4194,15 @@ export function renderLineBody(ctx: CanvasRenderingContext2D, l: LineObj): void 
   const t = lineBorderWidth(l)
   const br = lineBorderRadius(l)
   const dash = dashArrayFor(l.dash, Math.max(0.5, t || 1))
-  const paint = styleForColor(ctx, l.color, poly)
-  const borderPaint = styleForColor(ctx, lineBorderColor(l), poly)
+  const paint = sharedPaint ?? styleForColor(ctx, l.color, poly)
+  const borderPaint = sharedPaint ?? styleForColor(ctx, lineBorderColor(l), poly)
   // Preset shape: trace within its bounding box, optional fill + stroke, no caps.
   if (l.type === 'shape' && l.shape) {
     const a = l.pts[0], b = l.pts[1]
     const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
     const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y)
-    const shapePaint = resolveCanvasColor(ctx, l.color, x, y, Math.max(1, w), Math.max(1, h))
-    const shapeBorder = resolveCanvasColor(ctx, lineBorderColor(l), x, y, Math.max(1, w), Math.max(1, h))
+    const shapePaint = sharedPaint ?? resolveCanvasColor(ctx, l.color, x, y, Math.max(1, w), Math.max(1, h))
+    const shapeBorder = sharedPaint ?? resolveCanvasColor(ctx, lineBorderColor(l), x, y, Math.max(1, w), Math.max(1, h))
     ctx.save()
     ctx.beginPath()
     traceShape(ctx, l.shape, x, y, w, h, shapeSupportsRadius(l.shape) ? br : 0)

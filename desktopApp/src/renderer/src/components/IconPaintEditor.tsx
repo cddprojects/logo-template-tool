@@ -3211,8 +3211,13 @@ export function IconPaintEditor({
     }
     setLineDash(l.dash)
     setSize(lineBorderWidth(l) || l.thickness)
-    setColor(l.color)
-    setHexText(isGradientColor(l.color) ? firstSolidColor(l.color) : l.color)
+    const groupedFill = l.groupFillId
+      ? linesRef.current.find((item) => item.id === l.groupFillId && item.type === 'group')
+      : undefined
+    const shownColor =
+      groupedFill && isGradientColor(groupedFill.color) ? groupedFill.color : l.color
+    setColor(shownColor)
+    setHexText(isGradientColor(shownColor) ? firstSolidColor(shownColor) : shownColor)
     setBorderColor(lineBorderColor(l))
     setBorderRadius(lineBorderRadius(l))
     setKeepStrokeOnResize(l.keepStrokeOnResize ?? true)
@@ -5858,7 +5863,7 @@ export function IconPaintEditor({
     }
     return {
       color: nextColor,
-      ...(item.type === 'poly' || item.type === 'shape' ? {} : { borderColor: nextColor }),
+      borderColor: nextColor,
       punchThrough: fromZero ? false : hasPunchCoverage(item.id),
       punchEnclosedHole: fromZero
         ? false
@@ -5867,6 +5872,57 @@ export function IconPaintEditor({
           : false,
       holeMaskMode: fromZero ? undefined : item.holeMaskMode
     }
+  }
+
+  /**
+   * Colour / opacity follows the layer that is highlighted.
+   * A group gradient is shared across the group only when the group row is selected.
+   * A shape selected on its own keeps that colour in its own box.
+   */
+  const applyLiveColor = (nextColor: string) => {
+    const panel = [...selectedLayerIdsRef.current]
+      .map((id) => linesRef.current.find((l) => l.id === id))
+      .filter((l): l is LineObj => !!l && !l.marqueeItem)
+    const groups = panel.filter((l) => l.type === 'group')
+    const shapes = panel.filter((l) => l.type === 'shape' || l.type === 'poly')
+    if (shapes.length && !groups.length) {
+      const ids = new Set(shapes.map((shape) => shape.id))
+      commitLines(
+        linesRef.current.map((l) =>
+          ids.has(l.id)
+            ? { ...l, ...applySelectedObjectColor(l, nextColor), groupFillId: undefined }
+            : l
+        )
+      )
+      redrawLines()
+      drawHandles()
+      return
+    }
+    if (groups.length === 1 && !shapes.length) {
+      const group = groups[0]
+      const ids = descendantIds(group.id)
+      if (isGradientColor(nextColor)) {
+        commitLines(
+          linesRef.current.map((l) => {
+            if (l.id === group.id) return { ...l, color: nextColor, borderColor: nextColor }
+            if (!ids.has(l.id) || (l.type !== 'shape' && l.type !== 'poly')) return l
+            return { ...l, groupFillId: group.id }
+          })
+        )
+      } else {
+        commitLines(
+          linesRef.current.map((l) => {
+            if (l.id === group.id) return { ...l, color: nextColor, borderColor: nextColor }
+            if (!ids.has(l.id) || (l.type !== 'shape' && l.type !== 'poly')) return l
+            return { ...l, ...applySelectedObjectColor(l, nextColor), groupFillId: undefined }
+          })
+        )
+      }
+      redrawLines()
+      drawHandles()
+      return
+    }
+    updateSelectedLive((l) => applySelectedObjectColor(l, nextColor))
   }
 
   /**
@@ -5891,7 +5947,7 @@ export function IconPaintEditor({
       return {
         color: nextColor,
         ...(item.type === 'poly' || item.type === 'shape'
-          ? { fill: true }
+          ? { borderColor: nextColor }
           : item.type === 'stamp'
             ? {}
             : { borderColor: nextColor }),
@@ -5899,13 +5955,11 @@ export function IconPaintEditor({
         derivedSlotPunch: undefined
       }
     }
-    // Vector see-through: hide the fill; drop any prior punch silhouette.
+    // Vector see-through: hide fill and outline; drop any prior punch silhouette.
     clearObjectPunchMasks(item)
     return {
       color: nextColor,
-      ...(item.type === 'poly' || item.type === 'shape'
-        ? { fill: true }
-        : { borderColor: nextColor }),
+      borderColor: nextColor,
       punchThrough: false
     }
   }
@@ -11348,9 +11402,7 @@ export function IconPaintEditor({
                 const n = normalizeHex(e.target.value)
                 if (n) {
                   setColor(n)
-                  if (selectedIdRef.current) {
-                    updateSelectedLive((l) => applySelectedObjectColor(l, n))
-                  }
+                  if (selectedIdRef.current) applyLiveColor(n)
                 }
               }}
               onBlur={() => setHexText(color)}
@@ -11365,9 +11417,7 @@ export function IconPaintEditor({
               onChange={(c) => {
                 setColor(c)
                 if (!isGradientColor(c)) setHexText(c)
-                if (selectedIdRef.current) {
-                  updateSelectedLive((l) => applySelectedObjectColor(l, c))
-                }
+                if (selectedIdRef.current) applyLiveColor(c)
               }}
               onClose={() => {
                 setColorPopupOpen(false)
@@ -11387,9 +11437,7 @@ export function IconPaintEditor({
                 const c = withAlpha(color, Number(e.target.value))
                 setColor(c)
                 setHexText(c)
-                if (selectedIdRef.current) {
-                  updateSelectedLive((l) => applySelectedObjectColor(l, c))
-                }
+                if (selectedIdRef.current) applyLiveColor(c)
               }}
               onMouseUp={() => { if (selectedIdRef.current) pushHistory() }}
               className="w-24"
@@ -11483,14 +11531,40 @@ export function IconPaintEditor({
         )}
 
         {(shapeToolActive || fillableCtx) && (
-          <label className="flex items-center gap-1.5 text-[11px] text-muted cursor-pointer select-none shrink-0">
-            <input
-              type="checkbox"
-              checked={shapeFill}
-              onChange={(e) => { setShapeFill(e.target.checked); if (fillableCtx && selectedIdRef.current) updateSelected({ fill: e.target.checked }) }}
-            />
-            Fill shape
-          </label>
+          <div className="flex items-center gap-1 shrink-0">
+            <span className="text-[11px] text-muted">Shape</span>
+            <button
+              type="button"
+              onClick={() => {
+                setShapeFill(false)
+                const selected = linesRef.current.find((l) => l.id === selectedIdRef.current)
+                const width = Math.max(1, (selected ? lineBorderWidth(selected) : 0) || size || 4)
+                setSize(width)
+                if (fillableCtx && selectedIdRef.current) {
+                  updateSelected({ fill: false, borderWidth: width, thickness: width })
+                }
+              }}
+              className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
+                !shapeFill ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+              }`}
+              title="Draw the shape as an outline. Width sets the stroke."
+            >
+              Outline
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setShapeFill(true)
+                if (fillableCtx && selectedIdRef.current) updateSelected({ fill: true })
+              }}
+              className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
+                shapeFill ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
+              }`}
+              title="Fill the shape. Outline width can stay 0."
+            >
+              Fill
+            </button>
+          </div>
         )}
         {(tool === 'shape' || tool === 'freepoly' || editingShape || editingPoly ||
           (editingStamp && !!selectedObj?.sourceSvgMarkup)) && (

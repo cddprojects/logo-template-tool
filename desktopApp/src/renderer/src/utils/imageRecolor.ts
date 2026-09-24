@@ -175,12 +175,16 @@ export function imageReplacementColors(fields: {
 /**
  * Extract up to 5 dominant opaque colours from an image data URL.
  */
-export async function scanImagePalette(dataUrl: string, maxColors = MAX_PALETTE): Promise<string[]> {
+export async function scanImagePalette(
+  dataUrl: string,
+  maxColors = MAX_PALETTE,
+  maxDim = SCAN_MAX_DIM
+): Promise<string[]> {
   if (!dataUrl) return []
   const img = await loadCachedImage(dataUrl)
   if (!img || !img.width || !img.height) return []
 
-  const scale = Math.min(1, SCAN_MAX_DIM / Math.max(img.width, img.height))
+  const scale = Math.min(1, maxDim / Math.max(img.width, img.height))
   const w = Math.max(1, Math.round(img.width * scale))
   const h = Math.max(1, Math.round(img.height * scale))
   const canvas = document.createElement('canvas')

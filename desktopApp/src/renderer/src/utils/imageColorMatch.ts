@@ -1175,7 +1175,12 @@ export function retintMatchingStrokes<T extends StrokeLike>(
 }
 
 function isBaseImageVector(v: PaintVector): boolean {
-  return !!(v.contentBound || v.contentProxySlot)
+  return !!(
+    v.contentBound ||
+    v.contentProxySlot ||
+    v.imageSourceDataUrl ||
+    (v.type === 'stamp' && v.name === 'Inner content')
+  )
 }
 
 async function pngBoxHasOpaque(
@@ -1202,15 +1207,15 @@ async function pngBoxHasOpaque(
 function baseLayerPlanes(session: PaintSession | null | undefined): {
   below?: string
   above?: string
+  /** Unselected brush on the base layer lives here, not only in decorations. */
+  content?: string
 } {
   if (!session) return {}
-  if (session.contentBelowDecorationsPng || session.contentAboveDecorationsPng) {
-    return {
-      below: session.contentBelowDecorationsPng,
-      above: session.contentAboveDecorationsPng
-    }
+  return {
+    below: session.contentBelowDecorationsPng,
+    above: session.contentAboveDecorationsPng || session.contentDecorationsPng,
+    content: session.contentPng
   }
-  return { above: session.contentDecorationsPng || session.contentPng }
 }
 
 async function drawPlaneInBox(
@@ -1451,6 +1456,7 @@ export async function rescanBaseLayerColors(
   const hasOverlay = !!(
     box &&
     ((planes.below && (await pngBoxHasOpaque(planes.below, box))) ||
+      (planes.content && (await pngBoxHasOpaque(planes.content, box))) ||
       (planes.above && (await pngBoxHasOpaque(planes.above, box))))
   )
   if (!hasStrokes && !hasOverlay) {
@@ -1493,14 +1499,21 @@ export async function rescanBaseLayerColors(
       if (ctx) {
         await drawPlaneInBox(ctx, planes.below, box, canvas.width, canvas.height)
         ctx.drawImage(img, 0, 0)
-        await drawPlaneInBox(ctx, planes.above, box, canvas.width, canvas.height)
+        // Base-layer brush that was not stored on the image object.
+        // Above decorations already include that overlay, so draw only one.
+        if (planes.content) {
+          await drawPlaneInBox(ctx, planes.content, box, canvas.width, canvas.height)
+        } else {
+          await drawPlaneInBox(ctx, planes.above, box, canvas.width, canvas.height)
+        }
         if (strokes?.length) {
+          const known = new Set(['round', 'square', 'slash', 'backslash', 'spray'])
           drawPaintStrokesInBox(
             ctx,
             { x: 0, y: 0, w: canvas.width, h: canvas.height },
             strokes.map((s) => ({
               ...s,
-              tip: (s.tip === 'flat' || s.tip === 'calligraphy' ? 'round' : s.tip) as BrushTip
+              tip: (known.has(s.tip) ? s.tip : 'round') as BrushTip
             }))
           )
         }
@@ -1508,7 +1521,7 @@ export async function rescanBaseLayerColors(
       }
     }
   }
-  const histogram = composite ? await scanImagePalette(composite) : []
+  const histogram = composite ? await scanImagePalette(composite, 5, 512) : []
   if (!histogram.length) {
     const seeded = await seedUploadedImageColors(source)
     const finished = finishUploadedImageSeed(withFirstPalette(seeded, input), input)
