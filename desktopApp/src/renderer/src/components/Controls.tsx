@@ -2115,8 +2115,20 @@ export function ImageRecolorControls({
 
   return (
     <div className="space-y-1 pt-1">
-      <div className="flex items-center justify-between gap-2 py-1">
-        <span className="text-xs text-muted">Image colours</span>
+      <div className="relative flex items-center justify-between gap-2 py-1">
+        <span className="flex items-center gap-1 min-w-0">
+          <span className="text-xs text-muted">Image colours</span>
+          <RowInfo label="Scan and rescan colours">
+            <p className="font-semibold">Scan / Rescan</p>
+            <p className="mt-0.5">Reads the image already on screen and splits it into up to 5 colour sections. The first press is Scan colours. After that, the same button is Rescan colours and rebuilds those sections.</p>
+            <div className="mt-2 border-t border-border pt-2">
+              <p className="font-semibold">Color 1–5</p>
+              <p className="mt-0.5">Keep color off: Color 1–5 become the colours found in the image.</p>
+              <p className="mt-1">Keep color on: Color 1–5 stay and fill the new sections.</p>
+              <p className="mt-1">Original colors stays as you set it, so the picture updates when that switch is off.</p>
+            </div>
+          </RowInfo>
+        </span>
         <button
           type="button"
           onClick={scan}
@@ -2223,6 +2235,22 @@ export function ImageRecolorControls({
               />
               )
             })}
+          <div className="relative flex items-center gap-1 py-1 min-w-0">
+            <span className="text-xs text-muted shrink-0">Unmarked</span>
+            <RowInfo label="Unmarked, marked, Clean AA, and Smooth AA">
+              <p className="font-semibold">Unmarked / Marked</p>
+              <p className="mt-0.5">Unmarked paints leftover sections that have no Match number. It shows when Original colors is off. Turn it on, then click a Color 1–5 label. Those sections take that colour and stay unmarked.</p>
+              <p className="mt-1">The number beside Unmarked is the Color those leftovers use. Click the number, then another Color 1–5 label, to change only that set. Match-marked sections keep their own numbers.</p>
+              <div className="mt-2 border-t border-border pt-2">
+                <p className="font-semibold">Clean AA</p>
+                <p className="mt-0.5">Strips the soft halo around the outline and hardens soft pixels inward. It does not thicken the rim. Match marks and the Unmarked set stay.</p>
+              </div>
+              <div className="mt-2 border-t border-border pt-2">
+                <p className="font-semibold">Smooth AA</p>
+                <p className="mt-0.5">Rebuilds a soft fringe on hard edges so the export looks smoother, without a dark or white halo. Match marks and the Unmarked set stay.</p>
+              </div>
+            </RowInfo>
+          </div>
           {!imageUseOriginalColors && (
             <div className="flex items-center gap-1.5 py-1">
               <button
@@ -2293,13 +2321,7 @@ export function ImageRecolorControls({
           {!imageUseOriginalColors && (
             <p className="text-[10px] text-muted leading-snug pb-1">
               Maps each scanned colour to the picker above — best for simple flat designs. Use the
-              arrows to swap two colour slots. Clean AA removes soft outline halos; Smooth AA softens
-              jagged edges for export.
-            </p>
-          )}
-          {imageUseOriginalColors && (
-            <p className="text-[10px] text-muted leading-snug pb-1">
-              Clean AA strips soft outline halos. Smooth AA rebuilds a soft fringe on hard edges.
+              arrows to swap two colour slots.
             </p>
           )}
         </>
