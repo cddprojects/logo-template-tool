@@ -1696,7 +1696,7 @@ export function IconPaintEditor({
 
       if (Number.isFinite(reopenScale) && Math.abs(reopenScale - 1) > 0.001) {
         restored = restored.map((l) => {
-          if (l.contentBound || l.linkedOutsideText) return l
+          if (l.contentBound || l.contentProxySlot || l.linkedOutsideText) return l
           if ((l.layer ?? 'content') !== 'content') return l
           return scalePaintLineAround(l, W / 2, H / 2, reopenScale)
         })

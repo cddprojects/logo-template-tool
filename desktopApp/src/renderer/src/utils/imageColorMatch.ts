@@ -1442,8 +1442,9 @@ export async function rescanBaseLayerColors(
 ): Promise<BaseLayerRescanResult | null> {
   const source = input.imageDataUrl
   if (!source) return null
-  const base = input.session?.vectors?.find(isBaseImageVector)
-  const strokes = base?.paintStrokes
+  const bases = (input.session?.vectors ?? []).filter(isBaseImageVector)
+  const base = bases.find((v) => v.paintStrokes?.some((s) => s.pts.length > 0)) ?? bases[0]
+  const strokes = bases.flatMap((v) => v.paintStrokes ?? [])
   const box = base ? stampBoxOf(base) : null
   const planes = baseLayerPlanes(input.session)
   const hasStrokes = !!strokes?.some((s) => s.pts.length > 0)
@@ -1514,12 +1515,9 @@ export async function rescanBaseLayerColors(
     return { patch: finished, session: input.session }
   }
   const first = uploadPalette(input)
-  const useOriginal = input.imageUseOriginalColors !== false
-  const slotColors = useOriginal
-    ? (first.length ? first : histogram)
-    : input.imageKeepColors
-      ? currentSlotColors(input, first.length ? first : histogram)
-      : histogram
+  const slotColors = input.imageKeepColors
+    ? currentSlotColors(input, first.length ? first : histogram)
+    : histogram
   const marked = await buildDefaultColorMarks(visible || source, slotColors, 140)
   const regionMap = await buildImageRegions(visible || source)
   const seeded = withFirstPalette(
@@ -1541,8 +1539,8 @@ export async function rescanBaseLayerColors(
     input
   )
   let finished = finishUploadedImageSeed(seeded, input)
-  if (useOriginal && first.length) {
-    finished = { ...finished, imagePalette: first, ...slotsFromPalette(first) }
+  if (!input.imageKeepColors) {
+    finished = { ...finished, imageUseOriginalColors: false }
   }
   const slots = [
     finished.imageColor1,
@@ -1558,7 +1556,7 @@ export async function rescanBaseLayerColors(
       .flatMap((v) => v.paintStrokes ?? [])
       .filter((s) => s.tool !== 'eraser')
       .map((s) => s.color)
-    const rewireSlots = !useOriginal && !input.imageKeepColors
+    const rewireSlots = !input.imageKeepColors
     session = snapBaseStrokesToSlots(
       session,
       slots,

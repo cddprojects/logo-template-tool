@@ -2143,7 +2143,7 @@ export function ImageRecolorControls({
               <p className="mt-0.5">Keep color off: Color 1–5 become the colours found, including brush strokes and other base-layer paint.</p>
               <p className="mt-1">Original colors on, or switched off while Keep color is off: Color 1–5 go back to the colours from the first upload.</p>
               <p className="mt-1">Keep color on: Color 1–5 stay and fill the new sections.</p>
-              <p className="mt-1">Original colors stays as you set it, so the picture updates when that switch is off.</p>
+              <p className="mt-1">Original colors stays as you set it, except Rescan with Keep color off turns it off so the new colours show. Turn it back on to restore the first upload.</p>
             </div>
           </RowInfo>
         </span>

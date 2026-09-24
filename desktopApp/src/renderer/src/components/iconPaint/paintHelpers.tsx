@@ -2416,7 +2416,29 @@ export function scalePaintLineAround(l: LineObj, cx: number, cy: number, s: numb
   }
 }
 
-/** Stamp proxy for non-letter Inner content (move / resize / shadow in Paint). */
+function placeStampBox(
+  cx: number,
+  cy: number,
+  w: number,
+  h: number,
+  canvas: number
+): [{ x: number; y: number }, { x: number; y: number }] {
+  const limit = Math.max(8, canvas)
+  const maxEdge = limit * 0.96
+  if (w > maxEdge || h > maxEdge) {
+    const s = maxEdge / Math.max(w, h)
+    w *= s
+    h *= s
+  }
+  const halfW = w / 2
+  const halfH = h / 2
+  const x = Math.min(limit - halfW, Math.max(halfW, cx))
+  const y = Math.min(limit - halfH, Math.max(halfH, cy))
+  return [
+    { x: x - halfW, y: y - halfH },
+    { x: x + halfW, y: y + halfH }
+  ]
+}
 export function lineFromContentProxy(
   crop: { dataUrl: string; w: number; h: number },
   settings: OutsideContentSettings,
@@ -2442,10 +2464,7 @@ export function lineFromContentProxy(
   return {
     id: genId(),
     type: 'stamp',
-    pts: [
-      { x: cx - w / 2, y: cy - h / 2 },
-      { x: cx + w / 2, y: cy + h / 2 }
-    ],
+    pts: placeStampBox(cx, cy, w, h, resolution),
     startCap: 'none',
     endCap: 'none',
     dash: 'solid',
@@ -2473,30 +2492,38 @@ export function applyOutsideContentToProxy(
   const a = l.pts[0], b = l.pts[1]
   let w = Math.max(1, Math.abs((b?.x ?? 0) - (a?.x ?? 0)))
   let h = Math.max(1, Math.abs((b?.y ?? 0) - (a?.y ?? 0)))
-  if (freshCrop || settings.sizeRatio != null) {
-    const imageSquare =
-      settings.contentType === 'image' || !!settings.imageSourceDataUrl
-    const aspectW = imageSquare ? 1 : (freshCrop?.w ?? w)
-    const aspectH = imageSquare ? 1 : (freshCrop?.h ?? h)
-    ;({ w, h } = proxyBoxFromSizeRatio(
-      settings.sizeRatio,
-      resolution,
-      aspectW,
-      aspectH,
-      innerDrawSize
-    ))
+  const savedOnCanvas =
+    w >= 8 &&
+    h >= 8 &&
+    w <= resolution * 1.25 &&
+    h <= resolution * 1.25
+  let pts: { x: number; y: number }[]
+  if (savedOnCanvas && a && b) {
+    pts = placeStampBox((a.x + b.x) / 2, (a.y + b.y) / 2, w, h, resolution)
+  } else {
+    if (freshCrop || settings.sizeRatio != null) {
+      const imageSquare =
+        settings.contentType === 'image' || !!settings.imageSourceDataUrl
+      const aspectW = imageSquare ? 1 : (freshCrop?.w ?? w)
+      const aspectH = imageSquare ? 1 : (freshCrop?.h ?? h)
+      ;({ w, h } = proxyBoxFromSizeRatio(
+        settings.sizeRatio,
+        resolution,
+        aspectW,
+        aspectH,
+        innerDrawSize
+      ))
+    }
+    const cx = resolution / 2 + off.x
+    const cy = resolution / 2 + off.y
+    pts = placeStampBox(cx, cy, w, h, resolution)
   }
-  const cx = resolution / 2 + off.x
-  const cy = resolution / 2 + off.y
   return {
     ...l,
     type: 'stamp',
     imageDataUrl: freshCrop?.dataUrl ?? l.imageDataUrl,
     color: settings.fillColor || l.color,
-    pts: [
-      { x: cx - w / 2, y: cy - h / 2 },
-      { x: cx + w / 2, y: cy + h / 2 }
-    ],
+    pts,
     contentBound: true,
     contentProxySlot: undefined,
     stampSource: l.stampSource ?? 'image',
