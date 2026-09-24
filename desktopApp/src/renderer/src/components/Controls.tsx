@@ -2108,10 +2108,25 @@ export function ImageRecolorControls({
                     ? 'bg-accent text-white border-accent'
                     : 'bg-surface3 text-muted hover:text-text border-border'
                 }`}
-                title="Keep the current Color 1–5 when a new image is uploaded, instead of replacing them with that image’s scan"
+                title="Keep the current Color 1–5 when a new image is uploaded or rescanned"
               >
                 Keep color
               </button>
+              <span className="relative group/keepcolor inline-flex items-center shrink-0">
+                <Info
+                  size={13}
+                  className="text-muted/80 group-hover/keepcolor:text-text cursor-help"
+                  aria-label="Keep color notes"
+                />
+                <span
+                  role="tooltip"
+                  className="pointer-events-none absolute right-0 bottom-full z-50 mb-1.5 w-60 rounded-md border border-border bg-surface px-2.5 py-2 text-[10px] leading-snug text-text opacity-0 shadow-lg transition-opacity group-hover/keepcolor:opacity-100"
+                >
+                  Purpose: reuse the current Color 1–5 on another image, instead of starting from that image’s own colours.
+                  <span className="block mt-1">When: the next upload or Rescan colours. Turning this on does not change the image already showing.</span>
+                  <span className="block mt-1">How: the new image is still split into sections. These Color 1–5 stay and fill those sections. Original colors stays as you set it, so the picture updates when that switch is off.</span>
+                </span>
+              </span>
               <button
                 type="button"
                 onClick={() => {
