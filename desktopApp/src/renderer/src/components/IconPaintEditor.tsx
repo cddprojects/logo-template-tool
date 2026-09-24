@@ -454,6 +454,8 @@ export function IconPaintEditor({
   const layersPointerDetachRef = useRef<(() => void) | null>(null)
   const layersPointerMoveHandlerRef = useRef<(e: PointerEvent) => void>(() => {})
   const layersPointerUpHandlerRef = useRef<() => void>(() => {})
+  /** Set when pointer-down hits an already selected layer; cleared if the gesture becomes a drag. */
+  const layerClickToggleRef = useRef<string | null>(null)
   type LayerDropPosition = 'before' | 'after' | 'inside'
   const [layerDropTarget, setLayerDropTarget] = useState<{
     key: string
@@ -5798,6 +5800,23 @@ export function IconPaintEditor({
   }
 
   /**
+   * Uploaded / pasted pictures are not tinted by the paint colour control.
+   * Recolour those with Color 1–5 on the base image, or the Fill tool.
+   * Library icons still take the paint colour.
+   */
+  const imageBlocksToolbarRecolor = (item: LineObj): boolean => {
+    if (item.type !== 'stamp' || !item.imageDataUrl || item.punchMask) return false
+    if (item.stampSource === 'library') return false
+    if (item.sourceSvgMarkup && item.stampSource !== 'image') return false
+    return (
+      item.stampSource === 'image' ||
+      isInnerUploadedImageProxy(item) ||
+      !!item.imageSourceDataUrl ||
+      !!item.colorMarkPng
+    )
+  }
+
+  /**
    * Apply colour / opacity to a selected object while keeping punch & see-through
    * pockets empty. Transparent (0%) still uses transparentObjectPatch (hole mode).
    */
@@ -5813,6 +5832,19 @@ export function IconPaintEditor({
     // original ink so raising opacity does not stay stuck at empty.
     const fromZero = isTransparentPaintColor(item.color ?? '')
     if (fromZero) clearObjectHoles(item as HoleItem)
+    if (imageBlocksToolbarRecolor(item)) {
+      // Same opacity: leave the picture alone. A new paint colour must not
+      // flatten its regions. Opacity still scales the existing pixels.
+      if (!fromZero && hexAlpha(item.color ?? '#ffffffff') === hexAlpha(nextColor)) return {}
+      return {
+        ...applyStampColorKeepHoles(item, nextColor, { alphaOnly: true }),
+        punchThrough: fromZero ? false : hasPunchCoverage(item.id),
+        punchEnclosedHole: fromZero ? false : !!item.punchEnclosedHole,
+        holeMaskMode: fromZero ? undefined : item.holeMaskMode,
+        holeMaskPng: fromZero ? undefined : item.holeMaskPng,
+        seeThroughHoleMaskPng: fromZero ? undefined : item.seeThroughHoleMaskPng
+      }
+    }
     if (item.type === 'stamp' && item.imageDataUrl) {
       return {
         ...applyStampColorKeepHoles(item, nextColor),
@@ -10387,12 +10419,40 @@ export function IconPaintEditor({
     resolveLayerDropAtPoint(e.clientX, e.clientY)
   }
 
+  const deselectLayerFromClick = (key: string) => {
+    if (key.startsWith('base:')) {
+      const id = key.slice(5) as PaintLayerId
+      if (selectedBaseLayerRef.current !== id) return
+      selectedBaseLayerRef.current = null
+      setSelectedBaseLayer(null)
+      clearPreview()
+      requestAnimationFrame(() => drawHandles())
+      return
+    }
+    if (!selectedLayerIdsRef.current.has(key)) return
+    const next = new Set(selectedLayerIdsRef.current)
+    next.delete(key)
+    selectedLayerIdsRef.current = next
+    setSelectedLayerIds(next)
+    if (selectedIdRef.current === key) {
+      const fallback = linesRef.current.find((item) => next.has(item.id))
+      selectedIdRef.current = fallback?.id ?? null
+      setSelectedId(fallback?.id ?? null)
+    }
+    redrawLines()
+    drawHandles()
+  }
+
   layersPointerUpHandlerRef.current = () => {
+    const toggleKey = layerClickToggleRef.current
+    const wasDrag = !!draggedLayerRef.current
     if (draggedLayerRef.current) endLayersPointerDrag(true)
     else {
       layersPointerPendingRef.current = null
       detachLayersPointerListeners()
+      if (!wasDrag && toggleKey) deselectLayerFromClick(toggleKey)
     }
+    layerClickToggleRef.current = null
   }
 
   const beginLayersPointerReorder = (key: string, clientX: number, clientY: number) => {
@@ -13042,7 +13102,9 @@ export function IconPaintEditor({
                             selectedBaseLayerRef.current = null
                             setSelectedBaseLayer(null)
                             const multi = e.ctrlKey || e.metaKey
+                            const already = selectedLayerIdsRef.current.has(l.id)
                             if (multi) {
+                              layerClickToggleRef.current = null
                               const next = new Set(selectedLayerIds)
                               if (next.has(l.id)) next.delete(l.id)
                               else next.add(l.id)
@@ -13053,7 +13115,11 @@ export function IconPaintEditor({
                                 selectedIdRef.current = fallback?.id ?? null
                                 setSelectedId(fallback?.id ?? null)
                               }
+                            } else if (already) {
+                              // Click again (without dragging) clears this layer. Drag still reorders.
+                              layerClickToggleRef.current = l.id
                             } else {
+                              layerClickToggleRef.current = null
                               selectLine(l)
                             }
                             setTool('pointer')
@@ -13223,11 +13289,16 @@ export function IconPaintEditor({
                       const t = e.target as HTMLElement | null
                       if (t?.closest?.('input,button,textarea,a')) return
                       setTool('pointer')
-                      selectedBaseLayerRef.current = id
-                      setSelectedBaseLayer(id)
-                      selectedIdRef.current = null
-                      setSelectedId(null)
-                      setSelectedLayerIds(new Set())
+                      if (selectedBaseLayerRef.current === id) {
+                        layerClickToggleRef.current = `base:${id}`
+                      } else {
+                        layerClickToggleRef.current = null
+                        selectedBaseLayerRef.current = id
+                        setSelectedBaseLayer(id)
+                        selectedIdRef.current = null
+                        setSelectedId(null)
+                        setSelectedLayerIds(new Set())
+                      }
                       clearPreview()
                       requestAnimationFrame(() => drawHandles())
                       beginLayersPointerReorder(`base:${id}`, e.clientX, e.clientY)

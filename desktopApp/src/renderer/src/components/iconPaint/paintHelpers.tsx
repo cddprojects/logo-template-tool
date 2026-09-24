@@ -3526,7 +3526,11 @@ export function refillHolePocket(
 }
 
 /** Recolor / set opacity on stamp ink pixels; leave hole (near-zero alpha) pixels alone. */
-export function applyStampColorKeepHoles(item: LineObj, nextColor: string): Partial<LineObj> {
+export function applyStampColorKeepHoles(
+  item: LineObj,
+  nextColor: string,
+  opts?: { alphaOnly?: boolean }
+): Partial<LineObj> {
   if (item.type !== 'stamp' || !item.imageDataUrl || item.pts.length < 2) {
     return { color: nextColor }
   }
@@ -3557,9 +3561,11 @@ export function applyStampColorKeepHoles(item: LineObj, nextColor: string): Part
   for (let i = 0; i < d.length; i += 4) {
     if (d[i + 3] === 0) continue
     const srcA = d[i + 3]
-    d[i] = fr
-    d[i + 1] = fg
-    d[i + 2] = fb
+    if (!opts?.alphaOnly) {
+      d[i] = fr
+      d[i + 1] = fg
+      d[i + 2] = fb
+    }
     // Preserve edge coverage — full-fa flatten expands the silhouette.
     d[i + 3] = fa >= 250 ? srcA : Math.round((srcA * fa) / 255)
   }
@@ -3569,12 +3575,14 @@ export function applyStampColorKeepHoles(item: LineObj, nextColor: string): Part
   if (placed) stampStrokeLiveCache.set(item.id, placed)
   const patch: Partial<LineObj> = {
     imageDataUrl,
-    color: fill,
+    color: opts?.alphaOnly
+      ? `${(item.color ?? fill).slice(0, 7)}${fill.slice(7, 9) || 'ff'}`
+      : fill,
     inkSourceDataUrl: item.inkSourceDataUrl || inkUrl
   }
   // Keep SVG source in sync so keepStrokeOnResize re-rasters use the new colour
   // (otherwise resize / live SVG path snaps back to the placement tint).
-  if (item.sourceSvgMarkup) {
+  if (item.sourceSvgMarkup && !opts?.alphaOnly) {
     patch.sourceSvgMarkup = applySvgColor(item.sourceSvgMarkup, fill)
   }
   return patch
