@@ -33,15 +33,36 @@ interface RowProps {
   hint?: string
   /** Optional control in the label column (e.g. colour-slot swap). */
   leading?: React.ReactNode
+  /** Hover note placed after the row title, not beside the controls. */
+  info?: React.ReactNode
   /** When set, the label is a button (used to pick a Color 1–5 slot). */
   onLabelClick?: () => void
   labelActive?: boolean
 }
 
-export function Row({ label, children, hint, leading, onLabelClick, labelActive }: RowProps): JSX.Element {
+/** Info mark after a row title. The note spans the row so it stays inside the panel. */
+function RowInfo({ label, children }: { label: string; children: React.ReactNode }): JSX.Element {
   return (
-    <div className="flex items-center gap-2 py-1.5 min-w-0">
-      <div className="shrink-0 basis-[9rem] min-w-[9rem] max-w-[58%] flex items-center gap-1.5">
+    <span className="group/rowinfo inline-flex items-center shrink-0">
+      <Info
+        size={13}
+        className="text-muted/80 group-hover/rowinfo:text-text cursor-help"
+        aria-label={label}
+      />
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute left-0 right-0 top-full z-50 mt-1 rounded-md border border-border bg-surface px-2.5 py-2 text-[10px] leading-snug text-text opacity-0 shadow-lg transition-opacity group-hover/rowinfo:opacity-100"
+      >
+        {children}
+      </span>
+    </span>
+  )
+}
+
+export function Row({ label, children, hint, leading, info, onLabelClick, labelActive }: RowProps): JSX.Element {
+  return (
+    <div className="relative flex items-center gap-2 py-1.5 min-w-0">
+      <div className="shrink-0 basis-[9rem] min-w-[9rem] max-w-[58%] flex items-center gap-1 min-w-0">
         {leading}
         {onLabelClick ? (
           <button
@@ -59,6 +80,7 @@ export function Row({ label, children, hint, leading, onLabelClick, labelActive 
             {label}
           </label>
         )}
+        {info}
       </div>
       <div className="flex-1 min-w-0 overflow-hidden">{children}</div>
       {hint && <span className="text-[10px] text-muted/60 shrink-0 ml-1">{hint}</span>}
@@ -178,17 +200,35 @@ export function TransparentFillToggle({
   mode,
   onChange,
   showLabel = true,
-  compact = false
+  compact = false,
+  showInfo = true
 }: {
   mode: TransparentFillMode
   onChange: (mode: TransparentFillMode) => void
   showLabel?: boolean
   /** Side-panel rows: short ST / PH labels. */
   compact?: boolean
+  /** Right-panel rows put this note on the row title instead. */
+  showInfo?: boolean
 }): JSX.Element {
   return (
     <div className={`flex items-center gap-1.5 min-w-0 ${compact ? 'justify-end' : ''}`}>
-      {showLabel && !compact && <span className="text-[11px] text-muted shrink-0">Transparent</span>}
+      {showLabel && <span className="text-[11px] text-muted shrink-0">Transparent</span>}
+      {showInfo && (
+        <span className="relative group/punchinfo inline-flex items-center shrink-0">
+          <Info
+            size={13}
+            className="text-muted/80 group-hover/punchinfo:text-text cursor-help"
+            aria-label="Punch hole notes"
+          />
+          <span
+            role="tooltip"
+            className="pointer-events-none absolute right-0 bottom-full z-50 mb-1.5 w-56 rounded-md border border-border bg-surface px-2.5 py-2 text-[10px] leading-snug text-text opacity-0 shadow-lg transition-opacity group-hover/punchinfo:opacity-100"
+          >
+            Punch holes are cleared if you change the text or shape. Moving, rotating, or scaling the same object keeps them.
+          </span>
+        </span>
+      )}
       <div className="flex items-center rounded-lg border border-border overflow-hidden shrink-0">
         <button
           type="button"
@@ -211,19 +251,6 @@ export function TransparentFillToggle({
           {compact ? 'PH' : 'Punch hole'}
         </button>
       </div>
-      <span className="relative group/punchinfo inline-flex items-center shrink-0">
-        <Info
-          size={13}
-          className="text-muted/80 group-hover/punchinfo:text-text cursor-help"
-          aria-label="Punch hole notes"
-        />
-        <span
-          role="tooltip"
-          className="pointer-events-none absolute right-0 bottom-full z-50 mb-1.5 w-56 rounded-md border border-border bg-surface px-2.5 py-2 text-[10px] leading-snug text-text opacity-0 shadow-lg transition-opacity group-hover/punchinfo:opacity-100"
-        >
-          Punch holes are cleared if you change the text or shape. Moving, rotating, or scaling the same object keeps them.
-        </span>
-      </span>
     </div>
   )
 }
@@ -467,7 +494,7 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
             <TransparentFillToggle
               mode={punchCtx.mode}
               onChange={punchCtx.setMode}
-              showLabel={false}
+              showLabel
               compact
             />
           )}
@@ -709,8 +736,14 @@ export function ColorRow({
     </button>
   ) : undefined
 
+  const punchInfo = showPunchToggle ? (
+    <RowInfo label="See-through and punch notes">
+      Punch holes are cleared if you change the text or shape. Moving, rotating, or scaling the same object keeps them.
+    </RowInfo>
+  ) : undefined
+
   return (
-    <Row label={label} leading={swapLeading} onLabelClick={onLabelClick} labelActive={labelActive}>
+    <Row label={label} leading={swapLeading} info={punchInfo} onLabelClick={onLabelClick} labelActive={labelActive}>
       <div className="flex flex-col gap-1.5 min-w-0 w-full">
         <div className="flex items-center gap-2 min-w-0 w-full">
           {/* Swatch — shows gradient or solid color, opens popup */}
@@ -760,6 +793,7 @@ export function ColorRow({
             mode={punchCtx.mode}
             onChange={punchCtx.setMode}
             showLabel={false}
+            showInfo={false}
             compact
           />
         )}
@@ -2095,7 +2129,22 @@ export function ImageRecolorControls({
       </div>
       {imagePalette.length > 0 && (
         <>
-          <Row label="Original colors">
+          <Row
+            label="Original colors"
+            info={
+              <RowInfo label="Keep color and original colors">
+                <p className="font-semibold">Keep color</p>
+                <p className="mt-0.5">Reuse the current Color 1–5 on another image.</p>
+                <p className="mt-1">This applies on the next upload or Rescan colours. Turning the button on leaves the image already on screen unchanged.</p>
+                <p className="mt-1">The new image is still split into sections. These Color 1–5 stay and fill those sections.</p>
+                <div className="mt-2 border-t border-border pt-2">
+                  <p className="font-semibold">Original colors</p>
+                  <p className="mt-0.5">On: the picture keeps the colours from the file. Color 1–5 do not recolour it.</p>
+                  <p className="mt-1">Off: Color 1–5 replace the scanned colours on the image.</p>
+                </div>
+              </RowInfo>
+            }
+          >
             <div className="flex items-center justify-end gap-1.5">
               <button
                 type="button"
@@ -2112,21 +2161,6 @@ export function ImageRecolorControls({
               >
                 Keep color
               </button>
-              <span className="relative group/keepcolor inline-flex items-center shrink-0">
-                <Info
-                  size={13}
-                  className="text-muted/80 group-hover/keepcolor:text-text cursor-help"
-                  aria-label="Keep color notes"
-                />
-                <span
-                  role="tooltip"
-                  className="pointer-events-none absolute right-0 bottom-full z-50 mb-1.5 w-60 rounded-md border border-border bg-surface px-2.5 py-2 text-[10px] leading-snug text-text opacity-0 shadow-lg transition-opacity group-hover/keepcolor:opacity-100"
-                >
-                  Purpose: reuse the current Color 1–5 on another image, instead of starting from that image’s own colours.
-                  <span className="block mt-1">When: the next upload or Rescan colours. Turning this on does not change the image already showing.</span>
-                  <span className="block mt-1">How: the new image is still split into sections. These Color 1–5 stay and fill those sections. Original colors stays as you set it, so the picture updates when that switch is off.</span>
-                </span>
-              </span>
               <button
                 type="button"
                 onClick={() => {
