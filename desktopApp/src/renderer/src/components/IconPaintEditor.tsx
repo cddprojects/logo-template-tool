@@ -1199,8 +1199,9 @@ export function IconPaintEditor({
   const isPaintHitVisible = (l: LineObj): boolean =>
     !l.punchMask && isVectorVisible(l)
 
-  const brushLayerHit = (l: LineObj, pt: Pt): boolean => {
-    if (!l.brushLayer || l.pts.length < 2) return false
+  /** Topmost brush stroke under the point, or -1. Eraser strokes are not fillable. */
+  const paintStrokeHitIndex = (l: LineObj, pt: Pt): number => {
+    if (l.pts.length < 2 || !l.paintStrokes?.length) return -1
     const a = l.pts[0], b = l.pts[1]
     const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
     const w = Math.max(1, Math.abs(b.x - a.x)), h = Math.max(1, Math.abs(b.y - a.y))
@@ -1211,16 +1212,46 @@ export function IconPaintEditor({
       const t = Math.max(0, Math.min(1, ((p.x - p0.x) * dx + (p.y - p0.y) * dy) / len2))
       return Math.hypot(p.x - (p0.x + t * dx), p.y - (p0.y + t * dy))
     }
-    for (const stroke of l.paintStrokes ?? []) {
-      if (stroke.tool === 'eraser' || !stroke.pts.length) continue
+    let hit = -1
+    l.paintStrokes.forEach((stroke, index) => {
+      if (stroke.tool === 'eraser' || !stroke.pts.length) return
       const rad = Math.max(8, (stroke.size * Math.min(w, h)) / 2)
       const points = stroke.pts.map((p) => ({ x: x + p.x * w, y: y + p.y * h }))
       for (let i = 0; i < points.length; i++) {
-        if (Math.hypot(pt.x - points[i].x, pt.y - points[i].y) <= rad) return true
-        if (i > 0 && distToSeg(pt, points[i - 1], points[i]) <= rad) return true
+        const onPoint = Math.hypot(pt.x - points[i].x, pt.y - points[i].y) <= rad
+        const onSeg = i > 0 && distToSeg(pt, points[i - 1], points[i]) <= rad
+        if (onPoint || onSeg) hit = index
       }
-    }
-    return false
+    })
+    return hit
+  }
+
+  const brushLayerHit = (l: LineObj, pt: Pt): boolean =>
+    !!l.brushLayer && paintStrokeHitIndex(l, pt) >= 0
+
+  /** Fill recolors the brush mark under the click. A Brush layer is one mark, so every stroke on it changes. */
+  const fillBrushStrokeAt = (pt: Pt): boolean => {
+    const hit = topmostPaintHit((item) => {
+      if (!isPaintHitVisible(item) || item.punchMask) return false
+      return paintStrokeHitIndex(item, pt) >= 0
+    })
+    if (!hit?.paintStrokes?.length) return false
+    const fillColor = pixelColor(color)
+    const only = hit.brushLayer ? -1 : paintStrokeHitIndex(hit, pt)
+    let changed = false
+    const paintStrokes = hit.paintStrokes.map((stroke, index) => {
+      if (stroke.tool === 'eraser') return stroke
+      if (only >= 0 && index !== only) return stroke
+      if (stroke.color === fillColor) return stroke
+      changed = true
+      return { ...stroke, color: fillColor }
+    })
+    if (!changed) return true
+    commitLines(linesRef.current.map((item) => (item.id === hit.id ? { ...item, paintStrokes } : item)))
+    redrawLines()
+    drawHandles()
+    pushHistory()
+    return true
   }
 
   const paintHitRank = (l: LineObj): number => {
@@ -9674,6 +9705,7 @@ export function IconPaintEditor({
         // object Fill so punched sections convert / refill instead of no-op.
       }
       void (async () => {
+        if (fillBrushStrokeAt(pt)) return
         const hit = topmostPaintHit((item) => {
           if (!isPaintHitVisible(item) || !isInnerUploadedImageProxy(item)) return false
           return objectOwnsFillClick(item, pt)

@@ -1323,6 +1323,39 @@ function strokeInkCounts(
 }
 
 /** Strokes on the Inner content image, in that image's box, then fitted to the scan grid. */
+/**
+ * Pixel weight from the stroke itself. Raster crops miss a thin mark, and a
+ * brush colour must still take a Color slot when that happens.
+ */
+function reserveStrokeInk(
+  strokes: { tool?: string; pts?: { x: number; y: number }[]; size?: number; color?: string }[],
+  scanW: number,
+  scanH: number
+): { color: string; count: number }[] {
+  if (scanW < 1 || scanH < 1) return []
+  const short = Math.max(1, Math.min(scanW, scanH))
+  const byColor = new Map<string, number>()
+  for (const stroke of strokes) {
+    if (stroke.tool === 'eraser' || !stroke.pts?.length || !stroke.color) continue
+    const radius = Math.max(1.5, (stroke.size ?? 0.04) * short / 2)
+    const count = Math.max(48, Math.ceil(stroke.pts.length * radius * radius * 0.35))
+    const key = stroke.color.trim().slice(0, 7).toLowerCase()
+    if (!/^#[0-9a-f]{6}$/.test(key)) continue
+    byColor.set(key, (byColor.get(key) ?? 0) + count)
+  }
+  return [...byColor.entries()].map(([color, count]) => ({ color, count }))
+}
+
+function sessionBrushStrokes(session: PaintSession | null | undefined) {
+  return (session?.vectors ?? []).flatMap((v) => {
+    if ((v.visible ?? v.editable ?? true) === false) return []
+    const strokes = (v.paintStrokes ?? []).filter((s) => s.tool !== 'eraser' && s.pts.length > 0)
+    if (!strokes.length) return []
+    if (v.brushLayer || isBaseImageVector(v) || v.name === 'Inner content') return strokes
+    return []
+  })
+}
+
 function innerContentStrokeInk(
   session: PaintSession | null | undefined,
   _box: { x: number; y: number; w: number; h: number } | null,
@@ -1697,6 +1730,11 @@ export async function rescanBaseLayerColors(
   photoCanvas.height = scanH
   const photoCtx = photoCanvas.getContext('2d', { willReadFrequently: true })
   if (photo && photoCtx) photoCtx.drawImage(photo, 0, 0, scanW, scanH)
+  const reservedInk = reserveStrokeInk(
+    [...sessionBrushStrokes(input.session), ...(strokes ?? [])],
+    scanW,
+    scanH
+  )
   const [contentInk, frontInk, belowInk, strokeInk, brushLayerInk, innerStrokeInk] = await Promise.all([
     // Inner paint overlay, cropped to the Inner content image so a brush on
     // that layer lines up with the photo instead of the whole canvas.
@@ -1720,7 +1758,8 @@ export async function rescanBaseLayerColors(
           ...frontInk.map((ink) => ({ ...ink, protect: true })),
           ...strokeInk.map((ink) => ({ ...ink, protect: true })),
           ...brushLayerInk.map((ink) => ({ ...ink, protect: true })),
-          ...innerStrokeInk.map((ink) => ({ ...ink, protect: true }))
+          ...innerStrokeInk.map((ink) => ({ ...ink, protect: true })),
+          ...reservedInk.map((ink) => ({ ...ink, protect: true }))
         ]
       )
     : await scanImagePalette(visible || source, 5, 512)
