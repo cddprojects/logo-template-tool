@@ -524,6 +524,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       contentDecorationsPng: result.contentDecorationsPng,
       contentAboveDecorationsPng: result.contentAboveDecorationsPng,
       contentBelowDecorationsPng: result.contentBelowDecorationsPng,
+      contentFrontPng: result.contentFrontPng,
       // Linked letters stay as live outside settings (not baked into decorations).
       linkedTextInDecorations: result.linkedTextInDecorations ?? false,
       contentBakedInDecorations: result.contentBakedInDecorations ?? false,
@@ -996,6 +997,12 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
             contentImage={paintContent}
             containerOverlayImage={paintContainerOverlay}
             contentOverlayImage={paintContentOverlay}
+            contentFrontImage={
+              (isSyncedWithFavicon
+                ? matchingFaviconVariant?.config.paintSession
+                : safeConfig.icon.paintSession
+              )?.contentFrontPng ?? null
+            }
             hasContainer={paintHasContainer || hasIconContainer}
             innerDrawSize={logoPaintContentDrawSize(effectiveIcon, 512)}
             paintOuterSize={logoPaintInnerDrawSize(effectiveIcon, 512)}

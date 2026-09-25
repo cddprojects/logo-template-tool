@@ -304,6 +304,8 @@ export interface IconPaintEditorProps {
   containerOverlayImage?: string | null
   /** Restored Inner paint overlay from paintSession (transparent). */
   contentOverlayImage?: string | null
+  /** Brush painted with nothing selected. Drawn above every layer. */
+  contentFrontImage?: string | null
   /** Working resolution (square). */
   resolution?: number
   /**
@@ -428,6 +430,11 @@ export interface LineObj {
   keepStrokeOnResize?: boolean
   /** Persistent marquee selection from one base raster layer; not a panel layer. */
   marqueeItem?: boolean
+  /**
+   * Brush painted with nothing selected. Stays above every layer.
+   * Can be selected and deleted. Cannot be moved.
+   */
+  brushLayer?: boolean
   /** Regions permanently cut out of this object by marquee (canvas space). */
   marqueeCutRects?: { x: number; y: number; w: number; h: number }[]
   /** Nondestructive pixel edits replayed over a vector shape. */
@@ -5139,6 +5146,8 @@ export interface Snap {
   /** Paint overlay pixels (editable brush/eraser layer). */
   container: ImageData
   content: ImageData
+  /** Brush with no layer selected, above every object. */
+  front?: ImageData
   /** Live baked base pixels (read-only until Remove BG / canvas xform). */
   baseContainer: ImageData
   baseContent: ImageData

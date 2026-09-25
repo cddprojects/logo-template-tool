@@ -363,6 +363,7 @@ export function FaviconEditor({
       contentDecorationsPng: result.contentDecorationsPng,
       contentAboveDecorationsPng: result.contentAboveDecorationsPng,
       contentBelowDecorationsPng: result.contentBelowDecorationsPng,
+      contentFrontPng: result.contentFrontPng,
       // Linked letters stay as live outside settings (not baked into decorations).
       linkedTextInDecorations: result.linkedTextInDecorations ?? false,
       contentBakedInDecorations: result.contentBakedInDecorations ?? false,
@@ -862,6 +863,7 @@ export function FaviconEditor({
             contentImage={paintContent}
             containerOverlayImage={paintContainerOverlay}
             contentOverlayImage={paintContentOverlay}
+            contentFrontImage={config.paintSession?.contentFrontPng ?? null}
             hasContainer={paintHasContainer || hasOuterShape}
             innerDrawSize={faviconInnerDrawSize(config, 512)}
             paintOuterSize={faviconInnerDrawSize(config, 512)}

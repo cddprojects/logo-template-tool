@@ -785,6 +785,40 @@ function drawBaseImageBrushStrokes(
   ctx.restore()
 }
 
+/** Brush layers stay above every object. They are not baked into the mid overlay. */
+function drawPinnedBrushLayers(
+  ctx: CanvasRenderingContext2D,
+  session: PaintSession,
+  x: number,
+  y: number,
+  size: number,
+  shapeFallback?: number
+): void {
+  const items = (session.vectors ?? []).filter(
+    (v) => v.brushLayer && v.paintStrokes?.some((s) => s.tool !== 'eraser' && s.pts.length > 0) && v.pts && v.pts.length >= 2
+  )
+  if (!items.length) return
+  ctx.save()
+  applyPaintSpaceTransform(ctx, session, x, y, size, shapeFallback)
+  for (const v of items) {
+    const a = v.pts![0]
+    const b = v.pts![1]
+    const strokes = (v.paintStrokes ?? []).filter((s) => s.tool !== 'eraser' && s.pts.length > 0)
+    drawPaintStrokesInBox(
+      ctx,
+      {
+        x: Math.min(a.x, b.x),
+        y: Math.min(a.y, b.y),
+        w: Math.abs(b.x - a.x),
+        h: Math.abs(b.y - a.y)
+      },
+      strokes.map((s) => ({ ...s, tip: s.tip as BrushTip })),
+      { brushesOnly: true }
+    )
+  }
+  ctx.restore()
+}
+
 /**
  * Draw one paint layer's decorations (overlay + vectors flatten) at the correct
  * z-slot: Outer after live Outer / before Inner; Inner after live Inner.
@@ -807,6 +841,10 @@ export async function applyPaintLayerDecorations(
     const png = layer === 'container' ? session.containerPng : session.contentPng
     await drawScaledPng(ctx, png, x, y, size, session, shapeFallback)
     drawBaseImageBrushStrokes(ctx, session, x, y, size, layer, shapeFallback)
+    if (layer === 'content') {
+      await drawScaledPng(ctx, session.contentFrontPng, x, y, size, session, shapeFallback)
+      drawPinnedBrushLayers(ctx, session, x, y, size, shapeFallback)
+    }
     return
   }
 
@@ -868,6 +906,11 @@ export async function applyPaintLayerDecorations(
       renderPaintContentVectors(ctx, session.vectors, innerDecor, res)
       ctx.restore()
     }
+  }
+
+  if (layer === 'content') {
+    await drawScaledPng(ctx, session.contentFrontPng, x, y, size, session, shapeFallback)
+    drawPinnedBrushLayers(ctx, session, x, y, size, shapeFallback)
   }
 }
 

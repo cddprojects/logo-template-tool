@@ -481,6 +481,8 @@ export interface PaintVector {
   keepStrokeOnResize?: boolean
   /** Persistent selection lifted from one base raster layer; hidden from Layers panel. */
   marqueeItem?: boolean
+  /** Brush painted with nothing selected. Stays above every layer and cannot be moved. */
+  brushLayer?: boolean
   /** Regions permanently cut out of this object by marquee (canvas space). */
   marqueeCutRects?: { x: number; y: number; w: number; h: number }[]
   /** Nondestructive brush/eraser strokes stored in shape/group-local coordinates. */
@@ -651,6 +653,11 @@ export interface PaintSession {
    */
   contentBelowDecorationsPng?: string
   /**
+   * Brush painted with no layer selected. Drawn above every object, in Paint
+   * and after Save.
+   */
+  contentFrontPng?: string
+  /**
    * True when `decorationsPng` includes linkedOutsideText glyphs. Outside render
    * then skips live letters to avoid doubling. Older sessions omit this flag.
    */
@@ -781,6 +788,8 @@ export interface PaintSaveResult {
   contentAboveDecorationsPng?: string
   /** Objects below Inner paint only (Apply Edit · Outer). */
   contentBelowDecorationsPng?: string
+  /** Brush with no layer selected, drawn above every object. */
+  contentFrontPng?: string
   /** Outside settings sync hints (applied on Save). */
   contentSync?: PaintContentSync
   /** When true, linked Inner letters were baked into decorations (e.g. rotation). */

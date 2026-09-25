@@ -320,6 +320,7 @@ export function IconPaintEditor({
   contentImage,
   containerOverlayImage = null,
   contentOverlayImage = null,
+  contentFrontImage = null,
   resolution = 512,
   innerDrawSize,
   paintOuterSize,
@@ -379,6 +380,8 @@ export function IconPaintEditor({
   /** Paint overlays — brush / eraser / fill write here only. */
   const containerCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const contentCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  /** Brush with nothing selected. Drawn after every layer. */
+  const frontCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const displayCompositeRef = useRef<HTMLCanvasElement>(null)
   const previewRef = useRef<HTMLCanvasElement>(null)
   const paintFrameRef = useRef<HTMLCanvasElement | null>(null)
@@ -730,6 +733,9 @@ export function IconPaintEditor({
   }
   const containerCtx = () => ensureOffscreenCanvas(containerCanvasRef).getContext('2d')
   const contentCtx = () => ensureOffscreenCanvas(contentCanvasRef).getContext('2d')
+  const frontCtx = () => ensureOffscreenCanvas(frontCanvasRef).getContext('2d')
+  const noLayerSelected = (): boolean =>
+    !selectedIdRef.current && !selectedBaseLayerRef.current
   const baseCanvas = (id: PaintLayerId): HTMLCanvasElement =>
     id === 'content'
       ? ensureOffscreenCanvas(baseContentCanvasRef)
@@ -821,7 +827,7 @@ export function IconPaintEditor({
     // Object order inside each bucket matches the Layers panel (lines-array index).
     // Punch-through must only cut what is already below the punched object, so
     // after each punch we redraw strictly-higher steps in this slot.
-    const roots = linesRef.current.filter((l) => !l.parentId && vectorLayerOf(l) === id)
+    const roots = linesRef.current.filter((l) => !l.parentId && !l.brushLayer && vectorLayerOf(l) === id)
     const steps = paintSlotStepsForRoots(roots, linesRef.current, opts)
 
     const paintObjectStep = (t: CanvasRenderingContext2D, l: LineObj) => {
@@ -1155,6 +1161,14 @@ export function IconPaintEditor({
     const ctx = layerCanvas(id)?.getContext('2d')
     return ctx ? [ctx] : []
   }
+  /** Nothing selected: paint above every layer. A selected base stays on its overlay. */
+  const brushDestCtxs = (): CanvasRenderingContext2D[] => {
+    if (noLayerSelected()) {
+      const ctx = frontCtx()
+      return ctx ? [ctx] : []
+    }
+    return addPaintCtxs()
+  }
 
   /** Layer new vectors / brush strokes are assigned to (topmost checked layer). */
   const activeAddLayer = (): 'container' | 'content' =>
@@ -1185,7 +1199,34 @@ export function IconPaintEditor({
   const isPaintHitVisible = (l: LineObj): boolean =>
     !l.punchMask && isVectorVisible(l)
 
+  const brushLayerHit = (l: LineObj, pt: Pt): boolean => {
+    if (!l.brushLayer || l.pts.length < 2) return false
+    const a = l.pts[0], b = l.pts[1]
+    const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
+    const w = Math.max(1, Math.abs(b.x - a.x)), h = Math.max(1, Math.abs(b.y - a.y))
+    const distToSeg = (p: Pt, p0: Pt, p1: Pt): number => {
+      const dx = p1.x - p0.x, dy = p1.y - p0.y
+      const len2 = dx * dx + dy * dy
+      if (len2 < 1e-6) return Math.hypot(p.x - p0.x, p.y - p0.y)
+      const t = Math.max(0, Math.min(1, ((p.x - p0.x) * dx + (p.y - p0.y) * dy) / len2))
+      return Math.hypot(p.x - (p0.x + t * dx), p.y - (p0.y + t * dy))
+    }
+    for (const stroke of l.paintStrokes ?? []) {
+      if (stroke.tool === 'eraser' || !stroke.pts.length) continue
+      const rad = Math.max(8, (stroke.size * Math.min(w, h)) / 2)
+      const points = stroke.pts.map((p) => ({ x: x + p.x * w, y: y + p.y * h }))
+      for (let i = 0; i < points.length; i++) {
+        if (Math.hypot(pt.x - points[i].x, pt.y - points[i].y) <= rad) return true
+        if (i > 0 && distToSeg(pt, points[i - 1], points[i]) <= rad) return true
+      }
+    }
+    return false
+  }
+
   const paintHitRank = (l: LineObj): number => {
+    if (l.brushLayer) {
+      return 1_000_000_000 + Math.max(0, linesRef.current.findIndex((item) => item.id === l.id))
+    }
     const root = paintRootOfLine(l, linesRef.current)
     const layerI = [...layerOrderRef.current].reverse().indexOf(vectorLayerOf(root))
     const above = root.belowBase ? 0 : 1
@@ -1247,9 +1288,10 @@ export function IconPaintEditor({
   const snapshotState = useCallback((): Snap | null => {
     const cc = containerCtx()
     const ct = contentCtx()
+    const ft = frontCtx()
     const bcc = baseCanvas('container').getContext('2d')
     const bct = baseCanvas('content').getContext('2d')
-    if (!cc || !ct || !bcc || !bct) return null
+    if (!cc || !ct || !ft || !bcc || !bct) return null
     for (const l of linesRef.current) {
       if (punchMaskCanvases.has(l.id) || seeThroughMaskCanvases.has(l.id)) {
         rewritePunchBitsFromLocal(l, W, H)
@@ -1258,6 +1300,7 @@ export function IconPaintEditor({
     return {
       container: cc.getImageData(0, 0, W, H),
       content: ct.getImageData(0, 0, W, H),
+      front: ft.getImageData(0, 0, W, H),
       baseContainer: bcc.getImageData(0, 0, W, H),
       baseContent: bct.getImageData(0, 0, W, H),
       lines: cloneLines(linesRef.current),
@@ -1286,6 +1329,9 @@ export function IconPaintEditor({
     const tags = new Set<string>()
     if (imageDataChanged(before.container, after.container)) tags.add('overlay:container')
     if (imageDataChanged(before.content, after.content)) tags.add('overlay:content')
+    if (before.front && after.front && imageDataChanged(before.front, after.front)) {
+      tags.add('overlay:front')
+    }
     if (before.baseContainer && after.baseContainer && imageDataChanged(before.baseContainer, after.baseContainer)) {
       tags.add('bake:container')
     }
@@ -1361,11 +1407,13 @@ export function IconPaintEditor({
     const baseCt = ensureOffscreenCanvas(baseContentCanvasRef).getContext('2d')
     const cc = containerCtx()
     const ct = contentCtx()
-    if (!baseCc || !baseCt || !cc || !ct) return
+    const ft = frontCtx()
+    if (!baseCc || !baseCt || !cc || !ct || !ft) return
     baseCc.clearRect(0, 0, W, H)
     baseCt.clearRect(0, 0, W, H)
     cc.clearRect(0, 0, W, H)
     ct.clearRect(0, 0, W, H)
+    ft.clearRect(0, 0, W, H)
 
     const loadInto = (ctx: CanvasRenderingContext2D, src: string | null): Promise<void> =>
       new Promise((resolve) => {
@@ -1386,7 +1434,8 @@ export function IconPaintEditor({
       loadInto(baseCc, containerImage),
       loadInto(baseCt, contentImage),
       loadInto(cc, containerOverlayImage),
-      loadInto(ct, contentOverlayImage)
+      loadInto(ct, contentOverlayImage),
+      loadInto(ft, contentFrontImage)
     ]).then(async () => {
       const restoredOrder = normalizeLayerOrder(initialLayerOrder)
       layerOrderRef.current = restoredOrder
@@ -1725,7 +1774,7 @@ export function IconPaintEditor({
       paintBasesLoadedRef.current = true
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [containerImage, contentImage, containerOverlayImage, contentOverlayImage, hasContainer, initialVectors, initialPunchMasks, initialContentBakedInDecorations, initialLayerOrder, innerDrawSize, paintOuterSize, initialPaintShapeSize])
+  }, [containerImage, contentImage, containerOverlayImage, contentOverlayImage, contentFrontImage, hasContainer, initialVectors, initialPunchMasks, initialContentBakedInDecorations, initialLayerOrder, innerDrawSize, paintOuterSize, initialPaintShapeSize])
 
   const restoreTaggedSnapshot = (snap: Snap, tags: string[]) => {
     const cc = containerCtx()
@@ -1738,6 +1787,10 @@ export function IconPaintEditor({
     }
     if (tags.includes('overlay:content') || tags.includes('base:content')) {
       ct.putImageData(snap.content, 0, 0)
+    }
+    if (tags.includes('overlay:front') && snap.front) {
+      const ft = frontCtx()
+      if (ft) ft.putImageData(snap.front, 0, 0)
     }
     if (tags.includes('bake:container') && snap.baseContainer) {
       bcc.putImageData(snap.baseContainer, 0, 0)
@@ -1924,6 +1977,14 @@ export function IconPaintEditor({
       ctx.clearRect(0, 0, W, H)
       changed = true
     }
+    if (!selectedBase && selectedObjectIds.size === 0) {
+      const front = frontCanvasRef.current?.getContext('2d')
+      if (front) {
+        reset2dState(front)
+        front.clearRect(0, 0, W, H)
+        changed = true
+      }
+    }
 
     const next = linesRef.current.map((l) => {
       if (!shouldClearStrokes(l) || !l.paintStrokes?.length) return l
@@ -2052,6 +2113,7 @@ export function IconPaintEditor({
       transformCanvasPixels(baseCanvas(id), mode)
       transformCanvasPixels(layerCanvas(id), mode)
     }
+    if (frontCanvasRef.current) transformCanvasPixels(frontCanvasRef.current, mode)
     const next = linesRef.current.map((l) => transformStampLineObj(l, mode, W, canvasOpts))
     linesRef.current = next
     syncHolesAfterGeomChange(next as HoleItem[], W, H, holeGeom, 'all')
@@ -2790,6 +2852,10 @@ export function IconPaintEditor({
         paintStackSlot(frameCtx, id, { base: false, overlay: false, skipId })
       }
     }
+    if (frontCanvasRef.current) frameCtx.drawImage(frontCanvasRef.current, 0, 0)
+    for (const l of linesRef.current) {
+      if (l.brushLayer && isVectorVisible(l)) renderLine(frameCtx, l)
+    }
 
     if (displayNeedsResetRef.current) {
       displayEl.width = W
@@ -3051,6 +3117,7 @@ export function IconPaintEditor({
     if (!l && drawContentHandles(p)) return
     // Never leave handles (or any preview pixels) for a hidden object layer.
     if (!l || !isVectorVisible(l)) return
+    if (l.brushLayer) return
     const cropSession = cropSessionRef.current
     if (cropSession && l.id === cropSession.id && l.type === 'stamp') {
       drawCropOverlay(p, l, cropSession)
@@ -3562,7 +3629,7 @@ export function IconPaintEditor({
       if (beginContentTransform(pt)) return
       // 1. Dragging the rotate pin or a handle of the selected object.
       const sel = linesRef.current.find((l) => l.id === selectedIdRef.current)
-      if (sel && isVectorVisible(sel)) {
+      if (sel && isVectorVisible(sel) && !sel.brushLayer) {
         if (rotatePinHit(sel, pt)) {
           startRotateDrag(sel, pt)
           return
@@ -3638,6 +3705,7 @@ export function IconPaintEditor({
       // 2. Selecting / moving an existing visible object (topmost in paint order first).
       const hit = topmostPaintHit((l) => {
         if (!isPaintHitVisible(l)) return false
+        if (l.brushLayer) return brushLayerHit(l, pt)
         if (l.reshapeQuad?.length === 4) return pointInPoly(l.reshapeQuad, pt)
         const q = unmapObjDisplayPt(pt, l)
         return l.type === 'text'
@@ -3653,7 +3721,9 @@ export function IconPaintEditor({
           return
         }
         selectLine(hit)
-        lineDragRef.current = { kind: 'move', id: selectedIdRef.current ?? hit.id, grab: pt }
+        if (!hit.brushLayer) {
+          lineDragRef.current = { kind: 'move', id: selectedIdRef.current ?? hit.id, grab: pt }
+        }
         redrawLines(); drawHandles()
         return
       }
@@ -4672,6 +4742,9 @@ export function IconPaintEditor({
       if (layerIsEditable(id)) paintStackSlot(x, id)
       else paintStackSlot(x, id, { base: false, overlay: false })
     }
+    for (const l of linesRef.current) {
+      if (l.brushLayer && isVectorVisible(l)) renderLine(x, l)
+    }
     return c
   }
 
@@ -4706,7 +4779,7 @@ export function IconPaintEditor({
       ? [layer]
       : [...layerOrderRef.current].reverse()
     for (const id of ids) {
-      const roots = linesRef.current.filter((l) => !l.parentId && vectorLayerOf(l) === id)
+      const roots = linesRef.current.filter((l) => !l.parentId && !l.brushLayer && vectorLayerOf(l) === id)
       const indexOf = (l: LineObj) => linesRef.current.findIndex((item) => item.id === l.id)
       const belowRoots = roots.filter((l) => l.belowBase).sort((a, b) => indexOf(a) - indexOf(b))
       const aboveRoots = roots.filter((l) => !l.belowBase).sort((a, b) => indexOf(a) - indexOf(b))
@@ -8068,6 +8141,7 @@ export function IconPaintEditor({
       return
     }
     if (!selectedIdRef.current) return
+    if (linesRef.current.some((item) => item.id === selectedIdRef.current && item.brushLayer)) return
     updateSelectedLive((l) => ({
       pts: l.pts.map((p) => ({ x: p.x + dx, y: p.y + dy }))
     }))
@@ -8469,10 +8543,10 @@ export function IconPaintEditor({
       )
     }
     const liftRoots = linesRef.current.filter(
-      (line) => !line.parentId && isVectorVisible(line) && fullyInsideMarquee(line)
+      (line) => !line.parentId && !line.brushLayer && isVectorVisible(line) && fullyInsideMarquee(line)
     )
     const previewRoots = linesRef.current.filter(
-      (line) => !line.parentId && isVectorVisible(line) && intersectsMarquee(line)
+      (line) => !line.parentId && !line.brushLayer && isVectorVisible(line) && intersectsMarquee(line)
     )
     const selectedIds = new Set<string>()
     const includeSubtree = (id: string) => {
@@ -8865,7 +8939,9 @@ export function IconPaintEditor({
     const nl: LineObj = {
       ...c,
       id: genId(),
-      pts: c.pts.map((p) => ({ x: p.x + 16, y: p.y + 16 })),
+      pts: c.brushLayer
+        ? c.pts.map((p) => ({ x: p.x, y: p.y }))
+        : c.pts.map((p) => ({ x: p.x + 16, y: p.y + 16 })),
       layer: c.layer ?? activeAddLayer(),
       // Pasted copies are never linked — keep the original linked layer intact.
       linkedOutsideText: undefined,
@@ -9164,7 +9240,10 @@ export function IconPaintEditor({
           return
         }
         const c = pixelColor(color)
-        for (const ctx of targetCtxs()) {
+        const eraseCtxs = noLayerSelected() && frontCtx()
+          ? [...targetCtxs(), frontCtx()!]
+          : targetCtxs()
+        for (const ctx of eraseCtxs) {
           strokeBrushTip(
             ctx, eraserTip,
             lastPt.current.x, lastPt.current.y,
@@ -9202,7 +9281,7 @@ export function IconPaintEditor({
         return
       }
       const c = pixelColor(color)
-      for (const ctx of addPaintCtxs()) {
+      for (const ctx of brushDestCtxs()) {
         strokeBrushTip(ctx, brushTip, lastPt.current.x, lastPt.current.y, pt.x, pt.y, size, c, false)
       }
       markOuterOverlayPreserved()
@@ -9603,7 +9682,7 @@ export function IconPaintEditor({
     const targets = targetCtxs()
     if (!targets.length && tool !== 'polygon' && tool !== 'brush') return
     // Brush can run with add-paint targeting even when only one layer is checked.
-    if (tool === 'brush' && !addPaintCtxs().length) return
+    if (tool === 'brush' && !noLayerSelected() && !addPaintCtxs().length) return
 
     if (tool === 'polygon') {
       // The second click of a double-click has detail >= 2. Skip adding a vertex
@@ -9622,6 +9701,49 @@ export function IconPaintEditor({
     drawing.current = true
     startPt.current = initialPoint
     lastPt.current = initialPoint
+    if (tool === 'brush' && noLayerSelected()) {
+      const stroke: ObjectPaintStroke = {
+        tool: 'brush',
+        pts: [{ x: pt.x / Math.max(1, W), y: pt.y / Math.max(1, H) }],
+        size: size / Math.max(1, Math.min(W, H)),
+        color: pixelColor(color),
+        tip: brushTip
+      }
+      const topBrush = [...linesRef.current].reverse().find((item) => item.brushLayer && isVectorVisible(item))
+      if (topBrush) {
+        topBrush.paintStrokes = [...(topBrush.paintStrokes ?? []), stroke]
+        commitLines(linesRef.current)
+        objectPaintStrokeRef.current = { id: topBrush.id, index: topBrush.paintStrokes.length - 1 }
+      } else {
+        const id = genId()
+        const count = linesRef.current.filter((item) => item.brushLayer).length + 1
+        const nl: LineObj = {
+          id,
+          type: 'stamp',
+          name: count === 1 ? 'Brush' : `Brush ${count}`,
+          brushLayer: true,
+          pts: [{ x: 0, y: 0 }, { x: W, y: H }],
+          startCap: 'none',
+          endCap: 'none',
+          dash: 'solid',
+          thickness: 0,
+          color: '#00000000',
+          layer: 'content',
+          belowBase: false,
+          visible: true,
+          paintStrokes: [stroke]
+        }
+        linesRef.current = [...linesRef.current, nl]
+        commitLines(linesRef.current)
+        objectPaintStrokeRef.current = { id, index: 0 }
+      }
+      drawing.current = true
+      startPt.current = pt
+      lastPt.current = pt
+      redrawLines()
+      startPointerDragCapture()
+      return
+    }
     if (tool === 'brush') {
       const c = pixelColor(color)
       for (const ctx of addPaintCtxs()) {
@@ -9632,7 +9754,8 @@ export function IconPaintEditor({
       startPointerDragCapture()
     } else if (tool === 'eraser') {
       const c = pixelColor(color)
-      for (const ctx of targets) {
+      const eraseCtxs = noLayerSelected() && frontCtx() ? [...targets, frontCtx()!] : targets
+      for (const ctx of eraseCtxs) {
         stampBrushTip(ctx, eraserTip, initialPoint.x, initialPoint.y, size, c, true)
       }
       if (targets.some((ctx) => ctx.canvas === layerCanvas('container'))) {
@@ -9877,7 +10000,7 @@ export function IconPaintEditor({
     const hasReplacementContent = persistVectors.some((v) => {
       if ((v.layer ?? 'content') !== 'content') return false
       if ((v.visible ?? v.editable ?? true) === false) return false
-      if (v.contentProxySlot || v.contentBound) return false
+      if (v.contentProxySlot || v.contentBound || v.brushLayer) return false
       return (
         v.type === 'stamp' ||
         v.type === 'shape' ||
@@ -9930,6 +10053,21 @@ export function IconPaintEditor({
     }
     const contentAboveDecor = decorationsCanvas('content', linkedBake, contentBake, false, 'above')
     const contentBelowDecor = decorationsCanvas('content', false, false, false, 'below')
+    const frontCanvas = frontCanvasRef.current
+    let contentFrontPng: string | undefined
+    if (frontCanvas && frontCanvas.width > 0 && frontCanvas.height > 0) {
+      const frontData = frontCanvas.getContext('2d')?.getImageData(0, 0, frontCanvas.width, frontCanvas.height).data
+      let frontOpaque = false
+      if (frontData) {
+        for (let i = 3; i < frontData.length; i += 16) {
+          if (frontData[i] > 16) {
+            frontOpaque = true
+            break
+          }
+        }
+      }
+      if (frontOpaque) contentFrontPng = frontCanvas.toDataURL('image/png')
+    }
     // Overlays only — live Outer/Inner settings stay outside Paint.
     await onSave(
       {
@@ -9949,6 +10087,7 @@ export function IconPaintEditor({
         contentDecorationsPng: contentDecor.toDataURL('image/png'),
         contentAboveDecorationsPng: contentAboveDecor.toDataURL('image/png'),
         contentBelowDecorationsPng: contentBelowDecor.toDataURL('image/png'),
+        contentFrontPng,
         contentSync,
         linkedTextInDecorations: linkedBake,
         contentBakedInDecorations: contentBake,
@@ -10657,7 +10796,7 @@ export function IconPaintEditor({
     const selectedIds = new Set(
       [...selectedLayerIds].filter((id) => {
         const l = linesRef.current.find((item) => item.id === id)
-        return !!l && !l.marqueeItem
+        return !!l && !l.marqueeItem && !l.brushLayer
       })
     )
     // If both a group and one of its descendants are selected, group the
@@ -10812,7 +10951,7 @@ export function IconPaintEditor({
     return false
   }
   const groupableLayerCount = lines.filter(
-    (l) => selectedLayerIds.has(l.id) && !l.marqueeItem && !selectedLayerHasAncestor(l)
+    (l) => selectedLayerIds.has(l.id) && !l.marqueeItem && !l.brushLayer && !selectedLayerHasAncestor(l)
   ).length
   const selectedIsGroup = selectedObj?.type === 'group'
   const panelObjectsForBase = (
@@ -10833,6 +10972,7 @@ export function IconPaintEditor({
         (l) =>
           vectorLayerOf(l) === id &&
           !l.marqueeItem &&
+          !l.brushLayer &&
           !l.punchMask &&
           !l.parentId &&
           !!l.belowBase === belowBase
@@ -13201,6 +13341,92 @@ export function IconPaintEditor({
               resolveLayerDropAtPoint(x, y)
             }}
           >
+            {[...lines].filter((l) => l.brushLayer).reverse().map((l) => {
+              const selected = selectedLayerIds.has(l.id)
+              const objectEnabled = (l.visible ?? l.editable ?? true) !== false
+              return (
+                <div
+                  key={`brush:${l.id}`}
+                  onPointerDown={(e) => {
+                    if (e.button !== 0 || renamingLayerId === l.id) return
+                    const t = e.target as HTMLElement | null
+                    if (t?.closest?.('input,button,textarea,a')) return
+                    selectedBaseLayerRef.current = null
+                    setSelectedBaseLayer(null)
+                    const already = selectedLayerIdsRef.current.has(l.id)
+                    if (already) layerClickToggleRef.current = l.id
+                    else {
+                      layerClickToggleRef.current = null
+                      selectLine(l)
+                    }
+                    setTool('pointer')
+                    redrawLines()
+                    drawHandles()
+                  }}
+                  onPointerUp={(e) => {
+                    if (e.button !== 0) return
+                    const key = layerClickToggleRef.current
+                    layerClickToggleRef.current = null
+                    if (key === l.id) deselectLayerFromClick(key)
+                  }}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation()
+                    setRenamingLayerId(l.id)
+                    setLayerNameDraft(l.name ?? 'Brush')
+                  }}
+                  className={`relative flex items-center gap-1.5 rounded-lg border px-1.5 py-1.5 text-[11px] transition-colors cursor-pointer ${
+                    selected
+                      ? 'border-accent bg-surface3/70 text-text'
+                      : objectEnabled
+                        ? 'border-border bg-surface3/70 text-text hover:border-muted'
+                        : 'border-border bg-surface3/40 text-muted opacity-55'
+                  }`}
+                  title="Stays on top. Select it to delete it. It cannot be moved."
+                >
+                  <span className="w-3 shrink-0" />
+                  <span className="w-3 shrink-0" />
+                  <Pencil size={13} className="shrink-0" />
+                  <input
+                    type="checkbox"
+                    checked={objectEnabled}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                    onChange={(e) => {
+                      const checked = e.target.checked
+                      commitLines(linesRef.current.map((item) =>
+                        item.id === l.id ? { ...item, visible: checked } : item
+                      ))
+                      redrawLines()
+                    }}
+                    className="accent-accent shrink-0"
+                    title={objectEnabled ? 'Hide layer' : 'Show layer'}
+                  />
+                  {renamingLayerId === l.id ? (
+                    <input
+                      autoFocus
+                      value={layerNameDraft}
+                      onChange={(e) => setLayerNameDraft(e.target.value)}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      onClick={(e) => e.stopPropagation()}
+                      onBlur={() => {
+                        const name = layerNameDraft.trim() || 'Brush'
+                        commitLines(linesRef.current.map((item) =>
+                          item.id === l.id ? { ...item, name } : item
+                        ))
+                        setRenamingLayerId(null)
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+                        if (e.key === 'Escape') setRenamingLayerId(null)
+                      }}
+                      className="flex-1 min-w-0 bg-transparent border-b border-accent outline-none text-[11px]"
+                    />
+                  ) : (
+                    <span className="flex-1 min-w-0 truncate">{l.name || 'Brush'}</span>
+                  )}
+                </div>
+              )
+            })}
             {layerOrder.map((id) => {
               const isContent = id === 'content'
               const enabled = isContent ? editContent : editContainer && containerUsable
