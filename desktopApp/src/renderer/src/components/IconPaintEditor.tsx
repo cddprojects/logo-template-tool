@@ -1743,9 +1743,12 @@ export function IconPaintEditor({
         }
       }
 
-      if (Number.isFinite(reopenScale) && Math.abs(reopenScale - 1) > 0.001) {
+      // A bad saved outer size used to scale Inner paint down to a speck.
+      // Only follow a modest size change; leave Inner paint alone otherwise.
+      if (Number.isFinite(reopenScale) && reopenScale >= 0.75 && Math.abs(reopenScale - 1) > 0.001) {
         restored = restored.map((l) => {
-          if (l.contentBound || l.contentProxySlot || l.linkedOutsideText) return l
+          if (l.brushLayer || l.contentBound || l.contentProxySlot || l.linkedOutsideText) return l
+          if (l.name === 'Inner content' || l.imageSourceDataUrl) return l
           if ((l.layer ?? 'content') !== 'content') return l
           return scalePaintLineAround(l, W / 2, H / 2, reopenScale)
         })

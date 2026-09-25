@@ -1322,6 +1322,52 @@ function strokeInkCounts(
   return opaqueInkCounts(ctx.getImageData(0, 0, scanW, scanH).data)
 }
 
+/** Strokes on the Inner content image, in that image's box, then fitted to the scan grid. */
+function innerContentStrokeInk(
+  session: PaintSession | null | undefined,
+  box: { x: number; y: number; w: number; h: number } | null,
+  scanW: number,
+  scanH: number
+): { color: string; count: number }[] {
+  if (!box || scanW < 1 || scanH < 1) return []
+  const vectors = (session?.vectors ?? []).filter(
+    (v) =>
+      !v.brushLayer &&
+      (isBaseImageVector(v) || v.name === 'Inner content') &&
+      v.paintStrokes?.some((s) => s.tool !== 'eraser' && s.pts.length > 0)
+  )
+  if (!vectors.length) return []
+  const res = Math.max(1, session?.resolution || 512)
+  const canvas = document.createElement('canvas')
+  canvas.width = res
+  canvas.height = res
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return []
+  for (const v of vectors) {
+    const stamp = stampBoxOf(v) ?? box
+    const strokes = (v.paintStrokes ?? []).filter((s) => s.tool !== 'eraser' && s.pts.length > 0)
+    if (!strokes.length) continue
+    drawPaintStrokesInBox(
+      ctx,
+      stamp,
+      strokes.map((s) => ({
+        tool: 'brush' as const,
+        pts: s.pts,
+        size: s.size,
+        color: s.color,
+        tip: brushTipOf(s.tip)
+      }))
+    )
+  }
+  const out = document.createElement('canvas')
+  out.width = scanW
+  out.height = scanH
+  const outCtx = out.getContext('2d', { willReadFrequently: true })
+  if (!outCtx) return []
+  outCtx.drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, scanW, scanH)
+  return opaqueInkCounts(outCtx.getImageData(0, 0, scanW, scanH).data)
+}
+
 /** Brush layers cover the paint canvas. Count only the part over the base image. */
 function brushLayerInkCounts(
   session: PaintSession | null | undefined,
@@ -1590,10 +1636,18 @@ export async function rescanBaseLayerColors(
   const brushVectors = baseBrushVectors(input.session)
   const bases = brushVectors.filter(isBaseImageVector)
   const base = bases.find((v) => v.paintStrokes?.some((s) => s.pts.length > 0)) ?? bases[0]
-  const strokes = brushVectors.filter((v) => !v.brushLayer).flatMap((v) => v.paintStrokes ?? [])
+  const strokes = brushVectors
+    .filter((v) => !v.brushLayer && !isBaseImageVector(v))
+    .flatMap((v) => v.paintStrokes ?? [])
   const box = base ? stampBoxOf(base) : null
   const planes = baseLayerPlanes(input.session)
   const hasStrokes = !!strokes?.some((s) => s.pts.length > 0)
+  const hasInnerStrokes = (input.session?.vectors ?? []).some(
+    (v) =>
+      !v.brushLayer &&
+      (isBaseImageVector(v) || v.name === 'Inner content') &&
+      v.paintStrokes?.some((s) => s.tool !== 'eraser' && s.pts.length > 0)
+  )
   const hasBrushLayers = (input.session?.vectors ?? []).some(
     (v) => v.brushLayer && v.paintStrokes?.some((s) => s.tool !== 'eraser' && s.pts.length > 0)
   )
@@ -1606,7 +1660,7 @@ export async function rescanBaseLayerColors(
       ((planes.below && (await pngBoxHasOpaque(planes.below, box))) ||
         (planes.above && (await pngBoxHasOpaque(planes.above, box)))))
   )
-  if (!hasStrokes && !hasOverlay && !hasBrushLayers) {
+  if (!hasStrokes && !hasOverlay && !hasBrushLayers && !hasInnerStrokes) {
     const seeded = await seedUploadedImageColors(source)
     const palette = uploadPalette(input)
     const kept = withFirstPalette(
@@ -1648,12 +1702,17 @@ export async function rescanBaseLayerColors(
   photoCanvas.height = scanH
   const photoCtx = photoCanvas.getContext('2d', { willReadFrequently: true })
   if (photo && photoCtx) photoCtx.drawImage(photo, 0, 0, scanW, scanH)
-  const [contentInk, frontInk, belowInk, strokeInk, brushLayerInk] = await Promise.all([
-    planeInkAll(planes.content, scanW, scanH),
+  const [contentInk, frontInk, belowInk, strokeInk, brushLayerInk, innerStrokeInk] = await Promise.all([
+    // Inner paint overlay, cropped to the Inner content image so a brush on
+    // that layer lines up with the photo instead of the whole canvas.
+    box
+      ? planeInkCounts(planes.content, box, scanW, scanH)
+      : planeInkAll(planes.content, scanW, scanH),
     planeInkAll(planes.front, scanW, scanH),
     planeInkCounts(planes.below, box, scanW, scanH),
     Promise.resolve(strokeInkCounts(strokes ?? [], scanW, scanH)),
-    Promise.resolve(brushLayerInkCounts(input.session, box, scanW, scanH))
+    Promise.resolve(brushLayerInkCounts(input.session, box, scanW, scanH)),
+    Promise.resolve(innerContentStrokeInk(input.session, box, scanW, scanH))
   ])
   const histogram = photo && photoCtx
     ? paletteFromPixels(
@@ -1665,7 +1724,8 @@ export async function rescanBaseLayerColors(
           ...contentInk.map((ink) => ({ ...ink, protect: true })),
           ...frontInk.map((ink) => ({ ...ink, protect: true })),
           ...strokeInk.map((ink) => ({ ...ink, protect: true })),
-          ...brushLayerInk.map((ink) => ({ ...ink, protect: true }))
+          ...brushLayerInk.map((ink) => ({ ...ink, protect: true })),
+          ...innerStrokeInk.map((ink) => ({ ...ink, protect: true }))
         ]
       )
     : await scanImagePalette(visible || source, 5, 512)

@@ -2485,7 +2485,7 @@ export function applyOutsideContentToProxy(
   l: LineObj,
   settings: OutsideContentSettings,
   resolution: number,
-  freshCrop?: { dataUrl: string; w: number; h: number },
+  freshCrop?: { dataUrl: string; w: number; h: number; minX?: number; minY?: number },
   innerDrawSize = resolution
 ): LineObj {
   const off = outsideOffsetToPaint(settings, resolution)
@@ -2496,8 +2496,21 @@ export function applyOutsideContentToProxy(
   // A previous paint box is the position the image already had. Do not shrink
   // it or pull it back inside the canvas — that is a different size and place.
   const savedBox = !!(a && b && w >= 1 && h >= 1)
+  // The live bake is the size Inner has outside Paint. A collapsed stamp box
+  // (well under half that bake) is not a resize the user asked for.
+  const bakeMax = freshCrop ? Math.max(freshCrop.w, freshCrop.h) : 0
+  const collapsed = !!(savedBox && bakeMax > 48 && Math.max(w, h) < bakeMax * 0.45)
   let pts: { x: number; y: number }[]
-  if (savedBox) {
+  if (collapsed && freshCrop) {
+    const cropX = freshCrop.minX ?? 0
+    const cropY = freshCrop.minY ?? 0
+    pts = stampPtsAt(
+      cropX + freshCrop.w / 2,
+      cropY + freshCrop.h / 2,
+      freshCrop.w,
+      freshCrop.h
+    )
+  } else if (savedBox) {
     pts = [{ x: a.x, y: a.y }, { x: b.x, y: b.y }]
   } else {
     if (freshCrop || settings.sizeRatio != null) {

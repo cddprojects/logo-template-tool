@@ -236,9 +236,11 @@ export function paletteFromPixels(
     const r = quantize(rgb[0])
     const g = quantize(rgb[1])
     const b = quantize(rgb[2])
-    const samePhoto = merged.find(
-      (m) => !m.protect && rgbDist([m.r, m.g, m.b], [r, g, b]) <= 12
-    )
+    const samePhoto = !ink.protect
+      ? merged.find(
+          (m) => !m.protect && rgbDist([m.r, m.g, m.b], [r, g, b]) <= 12
+        )
+      : undefined
     if (samePhoto) {
       samePhoto.count += ink.count
       continue
