@@ -256,13 +256,16 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   const updateConfig = useCallback(
     (patch: Partial<LogoConfig>) => {
       if (!active) return
-      onChange(
-        variants.map((v) =>
-          v.id === active.id ? { ...v, config: { ...v.config, ...patch } } : v
-        )
+      // Write the ref first. Rescan sets colours, then the paint session, in
+      // the same turn. The second write has to see the first or Color 1–5
+      // are replaced by the icon from before the scan.
+      const next = variantsRef.current.map((v) =>
+        v.id === active.id ? { ...v, config: { ...v.config, ...patch } } : v
       )
+      variantsRef.current = next
+      onChange(next)
     },
-    [active, variants, onChange]
+    [active, onChange]
   )
 
   // Keep every linked logo's `syncedIcon` mirror up to date with its favicon twin
@@ -300,14 +303,18 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
 
   const setIcon = useCallback(
     (patch: Partial<LogoConfig['icon']>) => {
+      const current = variantsRef.current.find((v) => v.id === active?.id)?.config
+      if (!current) return
       // Always edit the custom (unlinked) icon — never clobber syncedIcon here.
-      let next: IconConfig = { ...safeConfig!.icon, ...patch }
+      // Read the ref, not the last render: a colour patch and a session patch
+      // in the same turn must stack.
+      let next: IconConfig = { ...current.icon, ...patch }
       // Type switch: stash current source fields + Inner overlay/vectors, restore target.
       if (
         patch.sourceType !== undefined &&
-        patch.sourceType !== safeConfig!.icon.sourceType
+        patch.sourceType !== current.icon.sourceType
       ) {
-        const switched = switchIconSourceType(safeConfig!.icon, patch.sourceType)
+        const switched = switchIconSourceType(current.icon, patch.sourceType)
         const { sourceType: _s, ...rest } = patch
         next = { ...switched, ...rest, sourceType: patch.sourceType }
       }
@@ -355,23 +362,23 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
         iconSyncBroken: false,
         syncedIconSnapshot: null,
         // Drop stale favicon mirror so custom preview/export never diverges from `icon`.
-        ...(safeConfig!.iconLinked ? {} : { syncedIcon: null })
+        ...(current.iconLinked ? {} : { syncedIcon: null })
       })
     },
-    [safeConfig?.icon, safeConfig?.iconLinked, updateConfig]
+    [active?.id, updateConfig]
   )
 
   const patchMatchingFaviconContent = useCallback(
     (patch: Partial<FaviconConfig['content']>) => {
       if (!onFaviconChange || !matchingFaviconVariant) return
       const id = matchingFaviconVariant.id
-      onFaviconChange(
-        faviconVariantsRef.current.map((v) =>
-          v.id === id
-            ? { ...v, config: { ...v.config, content: { ...v.config.content, ...patch } } }
-            : v
-        )
+      const next = faviconVariantsRef.current.map((v) =>
+        v.id === id
+          ? { ...v, config: { ...v.config, content: { ...v.config.content, ...patch } } }
+          : v
       )
+      faviconVariantsRef.current = next
+      onFaviconChange(next)
     },
     [onFaviconChange, matchingFaviconVariant]
   )
@@ -1435,11 +1442,11 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
                   onPaintSession={(session) => {
                     if (!onFaviconChange || !matchingFaviconVariant) return
                     const id = matchingFaviconVariant.id
-                    onFaviconChange(
-                      faviconVariantsRef.current.map((v) =>
-                        v.id === id ? { ...v, config: { ...v.config, paintSession: session } } : v
-                      )
+                    const next = faviconVariantsRef.current.map((v) =>
+                      v.id === id ? { ...v, config: { ...v.config, paintSession: session } } : v
                     )
+                    faviconVariantsRef.current = next
+                    onFaviconChange(next)
                   }}
                   onChange={(patch) => patchMatchingFaviconContent(patch)}
                 />

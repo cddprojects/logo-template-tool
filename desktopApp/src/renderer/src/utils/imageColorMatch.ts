@@ -1506,11 +1506,16 @@ function withForcedBrushColors(histogram: string[], brushColors: string[]): stri
 }
 
 function sessionBrushStrokes(session: PaintSession | null | undefined) {
+  const owned = new Set(baseBrushVectors(session).map((v) => v.id))
   return (session?.vectors ?? []).flatMap((v) => {
     if ((v.visible ?? v.editable ?? true) === false) return []
     const strokes = (v.paintStrokes ?? []).filter((s) => s.tool !== 'eraser' && s.pts.length > 0)
     if (!strokes.length) return []
-    if (v.brushLayer || isBaseImageVector(v) || v.name === 'Inner content') return strokes
+    // The Inner content image, the pinned Brush layer, and a group that owns
+    // that image. A stroke on the selected group is still brush on the photo.
+    if (owned.has(v.id) || v.brushLayer || isBaseImageVector(v) || v.name === 'Inner content') {
+      return strokes
+    }
     return []
   })
 }

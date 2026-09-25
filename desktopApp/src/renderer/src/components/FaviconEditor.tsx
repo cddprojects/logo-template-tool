@@ -190,9 +190,15 @@ export function FaviconEditor({
   const updateConfig = useCallback(
     (patch: Partial<FaviconConfig>) => {
       if (!active) return
-      onChange(variants.map((v) => v.id === active.id ? { ...v, config: { ...v.config, ...patch } } : v))
+      // Same turn as Rescan: colours land first, then the paint session.
+      // The session write has to keep the colours just written.
+      const next = variantsRef.current.map((v) =>
+        v.id === active.id ? { ...v, config: { ...v.config, ...patch } } : v
+      )
+      variantsRef.current = next
+      onChange(next)
     },
-    [active, variants, onChange]
+    [active, onChange]
   )
 
   const setContent = useCallback(
