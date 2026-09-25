@@ -572,10 +572,26 @@ export function shouldSkipLiveLettersForPaintSession(
   return (session.vectors ?? []).some(linkedTextHasPaintTransform)
 }
 
+function isRasterEditedInner(v: PaintVector): boolean {
+  return !!(
+    v.rasterEdited &&
+    v.imageDataUrl &&
+    !v.brushLayer &&
+    (v.contentBound ||
+      v.contentProxySlot ||
+      v.imageSourceDataUrl ||
+      (v.type === 'stamp' && v.name === 'Inner content')) &&
+    v.pts &&
+    v.pts.length >= 2
+  )
+}
+
 /** True when Paint baked a warped Inner proxy into decorations — skip live Inner. */
 export function shouldSkipLiveInnerForPaintSession(
   session: PaintSession | null | undefined
 ): boolean {
+  // A filled Inner image is drawn from its saved bitmap. The live photo would cover that fill.
+  if ((session?.vectors ?? []).some(isRasterEditedInner)) return true
   if (!session?.contentBakedInDecorations) return false
   // After an Inner type switch, contentDecorationsPng was wrongly set to the
   // overlay PNG while contentBakedInDecorations stayed true — live geo/lucide
@@ -745,6 +761,37 @@ async function drawOverlayLayers(
   await drawScaledPng(ctx, session.contentPng, x, y, size, session, shapeFallback)
 }
 
+/** Filled Inner image. Drawn in place of the live photo so a Fill survives Save. */
+async function drawRasterEditedInner(
+  ctx: CanvasRenderingContext2D,
+  session: PaintSession,
+  x: number,
+  y: number,
+  size: number,
+  layer: PaintLayerId,
+  shapeFallback?: number
+): Promise<void> {
+  if (layer !== 'content') return
+  const items = (session.vectors ?? []).filter(isRasterEditedInner)
+  if (!items.length) return
+  ctx.save()
+  applyPaintSpaceTransform(ctx, session, x, y, size, shapeFallback)
+  for (const v of items) {
+    const img = await loadCachedImage(v.imageDataUrl!)
+    if (!img) continue
+    const a = v.pts![0]!
+    const b = v.pts![1]!
+    ctx.drawImage(
+      img,
+      Math.min(a.x, b.x),
+      Math.min(a.y, b.y),
+      Math.max(1, Math.abs(b.x - a.x)),
+      Math.max(1, Math.abs(b.y - a.y))
+    )
+  }
+  ctx.restore()
+}
+
 /** Brush ink on the base image, drawn above live Color 1–5 so a slot edit can retint it. */
 function drawBaseImageBrushStrokes(
   ctx: CanvasRenderingContext2D,
@@ -844,6 +891,7 @@ export async function applyPaintLayerDecorations(
     // Proxies: overlays only until next Paint save regenerates decorations.
     const png = layer === 'container' ? session.containerPng : session.contentPng
     await drawScaledPng(ctx, png, x, y, size, session, shapeFallback)
+    await drawRasterEditedInner(ctx, session, x, y, size, layer, shapeFallback)
     drawBaseImageBrushStrokes(ctx, session, x, y, size, layer, shapeFallback)
     if (layer === 'content') {
       await drawScaledPng(ctx, session.contentFrontPng, x, y, size, session, shapeFallback)
@@ -875,6 +923,7 @@ export async function applyPaintLayerDecorations(
     await drawScaledPng(ctx, session.containerPng, x, y, size, session, shapeFallback)
   }
 
+  await drawRasterEditedInner(ctx, session, x, y, size, layer, shapeFallback)
   drawBaseImageBrushStrokes(ctx, session, x, y, size, layer, shapeFallback)
 
   if (layer === 'content' && shouldRenderContentVectorsLive(session)) {

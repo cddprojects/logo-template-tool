@@ -1346,6 +1346,27 @@ function reserveStrokeInk(
   return [...byColor.entries()].map(([color, count]) => ({ color, count }))
 }
 
+/** Exact brush colours on the Inner image or a Brush layer. These must occupy a Color slot. */
+function brushStrokeHexes(session: PaintSession | null | undefined): string[] {
+  const out: string[] = []
+  for (const stroke of sessionBrushStrokes(session)) {
+    const key = (stroke.color || '').trim().slice(0, 7).toLowerCase()
+    if (!/^#[0-9a-f]{6}$/.test(key) || out.some((c) => sameSolidColor(c, key))) continue
+    out.push(key)
+  }
+  return out
+}
+
+function withForcedBrushColors(histogram: string[], brushColors: string[]): string[] {
+  const next = histogram.filter(Boolean)
+  for (const color of brushColors) {
+    if (next.some((c) => sameSolidColor(c, color))) continue
+    if (next.length < 5) next.push(color)
+    else next[next.length - 1] = color
+  }
+  return next.slice(0, 5)
+}
+
 function sessionBrushStrokes(session: PaintSession | null | undefined) {
   return (session?.vectors ?? []).flatMap((v) => {
     if ((v.visible ?? v.editable ?? true) === false) return []
@@ -1679,6 +1700,7 @@ export async function rescanBaseLayerColors(
   const hasBrushLayers = (input.session?.vectors ?? []).some(
     (v) => v.brushLayer && v.paintStrokes?.some((s) => s.tool !== 'eraser' && s.pts.length > 0)
   )
+  const brushColors = brushStrokeHexes(input.session)
   const contentHasPaint = await pngHasAnyOpaque(planes.content)
   const frontHasPaint = await pngHasAnyOpaque(planes.front)
   const hasOverlay = !!(
@@ -1688,7 +1710,7 @@ export async function rescanBaseLayerColors(
       ((planes.below && (await pngBoxHasOpaque(planes.below, box))) ||
         (planes.above && (await pngBoxHasOpaque(planes.above, box)))))
   )
-  if (!hasStrokes && !hasOverlay && !hasBrushLayers && !hasInnerStrokes) {
+  if (!hasStrokes && !hasOverlay && !hasBrushLayers && !hasInnerStrokes && brushColors.length === 0) {
     const seeded = await seedUploadedImageColors(source)
     const palette = uploadPalette(input)
     const kept = withFirstPalette(
@@ -1747,7 +1769,7 @@ export async function rescanBaseLayerColors(
     Promise.resolve(brushLayerInkCounts(input.session, box, scanW, scanH)),
     Promise.resolve(innerContentStrokeInk(input.session, box, scanW, scanH))
   ])
-  const histogram = photo && photoCtx
+  const counted = photo && photoCtx
     ? paletteFromPixels(
         photoCtx.getImageData(0, 0, scanW, scanH).data,
         5,
@@ -1763,6 +1785,7 @@ export async function rescanBaseLayerColors(
         ]
       )
     : await scanImagePalette(visible || source, 5, 512)
+  const histogram = input.imageKeepColors ? counted : withForcedBrushColors(counted, brushColors)
   if (!histogram.length) {
     const seeded = await seedUploadedImageColors(source)
     const finished = finishUploadedImageSeed(withFirstPalette(seeded, input), input)

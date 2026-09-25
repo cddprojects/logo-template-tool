@@ -2533,7 +2533,7 @@ export function applyOutsideContentToProxy(
   return {
     ...l,
     type: 'stamp',
-    imageDataUrl: freshCrop?.dataUrl ?? l.imageDataUrl,
+    imageDataUrl: l.rasterEdited && l.imageDataUrl ? l.imageDataUrl : (freshCrop?.dataUrl ?? l.imageDataUrl),
     color: settings.fillColor || l.color,
     pts,
     contentBound: true,

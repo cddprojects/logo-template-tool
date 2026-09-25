@@ -263,7 +263,13 @@ export function paletteFromPixels(
   const byCount = (a: PaletteBucket, b: PaletteBucket) => b.count - a.count
   const pinned = merged.filter((m) => m.protect).sort(byCount)
   const rest = merged.filter((m) => !m.protect).sort(byCount)
-  const chosen = [...pinned.slice(0, maxColors), ...rest].slice(0, maxColors)
+  // A brush colour that is not already in the photo must keep a slot. Larger
+  // protected paint (the photo copied into an overlay) must not crowd it out.
+  const novel = pinned.filter(
+    (p) => !rest.some((ph) => rgbDist([p.r, p.g, p.b], [ph.r, ph.g, ph.b]) <= MERGE_DIST)
+  )
+  const familiar = pinned.filter((p) => !novel.includes(p))
+  const chosen = [...novel, ...familiar, ...rest].slice(0, maxColors)
   return chosen.sort(byCount).map((c) => toHex(c.r, c.g, c.b))
 }
 

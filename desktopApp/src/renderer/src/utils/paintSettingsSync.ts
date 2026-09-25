@@ -2035,9 +2035,12 @@ export function persistContentProxyVectors(
   vectors: PaintVector[] | null | undefined
 ): PaintVector[] {
   return (vectors ?? []).map((v) => {
+    // A Fill writes the new pixels into imageDataUrl. Brush strokes stay vectors,
+    // so this bitmap must survive Save or the fill disappears on preview and reopen.
+    const keptImage = v.rasterEdited && v.imageDataUrl ? v.imageDataUrl : undefined
     if (isContentProxySlotVector(v) && !isContentProxyVector(v)) {
       const { imageDataUrl: _img, contentBound: _cb, ...rest } = v
-      return { ...rest, contentProxySlot: true, contentBound: undefined, imageDataUrl: undefined }
+      return { ...rest, contentProxySlot: true, contentBound: undefined, imageDataUrl: keptImage }
     }
     if (!isContentProxyVector(v)) return v
     const { imageDataUrl: _img, contentBound: _cb, ...rest } = v
@@ -2047,7 +2050,7 @@ export function persistContentProxyVectors(
       stampSource: rest.stampSource ?? 'image',
       contentProxySlot: true,
       contentBound: undefined,
-      imageDataUrl: undefined,
+      imageDataUrl: keptImage,
       name: rest.name || 'Inner content',
       layer: rest.layer ?? 'content'
     }
@@ -2864,7 +2867,9 @@ export function buildPaintContentSync(opts: {
         sync.imageUnmarkedColorSlot = proxy.unmarkedColorSlot
       }
       // Marks + regions are sized to imageSourceDataUrl — keep that as live imageDataUrl.
-      if (proxy.imageSourceDataUrl) sync.imageDataUrl = proxy.imageSourceDataUrl
+      // A filled bitmap stays on the vector (rasterEdited). Putting the original
+      // source here would paint over that fill as soon as the live image draws.
+      if (proxy.imageSourceDataUrl && !proxy.rasterEdited) sync.imageDataUrl = proxy.imageSourceDataUrl
     }
     Object.assign(sync, shadowSyncFromVector(proxy, res, drawArea))
     return sync
@@ -3551,7 +3556,7 @@ function clearPaintSessionBoundImagePixels(
           stampSource: rest.stampSource ?? 'image',
           contentProxySlot: true,
           contentBound: undefined,
-          imageDataUrl: undefined
+          imageDataUrl: v.rasterEdited && v.imageDataUrl ? v.imageDataUrl : undefined
         }
       }
       return v

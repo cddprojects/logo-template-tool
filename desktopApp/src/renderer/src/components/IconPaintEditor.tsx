@@ -1525,7 +1525,12 @@ export function IconPaintEditor({
           normalizeLinkedTextVectors(
             initialVectors.map((v) =>
               v.contentBound
-                ? { ...v, contentBound: undefined, contentProxySlot: true, imageDataUrl: undefined }
+                ? {
+                    ...v,
+                    contentBound: undefined,
+                    contentProxySlot: true,
+                    imageDataUrl: v.rasterEdited ? v.imageDataUrl : undefined
+                  }
                 : v
             ),
             null
@@ -1607,13 +1612,16 @@ export function IconPaintEditor({
             seededProxy &&
             (outsideAll.contentType === 'image' || !!outsideAll.imageSourceDataUrl)
           ) {
-            // Same source + Color/marks resolve as outside preview (no region rebuild).
-            seededProxy = await hydrateImageProxyColors(seededProxy, outsideAll)
-            // Object colour must stay opaque. A 0% Color slot is not a see-through
-            // fill of the whole image — Save would bake it and Color 1–5 would
-            // stop owning that section.
-            const slotHex = (seededProxy.imageColor1 || seededProxy.color || '#ffffff').trim()
-            seededProxy.color = /^#[0-9a-fA-F]{6,8}$/i.test(slotHex) ? slotHex.slice(0, 7) : '#ffffff'
+            // A Fill already wrote the bitmap. Rebuilding from Color 1–5 would drop it.
+            if (!(seededProxy.rasterEdited && seededProxy.imageDataUrl)) {
+              // Same source + Color/marks resolve as outside preview (no region rebuild).
+              seededProxy = await hydrateImageProxyColors(seededProxy, outsideAll)
+              // Object colour must stay opaque. A 0% Color slot is not a see-through
+              // fill of the whole image — Save would bake it and Color 1–5 would
+              // stop owning that section.
+              const slotHex = (seededProxy.imageColor1 || seededProxy.color || '#ffffff').trim()
+              seededProxy.color = /^#[0-9a-fA-F]{6,8}$/i.test(slotHex) ? slotHex.slice(0, 7) : '#ffffff'
+            }
             restored = restored.map((l) => (l.id === seededProxy!.id ? seededProxy! : l))
             if (seededProxy.imageDataUrl) {
               ensureStampImage(seededProxy.imageDataUrl, () => {
@@ -2182,11 +2190,46 @@ export function IconPaintEditor({
       img.src = dataUrl
     })
 
-  /** Drop brush layers, brush strokes, and eraser strokes. Fill and images stay. */
+  /**
+   * Drop brush and eraser for the current selection. Fill and images stay.
+   * Nothing selected: only the top Brush layer. Every object selected: all layers.
+   */
   const removeBrushAndEraser = () => {
+    const items = linesRef.current
+    const eligible = items.filter((l) => !l.marqueeItem && !l.punchMask).map((l) => l.id)
+    const selectedIds = new Set(selectedLayerIdsRef.current)
+    if (selectedIdRef.current) selectedIds.add(selectedIdRef.current)
+    const everything =
+      eligible.length > 0 && eligible.every((id) => selectedIds.has(id))
+    const nothing = selectedIds.size === 0 && !selectedBaseLayerRef.current
+    let scope: Set<string> | 'all' | null = null
+    if (everything) scope = 'all'
+    else if (nothing) {
+      const top = [...items]
+        .reverse()
+        .find(
+          (l) =>
+            l.brushLayer &&
+            (l.visible ?? true) !== false &&
+            l.paintStrokes?.some((s) => (s.tool === 'brush' || s.tool === 'eraser') && s.pts.length > 0)
+        )
+      scope = top ? new Set([top.id]) : null
+    } else if (selectedIds.size > 0) {
+      const expanded = new Set(selectedIds)
+      for (const id of selectedIds) {
+        const item = items.find((l) => l.id === id)
+        if (item?.type === 'group') {
+          for (const child of descendantIds(id, items)) expanded.add(child)
+        }
+      }
+      scope = expanded
+    }
+    if (!scope) return
+    const inScope = (id: string) => scope === 'all' || scope.has(id)
     const removedIds = new Set<string>()
     let changed = false
-    const next = linesRef.current.flatMap((l) => {
+    const next = items.flatMap((l) => {
+      if (!inScope(l.id)) return [l]
       if (l.brushLayer) {
         removedIds.add(l.id)
         changed = true
@@ -2198,18 +2241,20 @@ export function IconPaintEditor({
       changed = true
       return [{ ...l, paintStrokes: kept.length ? kept : undefined }]
     })
-    const front = frontCanvasRef.current
-    const fctx = front?.getContext('2d')
-    if (front && fctx) {
-      const data = fctx.getImageData(0, 0, front.width, front.height).data
-      let any = false
-      for (let i = 3; i < data.length; i += 64) {
-        if (data[i] > 8) { any = true; break }
-      }
-      if (any) {
-        reset2dState(fctx)
-        fctx.clearRect(0, 0, front.width, front.height)
-        changed = true
+    if (scope === 'all') {
+      const front = frontCanvasRef.current
+      const fctx = front?.getContext('2d')
+      if (front && fctx) {
+        const data = fctx.getImageData(0, 0, front.width, front.height).data
+        let any = false
+        for (let i = 3; i < data.length; i += 64) {
+          if (data[i] > 8) { any = true; break }
+        }
+        if (any) {
+          reset2dState(fctx)
+          fctx.clearRect(0, 0, front.width, front.height)
+          changed = true
+        }
       }
     }
     if (!changed) return
@@ -11027,6 +11072,29 @@ export function IconPaintEditor({
   const eligibleObjectIds = lines.filter((l) => !l.marqueeItem && !l.punchMask).map((l) => l.id)
   const allObjectsSelected = eligibleObjectIds.length > 0 &&
     eligibleObjectIds.every((id) => selectedLayerIds.has(id))
+  const lineHasBrushOrEraser = (l: LineObj) =>
+    !!l.brushLayer || !!l.paintStrokes?.some((s) => s.tool === 'brush' || s.tool === 'eraser')
+  const nothingSelected = !selectedId && selectedLayerIds.size === 0 && !selectedBaseLayer
+  const topPinnedBrushLayer = [...lines].reverse().find(
+    (l) =>
+      l.brushLayer &&
+      (l.visible ?? true) !== false &&
+      l.paintStrokes?.some((s) => (s.tool === 'brush' || s.tool === 'eraser') && s.pts.length > 0)
+  )
+  let canRemoveBrushEraser = false
+  if (allObjectsSelected) canRemoveBrushEraser = lines.some(lineHasBrushOrEraser)
+  else if (nothingSelected) canRemoveBrushEraser = !!topPinnedBrushLayer
+  else if (selectedId || selectedLayerIds.size > 0) {
+    const ids = new Set(selectedLayerIds)
+    if (selectedId) ids.add(selectedId)
+    for (const id of [...ids]) {
+      const item = lines.find((l) => l.id === id)
+      if (item?.type === 'group') {
+        for (const child of descendantIds(id, lines)) ids.add(child)
+      }
+    }
+    canRemoveBrushEraser = lines.some((l) => ids.has(l.id) && lineHasBrushOrEraser(l))
+  }
   const toggleSelectAllObjects = () => {
     const ids = linesRef.current.filter((l) => !l.marqueeItem).map((l) => l.id)
     if (!ids.length) return
@@ -11922,9 +11990,18 @@ export function IconPaintEditor({
           </button>
           <button
             type="button"
+            disabled={!canRemoveBrushEraser}
             onClick={removeBrushAndEraser}
-            title="Remove brush layers, brush strokes, and eraser marks. Fill and images stay."
-            className="h-8 px-2 rounded-lg flex items-center bg-surface3 text-[10px] font-medium text-muted hover:text-text whitespace-nowrap transition-colors"
+            title={
+              !canRemoveBrushEraser
+                ? 'No brush or eraser to remove for the current selection'
+                : allObjectsSelected
+                  ? 'Remove brush and eraser on every layer. Fill and images stay.'
+                  : nothingSelected
+                    ? 'Remove the top Brush layer'
+                    : 'Remove brush and eraser on the selected layer. Fill and images stay.'
+            }
+            className="h-8 px-2 rounded-lg flex items-center bg-surface3 text-[10px] font-medium text-muted hover:text-text whitespace-nowrap transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
           >
             Remove brush & eraser
           </button>
