@@ -172,6 +172,99 @@ export function imageReplacementColors(fields: {
   })
 }
 
+type PaletteBucket = { r: number; g: number; b: number; count: number; protect?: boolean }
+
+function bucketsFromPixels(data: Uint8ClampedArray, alphaFloor: number): PaletteBucket[] {
+  const buckets = new Map<string, PaletteBucket>()
+  for (let i = 0; i < data.length; i += 4) {
+    const a = data[i + 3]
+    if (a < alphaFloor) continue
+    const r = quantize(data[i])
+    const g = quantize(data[i + 1])
+    const b = quantize(data[i + 2])
+    const key = `${r},${g},${b}`
+    const existing = buckets.get(key)
+    if (existing) existing.count++
+    else buckets.set(key, { r, g, b, count: 1 })
+  }
+  return [...buckets.values()]
+}
+
+function mergePaletteBuckets(sorted: PaletteBucket[], maxDist: number): PaletteBucket[] {
+  const merged: PaletteBucket[] = []
+  for (const bucket of sorted) {
+    const near = merged.find(
+      (m) => rgbDist([m.r, m.g, m.b], [bucket.r, bucket.g, bucket.b]) <= maxDist
+    )
+    if (near) {
+      const total = near.count + bucket.count
+      near.r = Math.round((near.r * near.count + bucket.r * bucket.count) / total)
+      near.g = Math.round((near.g * near.count + bucket.g * bucket.count) / total)
+      near.b = Math.round((near.b * near.count + bucket.b * bucket.count) / total)
+      near.count = total
+    } else {
+      merged.push({ ...bucket })
+    }
+  }
+  return merged
+}
+
+/** Opaque ink on its own layer, keyed by quantized hex. Counts are pixel totals. */
+export function opaqueInkCounts(data: Uint8ClampedArray): { color: string; count: number }[] {
+  return bucketsFromPixels(data, 16)
+    .sort((a, b) => b.count - a.count)
+    .map((c) => ({ color: toHex(c.r, c.g, c.b), count: c.count }))
+}
+
+/**
+ * Rank opaque pixels. `extraInk` is brush paint counted on the same grid.
+ * A protected colour keeps a Color slot even when the photo has more pixels.
+ * It joins an existing photo colour only when the two are almost the same.
+ */
+export function paletteFromPixels(
+  data: Uint8ClampedArray,
+  maxColors = MAX_PALETTE,
+  extraInk?: { color: string; count: number; protect?: boolean }[]
+): string[] {
+  const merged = mergePaletteBuckets(
+    bucketsFromPixels(data, 40).sort((a, b) => b.count - a.count),
+    MERGE_DIST
+  )
+  for (const ink of extraInk ?? []) {
+    const rgb = parseHex(ink.color)
+    if (!rgb || ink.count <= 0) continue
+    const r = quantize(rgb[0])
+    const g = quantize(rgb[1])
+    const b = quantize(rgb[2])
+    const samePhoto = merged.find(
+      (m) => !m.protect && rgbDist([m.r, m.g, m.b], [r, g, b]) <= 12
+    )
+    if (samePhoto) {
+      samePhoto.count += ink.count
+      continue
+    }
+    const sameBrush = ink.protect
+      ? merged.find(
+          (m) => !!m.protect && rgbDist([m.r, m.g, m.b], [r, g, b]) <= MERGE_DIST
+        )
+      : undefined
+    if (sameBrush) {
+      const total = sameBrush.count + ink.count
+      sameBrush.r = Math.round((sameBrush.r * sameBrush.count + r * ink.count) / total)
+      sameBrush.g = Math.round((sameBrush.g * sameBrush.count + g * ink.count) / total)
+      sameBrush.b = Math.round((sameBrush.b * sameBrush.count + b * ink.count) / total)
+      sameBrush.count = total
+      continue
+    }
+    merged.push({ r, g, b, count: ink.count, protect: !!ink.protect })
+  }
+  const byCount = (a: PaletteBucket, b: PaletteBucket) => b.count - a.count
+  const pinned = merged.filter((m) => m.protect).sort(byCount)
+  const rest = merged.filter((m) => !m.protect).sort(byCount)
+  const chosen = [...pinned.slice(0, maxColors), ...rest].slice(0, maxColors)
+  return chosen.sort(byCount).map((c) => toHex(c.r, c.g, c.b))
+}
+
 /**
  * Extract up to 5 dominant opaque colours from an image data URL.
  */
@@ -193,44 +286,7 @@ export async function scanImagePalette(
   const ctx = canvas.getContext('2d', { willReadFrequently: true })
   if (!ctx) return []
   ctx.drawImage(img, 0, 0, w, h)
-  const { data } = ctx.getImageData(0, 0, w, h)
-
-  type Bucket = { r: number; g: number; b: number; count: number }
-  const buckets = new Map<string, Bucket>()
-
-  for (let i = 0; i < data.length; i += 4) {
-    const a = data[i + 3]
-    if (a < 40) continue
-    const r = quantize(data[i])
-    const g = quantize(data[i + 1])
-    const b = quantize(data[i + 2])
-    const key = `${r},${g},${b}`
-    const existing = buckets.get(key)
-    if (existing) existing.count++
-    else buckets.set(key, { r, g, b, count: 1 })
-  }
-
-  const sorted = [...buckets.values()].sort((a, b) => b.count - a.count)
-  const merged: Bucket[] = []
-  for (const bucket of sorted) {
-    const near = merged.find(
-      (m) => rgbDist([m.r, m.g, m.b], [bucket.r, bucket.g, bucket.b]) <= MERGE_DIST
-    )
-    if (near) {
-      const total = near.count + bucket.count
-      near.r = Math.round((near.r * near.count + bucket.r * bucket.count) / total)
-      near.g = Math.round((near.g * near.count + bucket.g * bucket.count) / total)
-      near.b = Math.round((near.b * near.count + bucket.b * bucket.count) / total)
-      near.count = total
-    } else {
-      merged.push({ ...bucket })
-    }
-  }
-
-  return merged
-    .sort((a, b) => b.count - a.count)
-    .slice(0, maxColors)
-    .map((c) => toHex(c.r, c.g, c.b))
+  return paletteFromPixels(ctx.getImageData(0, 0, w, h).data, maxColors)
 }
 
 const recolorCache = new Map<string, string>()
