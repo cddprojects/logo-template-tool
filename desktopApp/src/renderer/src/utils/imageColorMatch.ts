@@ -1579,7 +1579,9 @@ export async function rescanBaseLayerColors(
         5,
         [
           ...belowInk,
-          ...contentInk,
+          // Base-layer brush is painted into the content overlay, not paintStrokes.
+          // A stroke is smaller than the photo, so it must keep a slot on its own.
+          ...contentInk.map((ink) => ({ ...ink, protect: true })),
           ...strokeInk.map((ink) => ({ ...ink, protect: true }))
         ]
       )
