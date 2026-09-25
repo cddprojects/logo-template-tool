@@ -2136,6 +2136,57 @@ export function IconPaintEditor({
       img.src = dataUrl
     })
 
+  /** Drop brush layers, brush strokes, and eraser strokes. Fill and images stay. */
+  const removeBrushAndEraser = () => {
+    const removedIds = new Set<string>()
+    let changed = false
+    const next = linesRef.current.flatMap((l) => {
+      if (l.brushLayer) {
+        removedIds.add(l.id)
+        changed = true
+        return []
+      }
+      if (!l.paintStrokes?.length) return [l]
+      const kept = l.paintStrokes.filter((s) => s.tool !== 'brush' && s.tool !== 'eraser')
+      if (kept.length === l.paintStrokes.length) return [l]
+      changed = true
+      return [{ ...l, paintStrokes: kept.length ? kept : undefined }]
+    })
+    const front = frontCanvasRef.current
+    const fctx = front?.getContext('2d')
+    if (front && fctx) {
+      const data = fctx.getImageData(0, 0, front.width, front.height).data
+      let any = false
+      for (let i = 3; i < data.length; i += 64) {
+        if (data[i] > 8) { any = true; break }
+      }
+      if (any) {
+        reset2dState(fctx)
+        fctx.clearRect(0, 0, front.width, front.height)
+        changed = true
+      }
+    }
+    if (!changed) return
+    linesRef.current = next
+    commitLines(next)
+    if (selectedIdRef.current && removedIds.has(selectedIdRef.current)) {
+      selectedIdRef.current = null
+      setSelectedId(null)
+    }
+    if (removedIds.size) {
+      setSelectedLayerIds((prev) => {
+        const kept = new Set(prev)
+        let hit = false
+        for (const id of removedIds) if (kept.delete(id)) hit = true
+        return hit ? kept : prev
+      })
+    }
+    objectPaintStrokeRef.current = null
+    redrawLines()
+    drawHandles()
+    pushHistory()
+  }
+
   /** Remove background on the selected stamp, or checked layer composites. */
   const removeBgOnLayers = async () => {
     setBgRemoving(true)
@@ -11784,6 +11835,14 @@ export function IconPaintEditor({
             } disabled:opacity-30 disabled:cursor-not-allowed`}
           >
             <Spline size={15} />
+          </button>
+          <button
+            type="button"
+            onClick={removeBrushAndEraser}
+            title="Remove brush layers, brush strokes, and eraser marks. Fill and images stay."
+            className="h-8 px-2 rounded-lg flex items-center bg-surface3 text-[10px] font-medium text-muted hover:text-text whitespace-nowrap transition-colors"
+          >
+            Remove brush & eraser
           </button>
           <button
             type="button"

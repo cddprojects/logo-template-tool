@@ -149,6 +149,7 @@ function UseGuide(): JSX.Element {
           <li>Colour swatch supports Solid / Linear / Radial. Gradients apply to shapes, lines, and text; brush and fill use the first stop</li>
           <li><span className="text-text">Lock aspect ratio</span> keeps polygons / irregular shapes square while drawing or resizing</li>
           <li><span className="text-text">Rotate / flip</span> turns or mirrors the whole paint canvas — 90° CW / CCW, 180°, flip H / V</li>
+          <li><span className="text-text">Remove brush & eraser</span> drops brush layers and brush or eraser strokes. Fill and images stay</li>
           <li><span className="text-text">Remove BG</span> clears a solid background on checked base layers (corner flood-fill)</li>
           <li>
             <Kbd>Ctrl</Kbd>+<Kbd>S</Kbd> or Save writes a flattened image plus an editable session to the chosen variants.
