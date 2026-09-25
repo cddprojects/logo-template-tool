@@ -1161,6 +1161,41 @@ async function displayPixelHex(
   return toHex(data[0]!, data[1]!, data[2]!)
 }
 
+/** Recolor every island of one colour. Used when the image has no Match map. */
+async function recolorSameColor(
+  dataUrl: string,
+  fromHex: string,
+  toHex: string,
+  tol = 40
+): Promise<string> {
+  const from = parseHex(fromHex)
+  const to = parseHex(toHex)
+  const img = await loadCachedImage(dataUrl)
+  if (!from || !to || !img || !img.width || !img.height) return dataUrl
+  const canvas = document.createElement('canvas')
+  canvas.width = img.width
+  canvas.height = img.height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return dataUrl
+  ctx.drawImage(img, 0, 0)
+  const image = ctx.getImageData(0, 0, canvas.width, canvas.height)
+  const data = image.data
+  let changed = false
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i + 3]! <= 8) continue
+    const dist =
+      Math.abs(data[i]! - from[0]) + Math.abs(data[i + 1]! - from[1]) + Math.abs(data[i + 2]! - from[2])
+    if (dist > tol) continue
+    data[i] = to[0]
+    data[i + 1] = to[1]
+    data[i + 2] = to[2]
+    changed = true
+  }
+  if (!changed) return dataUrl
+  ctx.putImageData(image, 0, 0)
+  return canvas.toDataURL('image/png')
+}
+
 export async function fillMarkedSectionsOnImageProxy(
   item: LineObj,
   localCanvasPt: { x: number; y: number },
@@ -1176,22 +1211,22 @@ export async function fillMarkedSectionsOnImageProxy(
   )
   if (!innerImage && !isInnerUploadedImageProxy(item)) return null
   const source = item.imageSourceDataUrl || item.imageDataUrl
-  if (!source || !item.colorMarkPng) return null
-  const map = await decodeColorMarkPng(item.colorMarkPng)
-  if (!map) return null
-  const px = stampLocalPixel(item, localCanvasPt, map.w, map.h)
-  if (!px) return null
+  if (!source) return null
   const displayUrl = item.imageDataUrl || source
   const display = await loadCachedImage(displayUrl)
   const displayPt =
     display && display.width && display.height
       ? stampLocalPixel(item, localCanvasPt, display.width, display.height)
-      : px
-  const clicked = displayPt ? await displayPixelHex(displayUrl, displayPt.x, displayPt.y) : ''
-  let mark = markNear(map.marks, map.w, map.h, px.x, px.y, 8)
-  if (mark < 1 && clicked) {
+      : null
+  if (!displayPt) return null
+  const clicked = await displayPixelHex(displayUrl, displayPt.x, displayPt.y)
+  if (!clicked) return null
+  const map = item.colorMarkPng ? await decodeColorMarkPng(item.colorMarkPng) : null
+  const markPt = map ? stampLocalPixel(item, localCanvasPt, map.w, map.h) : null
+  let mark = map && markPt ? markNear(map.marks, map.w, map.h, markPt.x, markPt.y, 18) : 0
+  if (mark < 1) {
     let best = 0
-    let bestDist = 64
+    let bestDist = 120
     for (let slot = 1; slot <= 5; slot++) {
       const shown = shownSlotHex(item, slot)
       if (!shown) continue
@@ -1213,15 +1248,22 @@ export async function fillMarkedSectionsOnImageProxy(
     imageSourceDataUrl: source
   }
   for (let slot = 1; slot <= 5; slot++) {
-    const shown = shownSlotHex(item, slot)
-    if (slot !== mark && !(shown && clickedSlot && sameSolidColor(shown, clickedSlot))) continue
     const key = `imageColor${slot}` as
       | 'imageColor1'
       | 'imageColor2'
       | 'imageColor3'
       | 'imageColor4'
       | 'imageColor5'
+    const shown = shownSlotHex(item, slot)
+    if (!(next[key] || '').trim() && shown) next[key] = shown
+    if (slot !== mark && !(shown && clickedSlot && sameSolidColor(shown, clickedSlot))) continue
     next[key] = hex
+  }
+  if (!item.colorMarkPng) {
+    return {
+      item: { ...next, imageDataUrl: await recolorSameColor(displayUrl, clicked, hex) },
+      mark
+    }
   }
   return {
     item: await refreshStampFromMarks(next),
