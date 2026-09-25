@@ -2142,7 +2142,7 @@ export function ImageRecolorControls({
               <p className="font-semibold">Color 1–5</p>
               <p className="mt-0.5">Keep color off: Color 1–5 become the colours found, including brush strokes and other base-layer paint.</p>
               <p className="mt-1">Original colors on, or switched off while Keep color is off: Color 1–5 go back to the colours from the first upload.</p>
-              <p className="mt-1">Keep color on: Color 1–5 stay and fill the new sections.</p>
+              <p className="mt-1">Keep color on: Color 1–5 stay through Rescan and through switching Original colors on and off. They fill the new sections.</p>
               <p className="mt-1">Original colors stays as you set it, except Rescan with Keep color off turns it off so the new colours show. Turn it back on to restore the first upload.</p>
             </div>
           </RowInfo>
@@ -2169,7 +2169,7 @@ export function ImageRecolorControls({
                 <p className="mt-1">The new image is still split into sections. These Color 1–5 stay and fill those sections.</p>
                 <div className="mt-2 border-t border-border pt-2">
                   <p className="font-semibold">Original colors</p>
-                  <p className="mt-0.5">On: the picture keeps the colours from the file, and Color 1–5 are the colours from the first upload.</p>
+                  <p className="mt-0.5">On: the picture keeps the colours from the file. With Keep color off, Color 1–5 become the first upload. With Keep color on, Color 1–5 stay stored and come back when this is switched off.</p>
                   <p className="mt-1">Off, with Keep color off: Color 1–5 return to those first-upload colours, then replace them on the image.</p>
                   <p className="mt-1">Off, with Keep color on: Color 1–5 stay as they are.</p>
                 </div>
@@ -2196,28 +2196,18 @@ export function ImageRecolorControls({
                 type="button"
                 onClick={() => {
                   clearArmed()
-                  if (imageUseOriginalColors) {
-                    if (imageKeepColors) {
-                      onChange({ imageUseOriginalColors: false })
-                      return
-                    }
-                    onChange({
-                      imageUseOriginalColors: false,
-                      imageColor1: (imagePalette[0] || '').trim(),
-                      imageColor2: (imagePalette[1] || '').trim(),
-                      imageColor3: (imagePalette[2] || '').trim(),
-                      imageColor4: (imagePalette[3] || '').trim(),
-                      imageColor5: (imagePalette[4] || '').trim()
-                    })
-                    return
-                  }
+                  const firstUpload = imageKeepColors
+                    ? {}
+                    : {
+                        imageColor1: (imagePalette[0] || '').trim(),
+                        imageColor2: (imagePalette[1] || '').trim(),
+                        imageColor3: (imagePalette[2] || '').trim(),
+                        imageColor4: (imagePalette[3] || '').trim(),
+                        imageColor5: (imagePalette[4] || '').trim()
+                      }
                   onChange({
-                    imageUseOriginalColors: true,
-                    imageColor1: (imagePalette[0] || '').trim(),
-                    imageColor2: (imagePalette[1] || '').trim(),
-                    imageColor3: (imagePalette[2] || '').trim(),
-                    imageColor4: (imagePalette[3] || '').trim(),
-                    imageColor5: (imagePalette[4] || '').trim()
+                    imageUseOriginalColors: !imageUseOriginalColors,
+                    ...firstUpload
                   })
                 }}
                 className={`relative w-9 h-5 rounded-full transition-colors shrink-0 ${
