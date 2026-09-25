@@ -1325,11 +1325,11 @@ function strokeInkCounts(
 /** Strokes on the Inner content image, in that image's box, then fitted to the scan grid. */
 function innerContentStrokeInk(
   session: PaintSession | null | undefined,
-  box: { x: number; y: number; w: number; h: number } | null,
+  _box: { x: number; y: number; w: number; h: number } | null,
   scanW: number,
   scanH: number
 ): { color: string; count: number }[] {
-  if (!box || scanW < 1 || scanH < 1) return []
+  if (scanW < 1 || scanH < 1) return []
   const vectors = (session?.vectors ?? []).filter(
     (v) =>
       !v.brushLayer &&
@@ -1337,19 +1337,20 @@ function innerContentStrokeInk(
       v.paintStrokes?.some((s) => s.tool !== 'eraser' && s.pts.length > 0)
   )
   if (!vectors.length) return []
-  const res = Math.max(1, session?.resolution || 512)
+  // Stroke points are 0–1 of the Inner content photo. The scan grid is that
+  // photo, so draw straight into it. Cropping a saved stamp box misses the ink
+  // once Save has moved or dropped that box.
   const canvas = document.createElement('canvas')
-  canvas.width = res
-  canvas.height = res
+  canvas.width = scanW
+  canvas.height = scanH
   const ctx = canvas.getContext('2d', { willReadFrequently: true })
   if (!ctx) return []
   for (const v of vectors) {
-    const stamp = stampBoxOf(v) ?? box
     const strokes = (v.paintStrokes ?? []).filter((s) => s.tool !== 'eraser' && s.pts.length > 0)
     if (!strokes.length) continue
     drawPaintStrokesInBox(
       ctx,
-      stamp,
+      { x: 0, y: 0, w: scanW, h: scanH },
       strokes.map((s) => ({
         tool: 'brush' as const,
         pts: s.pts,
@@ -1359,13 +1360,7 @@ function innerContentStrokeInk(
       }))
     )
   }
-  const out = document.createElement('canvas')
-  out.width = scanW
-  out.height = scanH
-  const outCtx = out.getContext('2d', { willReadFrequently: true })
-  if (!outCtx) return []
-  outCtx.drawImage(canvas, box.x, box.y, box.w, box.h, 0, 0, scanW, scanH)
-  return opaqueInkCounts(outCtx.getImageData(0, 0, scanW, scanH).data)
+  return opaqueInkCounts(ctx.getImageData(0, 0, scanW, scanH).data)
 }
 
 /** Brush layers cover the paint canvas. Count only the part over the base image. */

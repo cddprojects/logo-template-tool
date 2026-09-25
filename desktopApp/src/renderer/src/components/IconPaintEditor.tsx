@@ -1531,6 +1531,13 @@ export function IconPaintEditor({
             !l.rasterEdited &&
             !(l.paintStrokes && l.paintStrokes.length)
         )
+      // Brush on the photo must not be treated as a replacement that drops the image.
+      const innerImageHasBrush = restored.some(
+        (l) =>
+          isInnerContentImage(l) &&
+          !l.brushLayer &&
+          l.paintStrokes?.some((s) => s.tool !== 'eraser' && s.pts.length > 0)
+      )
       if (recoverSlotImage) {
         restored = restored.filter(
           (l) =>
@@ -1544,14 +1551,19 @@ export function IconPaintEditor({
         )
       }
       // Rehydrate contentProxySlot in place so z-order / nesting survive Save → re-open.
-      if (outsideAll?.kind === 'proxy' && (!initialContentBakedInDecorations || recoverSlotImage)) {
+      if (
+        outsideAll?.kind === 'proxy' &&
+        (!initialContentBakedInDecorations || recoverSlotImage || innerImageHasBrush)
+      ) {
         const crop = cropOpaqueToDataUrl(baseCt.canvas)
         if (crop) {
-          const existing = restored.find(
-            (l) =>
-              (l.contentBound || l.contentProxySlot) &&
-              (l.type === 'stamp' || l.type === 'shape')
-          )
+          const existing =
+            restored.find(
+              (l) =>
+                isInnerContentImage(l) &&
+                !l.brushLayer &&
+                l.paintStrokes?.some((s) => s.tool !== 'eraser' && s.pts.length > 0)
+            ) ?? restored.find((l) => isInnerContentImage(l) && !l.brushLayer)
           if (existing) {
             const next = applyOutsideContentToProxy(existing, outsideAll, W, crop, innerDraw)
             restored = restored.map((l) => (l.id === next.id ? next : l))
@@ -2603,10 +2615,16 @@ export function IconPaintEditor({
     return ids
   }
 
+  /** Inner content photo. Brush on this image must stay on the photo, not a parent group. */
+  const isInnerContentImage = (l: LineObj): boolean =>
+    (l.type === 'stamp' || l.type === 'shape') &&
+    (l.contentBound || l.contentProxySlot || l.name === 'Inner content' || !!l.imageSourceDataUrl)
+
   /** Object layers that receive brush/eraser directly (not base overlays). */
   const selectedPaintShape = (): LineObj | null => {
     const selected = linesRef.current.find((item) => item.id === selectedIdRef.current)
     if (!selected) return null
+    if (isInnerContentImage(selected) && isVectorVisible(selected)) return selected
     const l = checkedGroupTarget(selected) ?? selected
     return (l.type === 'shape' || l.type === 'stamp' || l.type === 'group') && isVectorVisible(l) ? l : null
   }
@@ -9896,6 +9914,25 @@ export function IconPaintEditor({
       }
       if (item.type === 'group' || item.marqueeItem) return [item]
       const seeThrough = objectHasSeeThroughHole(item)
+      // Brush on the Inner content photo stays a vector on that photo.
+      // Baking would drop the bitmap and leave only the stroke as the layer.
+      const imageWithBrush =
+        isInnerContentImage(item) &&
+        !!item.contentBound &&
+        !!item.paintStrokes?.some((s) => s.pts.length > 0)
+      const holeSeeThrough =
+        hasSeeThroughCoverage(item.id) ||
+        !!item.seeThroughHoleMaskPng ||
+        item.holeMaskMode === 'see-through'
+      if (
+        imageWithBrush &&
+        !holeSeeThrough &&
+        !item.punchThrough &&
+        !hasPunchCoverage(item.id)
+      ) {
+        if (isTransparentPaintColor(item.color ?? '')) item.color = '#ffffff'
+        return [item]
+      }
       // Brush strokes stay vectors on the live image. Baking them detaches
       // Color 1–5, and the next outside colour edit rebuilds the picture
       // without the brush.
@@ -10021,6 +10058,16 @@ export function IconPaintEditor({
         if (hasSeeThroughCoverage(v.id)) return true
         // punchEnclosedHole alone is punch/counter — not see-through.
         if (v.punchThrough || hasPunchCoverage(v.id)) return false
+        // The photo's stand-in colour is not a see-through fill. Treating it as
+        // one baked the picture away and left the brush as the only layer.
+        if (
+          v.contentBound ||
+          v.contentProxySlot ||
+          v.imageSourceDataUrl ||
+          (v.type === 'stamp' && v.name === 'Inner content')
+        ) {
+          return false
+        }
         return isTransparentPaintColor(v.color ?? '')
       })
     // Punch enclosed counters on content: bake into decorations (paint space) so
@@ -10055,6 +10102,8 @@ export function IconPaintEditor({
       if ((v.layer ?? 'content') !== 'content') return false
       if ((v.visible ?? v.editable ?? true) === false) return false
       if (v.contentProxySlot || v.contentBound || v.brushLayer) return false
+      // The Inner content photo is the live image, not a replacement for it.
+      if (v.imageSourceDataUrl || (v.type === 'stamp' && v.name === 'Inner content')) return false
       return (
         v.type === 'stamp' ||
         v.type === 'shape' ||

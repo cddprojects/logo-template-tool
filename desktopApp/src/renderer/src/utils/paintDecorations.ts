@@ -758,7 +758,11 @@ function drawBaseImageBrushStrokes(
   if (layer !== 'content') return
   const items = (session.vectors ?? []).filter(
     (v) =>
-      (v.contentBound || v.contentProxySlot) &&
+      !v.brushLayer &&
+      (v.contentBound ||
+        v.contentProxySlot ||
+        v.imageSourceDataUrl ||
+        (v.type === 'stamp' && v.name === 'Inner content')) &&
       v.paintStrokes?.some((s) => s.tool !== 'eraser') &&
       v.pts &&
       v.pts.length >= 2
