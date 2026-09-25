@@ -1101,34 +1101,130 @@ export async function buildMatchSectionLabels(
   return out
 }
 
+function shownSlotHex(item: LineObj, slot: number): string {
+  const key = `imageColor${slot}` as
+    | 'imageColor1'
+    | 'imageColor2'
+    | 'imageColor3'
+    | 'imageColor4'
+    | 'imageColor5'
+  const stored = (item[key] || '').trim().slice(0, 7).toLowerCase()
+  const palette = (item.imagePalette?.[slot - 1] || '').trim().slice(0, 7).toLowerCase()
+  const hex = item.imageUseOriginalColors !== false ? palette || stored : stored || palette
+  return /^#[0-9a-f]{6}$/.test(hex) ? hex : ''
+}
+
+function markNear(
+  marks: Uint8Array,
+  w: number,
+  h: number,
+  x: number,
+  y: number,
+  radius: number
+): number {
+  const at = (px: number, py: number): number => {
+    if (px < 0 || py < 0 || px >= w || py >= h) return 0
+    const slot = marks[py * w + px] ?? 0
+    return slot >= 1 && slot <= 5 ? slot : 0
+  }
+  const hit = at(x, y)
+  if (hit) return hit
+  for (let r = 1; r <= radius; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue
+        const slot = at(x + dx, y + dy)
+        if (slot) return slot
+      }
+    }
+  }
+  return 0
+}
+
+async function displayPixelHex(
+  dataUrl: string,
+  x: number,
+  y: number
+): Promise<string> {
+  const img = await loadCachedImage(dataUrl)
+  if (!img || !img.width || !img.height) return ''
+  const canvas = document.createElement('canvas')
+  canvas.width = img.width
+  canvas.height = img.height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return ''
+  ctx.drawImage(img, 0, 0)
+  const px = Math.max(0, Math.min(img.width - 1, x))
+  const py = Math.max(0, Math.min(img.height - 1, y))
+  const data = ctx.getImageData(px, py, 1, 1).data
+  if (data[3]! <= 8) return ''
+  return toHex(data[0]!, data[1]!, data[2]!)
+}
+
 export async function fillMarkedSectionsOnImageProxy(
   item: LineObj,
   localCanvasPt: { x: number; y: number },
   fillCss: string
 ): Promise<{ item: LineObj; mark: number } | null> {
-  if (!isInnerUploadedImageProxy(item)) return null
+  const innerImage = !!(
+    item.type === 'stamp' &&
+    (item.contentBound ||
+      item.contentProxySlot ||
+      item.imageSourceDataUrl ||
+      item.name === 'Inner content') &&
+    (item.imageSourceDataUrl || item.imageDataUrl)
+  )
+  if (!innerImage && !isInnerUploadedImageProxy(item)) return null
   const source = item.imageSourceDataUrl || item.imageDataUrl
   if (!source || !item.colorMarkPng) return null
   const map = await decodeColorMarkPng(item.colorMarkPng)
   if (!map) return null
   const px = stampLocalPixel(item, localCanvasPt, map.w, map.h)
   if (!px) return null
-  const mark = map.marks[px.y * map.w + px.x] ?? 0
+  const displayUrl = item.imageDataUrl || source
+  const display = await loadCachedImage(displayUrl)
+  const displayPt =
+    display && display.width && display.height
+      ? stampLocalPixel(item, localCanvasPt, display.width, display.height)
+      : px
+  const clicked = displayPt ? await displayPixelHex(displayUrl, displayPt.x, displayPt.y) : ''
+  let mark = markNear(map.marks, map.w, map.h, px.x, px.y, 8)
+  if (mark < 1 && clicked) {
+    let best = 0
+    let bestDist = 64
+    for (let slot = 1; slot <= 5; slot++) {
+      const shown = shownSlotHex(item, slot)
+      if (!shown) continue
+      const dist = colorDist(shown, clicked)
+      if (dist < bestDist) {
+        bestDist = dist
+        best = slot
+      }
+    }
+    mark = best
+  }
   if (mark < 1 || mark > 5) return null
-  const hex = fillCss.startsWith('#') ? fillCss.slice(0, 7) : fillCss
-  const key = `imageColor${mark}` as
-    | 'imageColor1'
-    | 'imageColor2'
-    | 'imageColor3'
-    | 'imageColor4'
-    | 'imageColor5'
+  const hex = (fillCss.startsWith('#') ? fillCss.slice(0, 7) : fillCss).toLowerCase()
+  if (!/^#[0-9a-f]{6}$/.test(hex)) return null
+  const clickedSlot = shownSlotHex(item, mark)
+  const next: LineObj = {
+    ...item,
+    imageUseOriginalColors: false,
+    imageSourceDataUrl: source
+  }
+  for (let slot = 1; slot <= 5; slot++) {
+    const shown = shownSlotHex(item, slot)
+    if (slot !== mark && !(shown && clickedSlot && sameSolidColor(shown, clickedSlot))) continue
+    const key = `imageColor${slot}` as
+      | 'imageColor1'
+      | 'imageColor2'
+      | 'imageColor3'
+      | 'imageColor4'
+      | 'imageColor5'
+    next[key] = hex
+  }
   return {
-    item: await refreshStampFromMarks({
-      ...item,
-      [key]: hex,
-      imageUseOriginalColors: false,
-      imageSourceDataUrl: source
-    }),
+    item: await refreshStampFromMarks(next),
     mark
   }
 }
@@ -1834,11 +1930,7 @@ export async function rescanBaseLayerColors(
       .filter((s) => s.tool !== 'eraser')
       .map((s) => s.color)
     const rewireSlots = !input.imageKeepColors
-    session = snapBaseStrokesToSlots(
-      session,
-      slots,
-      rewireSlots ? Number.POSITIVE_INFINITY : 48
-    )
+    session = snapBaseStrokesToSlots(session, slots, 48)
     const after = (session.vectors ?? [])
       .filter(isBaseImageVector)
       .flatMap((v) => v.paintStrokes ?? [])

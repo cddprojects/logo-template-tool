@@ -9751,8 +9751,18 @@ export function IconPaintEditor({
       }
       void (async () => {
         if (fillBrushStrokeAt(pt)) return
+        const fillableInnerImage = (item: LineObj) =>
+          item.type === 'stamp' &&
+          !!(item.imageDataUrl || item.imageSourceDataUrl) &&
+          !!(
+            item.contentBound ||
+            item.contentProxySlot ||
+            item.imageSourceDataUrl ||
+            item.name === 'Inner content' ||
+            item.colorMarkPng
+          )
         const hit = topmostPaintHit((item) => {
-          if (!isPaintHitVisible(item) || !isInnerUploadedImageProxy(item)) return false
+          if (!isPaintHitVisible(item) || !fillableInnerImage(item)) return false
           return objectOwnsFillClick(item, pt)
         })
         const sel =
@@ -9760,7 +9770,7 @@ export function IconPaintEditor({
           linesRef.current.find(
             (l) =>
               l.id === selectedIdRef.current &&
-              isInnerUploadedImageProxy(l) &&
+              fillableInnerImage(l) &&
               objectOwnsFillClick(l, pt)
           )
         if (sel) {
