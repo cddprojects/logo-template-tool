@@ -984,7 +984,7 @@ type ColorGroup = {
  * Group every visible section by colour, not by the mark it already has.
  * A section with no number still belongs to a Color slot when its colour
  * matches sections that already do. The 5% test uses that whole group.
- * A number is drawn only when that one piece covers more than 1%.
+ * A number is drawn only when that one piece covers more than 0.2%.
  */
 async function groupRegionsByColor(item: LineObj): Promise<{
   regionMap: ImageRegionMap
@@ -1129,7 +1129,7 @@ async function groupRegionsByColor(item: LineObj): Promise<{
     const slot = primaryOf.get(root) ?? row.slot
     const total = clusterArea.get(root) ?? 0
     const colorQualifies = opaque > 0 && total / opaque > 0.05
-    const show = colorQualifies && row.n / opaque > 0.01
+    const show = colorQualifies && row.n / opaque > 0.002
     groups.set(id, { slot, show, n: row.n, r: row.r, g: row.g, b: row.b })
     if (!colorQualifies) continue
     for (let p = 0; p < regionMap.regions.length; p++) {
