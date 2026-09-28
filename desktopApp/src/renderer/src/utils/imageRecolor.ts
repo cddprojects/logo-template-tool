@@ -109,6 +109,11 @@ function gradientPixels(color: string, w: number, h: number): Uint8ClampedArray 
   return ctx.getImageData(0, 0, width, height).data
 }
 
+/** Gradient sampled across a rectangle, for painting into image pixels. */
+export function bakeGradientPixels(color: string, w: number, h: number): Uint8ClampedArray | null {
+  return gradientPixels(color, w, h)
+}
+
 type SlotFill = { solid: Rgba | null; grad: Uint8ClampedArray | null }
 
 function slotFill(color: string, w: number, h: number): SlotFill {

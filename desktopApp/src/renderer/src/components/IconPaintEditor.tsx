@@ -104,7 +104,7 @@ import {
   type MatchSectionLabel
 } from '../utils/imageColorMatch'
 import { fitRasterDataUrl } from '../utils/imageFit'
-import { bakeImageSoftAaBleed, bakeImageSmoothAa, imageZeroAlphaPunchMask } from '../utils/imageRecolor'
+import { bakeGradientPixels, bakeImageSoftAaBleed, bakeImageSmoothAa, imageZeroAlphaPunchMask } from '../utils/imageRecolor'
 import { reshapeIsApplied } from '../utils/paintReshape'
 import {
   reuseCanvas,
@@ -5039,28 +5039,45 @@ export function IconPaintEditor({
     const fg = parseInt(fill.slice(3, 5), 16)
     const fb = parseInt(fill.slice(5, 7), 16)
     const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
+    // A placed picture is not a Color 1–5 image. Fill paints the gradient
+    // across its opaque pixels instead of the first solid stop.
+    const gradientPaint =
+      !imageHoleTarget(item) && isGradientColor(color)
+        ? bakeGradientPixels(color, width, height)
+        : null
     let changed = false
 
     if (ta > 8) {
       // Connected section only — unconnected same-colour islands stay until clicked.
-      const region = floodFillConnected(width, height, px, py, (i) => {
-        if (data[i + 3] <= 8) return false
-        return Math.abs(data[i] - tr) + Math.abs(data[i + 1] - tg) + Math.abs(data[i + 2] - tb) <= 40
-      })
+      // A gradient on a normal image covers the whole picture, same as filling a shape.
+      const region = gradientPaint
+        ? null
+        : floodFillConnected(width, height, px, py, (i) => {
+            if (data[i + 3] <= 8) return false
+            return Math.abs(data[i] - tr) + Math.abs(data[i + 1] - tg) + Math.abs(data[i + 2] - tb) <= 40
+          })
       let opaqueN = 0
       let filledN = 0
       for (let p = 0; p < width * height; p++) {
         const i = p * 4
         if (data[i + 3] <= 8) continue
         opaqueN++
-        if (!region[p]) continue
+        if (region && !region[p]) continue
         filledN++
         const srcA = data[i + 3]
-        data[i] = fr
-        data[i + 1] = fg
-        data[i + 2] = fb
-        // Preserve coverage alpha — do not promote fringe to opaque (expands shape).
-        data[i + 3] = Math.round((srcA * fa) / 255)
+        if (gradientPaint) {
+          const ga = gradientPaint[i + 3] ?? 255
+          data[i] = gradientPaint[i] ?? 0
+          data[i + 1] = gradientPaint[i + 1] ?? 0
+          data[i + 2] = gradientPaint[i + 2] ?? 0
+          data[i + 3] = Math.round((srcA * ga) / 255)
+        } else {
+          data[i] = fr
+          data[i + 1] = fg
+          data[i + 2] = fb
+          // Preserve coverage alpha — do not promote fringe to opaque (expands shape).
+          data[i + 3] = Math.round((srcA * fa) / 255)
+        }
         changed = true
       }
       if (!changed) return null
@@ -5074,7 +5091,7 @@ export function IconPaintEditor({
       return {
         ...item,
         imageDataUrl,
-        ...(nearComplete && !keepMarks ? { color: fill } : {}),
+        ...(nearComplete && !keepMarks && !gradientPaint ? { color: fill } : {}),
         // Keep contentBound + marks for Save sync; bake only when no Match map.
         // Do not overwrite imageSourceDataUrl with remapped display (double-remap outside).
         rasterEdited: keepMarks ? !!item.rasterEdited : true,
