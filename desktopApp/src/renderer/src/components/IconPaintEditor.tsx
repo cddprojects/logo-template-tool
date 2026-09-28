@@ -5039,37 +5039,50 @@ export function IconPaintEditor({
     const fg = parseInt(fill.slice(3, 5), 16)
     const fb = parseInt(fill.slice(5, 7), 16)
     const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
-    // A placed picture is not a Color 1–5 image. Fill paints the gradient
-    // across its opaque pixels instead of the first solid stop.
-    const gradientPaint =
-      !imageHoleTarget(item) && isGradientColor(color)
-        ? bakeGradientPixels(color, width, height)
-        : null
+    const wantGradient = !imageHoleTarget(item) && isGradientColor(color)
     let changed = false
 
     if (ta > 8) {
       // Connected section only — unconnected same-colour islands stay until clicked.
-      // A gradient on a normal image covers the whole picture, same as filling a shape.
-      const region = gradientPaint
-        ? null
-        : floodFillConnected(width, height, px, py, (i) => {
-            if (data[i + 3] <= 8) return false
-            return Math.abs(data[i] - tr) + Math.abs(data[i + 1] - tg) + Math.abs(data[i + 2] - tb) <= 40
-          })
+      const region = floodFillConnected(width, height, px, py, (i) => {
+        if (data[i + 3] <= 8) return false
+        return Math.abs(data[i] - tr) + Math.abs(data[i + 1] - tg) + Math.abs(data[i + 2] - tb) <= 40
+      })
+      let minX = width
+      let minY = height
+      let maxX = 0
+      let maxY = 0
+      if (wantGradient) {
+        for (let p = 0; p < region.length; p++) {
+          if (!region[p]) continue
+          const rx = p % width
+          const ry = (p / width) | 0
+          if (rx < minX) minX = rx
+          if (ry < minY) minY = ry
+          if (rx > maxX) maxX = rx
+          if (ry > maxY) maxY = ry
+        }
+      }
+      const gradW = Math.max(1, maxX - minX + 1)
+      const gradH = Math.max(1, maxY - minY + 1)
+      const gradientPaint = wantGradient ? bakeGradientPixels(color, gradW, gradH) : null
       let opaqueN = 0
       let filledN = 0
       for (let p = 0; p < width * height; p++) {
         const i = p * 4
         if (data[i + 3] <= 8) continue
         opaqueN++
-        if (region && !region[p]) continue
+        if (!region[p]) continue
         filledN++
         const srcA = data[i + 3]
         if (gradientPaint) {
-          const ga = gradientPaint[i + 3] ?? 255
-          data[i] = gradientPaint[i] ?? 0
-          data[i + 1] = gradientPaint[i + 1] ?? 0
-          data[i + 2] = gradientPaint[i + 2] ?? 0
+          const lx = (p % width) - minX
+          const ly = ((p / width) | 0) - minY
+          const si = (ly * gradW + lx) * 4
+          const ga = gradientPaint[si + 3] ?? 255
+          data[i] = gradientPaint[si] ?? 0
+          data[i + 1] = gradientPaint[si + 1] ?? 0
+          data[i + 2] = gradientPaint[si + 2] ?? 0
           data[i + 3] = Math.round((srcA * ga) / 255)
         } else {
           data[i] = fr
