@@ -1552,7 +1552,12 @@ export async function fillMarkedSectionsOnImageProxy(
 }
 
 export function solidColorKey(hex: string): string {
-  const h = hex.trim().toLowerCase()
+  const raw = hex.trim()
+  const source =
+    raw.startsWith('linear-gradient(') || raw.startsWith('radial-gradient(')
+      ? raw.match(/#[0-9a-fA-F]{6,8}/)?.[0] ?? ''
+      : raw
+  const h = source.toLowerCase()
   if (!h.startsWith('#')) return h
   return h.slice(0, 7)
 }
@@ -1673,8 +1678,14 @@ export function retintMatchingStrokes<T extends StrokeLike>(
 ): T[] | undefined {
   if (!strokes?.length) return strokes
   const pairs = fromColors
-    .map((from, i) => ({ from: solidColorKey(from), to: solidColorKey(toColors[i] || '') }))
-    .filter((p) => /^#[0-9a-f]{6}$/.test(p.from) && /^#[0-9a-f]{6}$/.test(p.to) && p.from !== p.to)
+    .map((from, i) => {
+      const toRaw = (toColors[i] || '').trim()
+      const gradient = toRaw.startsWith('linear-gradient(') || toRaw.startsWith('radial-gradient(')
+      return { from: solidColorKey(from), to: gradient ? toRaw : solidColorKey(toRaw), gradient }
+    })
+    .filter(
+      (p) => /^#[0-9a-f]{6}$/.test(p.from) && (p.gradient || /^#[0-9a-f]{6}$/.test(p.to))
+    )
   if (!pairs.length) return strokes
   let changed = false
   const next = strokes.map((stroke) => {
@@ -1684,9 +1695,13 @@ export function retintMatchingStrokes<T extends StrokeLike>(
     const pair =
       pairs.find((p) => p.from === exact) ??
       pairs.find((p) => colorDist(stroke.color, p.from) <= 48)
-    if (!pair) return stroke
+    if (!pair || stroke.color === pair.to) return stroke
+    const strokeIsGrad =
+      stroke.color.startsWith('linear-gradient(') || stroke.color.startsWith('radial-gradient(')
+    if (!pair.gradient && !strokeIsGrad && exact === pair.to) return stroke
     changed = true
-    const alpha = stroke.color.trim().length >= 9 ? stroke.color.trim().slice(7, 9) : ''
+    if (pair.gradient) return { ...stroke, color: pair.to }
+    const alpha = /^#[0-9a-f]{8}$/i.test(stroke.color.trim()) ? stroke.color.trim().slice(7, 9) : ''
     return { ...stroke, color: pair.to + alpha }
   })
   return changed ? next : strokes
@@ -2052,8 +2067,8 @@ export async function recolorBaseBrushOverlays(
 }
 
 function colorDist(a: string, b: string): number {
-  const pa = parseHex(a)
-  const pb = parseHex(b)
+  const pa = parseHex(solidColorKey(a))
+  const pb = parseHex(solidColorKey(b))
   if (!pa || !pb) return Infinity
   return Math.abs(pa[0] - pb[0]) + Math.abs(pa[1] - pb[1]) + Math.abs(pa[2] - pb[2])
 }

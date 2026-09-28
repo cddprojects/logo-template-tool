@@ -49,6 +49,106 @@ function paintSlot(data: Uint8ClampedArray, i: number, rgba: Rgba): void {
   if (rgba[3] < 255) data[i + 3] = Math.round((data[i + 3] * rgba[3]) / 255)
 }
 
+function isGradientValue(value: string): boolean {
+  const v = value.trim()
+  return v.startsWith('linear-gradient(') || v.startsWith('radial-gradient(')
+}
+
+const GRAD_STOP_RE = /,\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\))\s+(\d+(?:\.\d+)?)%/g
+
+function gradientStops(body: string): { color: string; pos: number }[] {
+  const stops: { color: string; pos: number }[] = []
+  let m: RegExpExecArray | null
+  while ((m = GRAD_STOP_RE.exec(body)) !== null) {
+    stops.push({ color: m[1], pos: parseFloat(m[2]) / 100 })
+  }
+  GRAD_STOP_RE.lastIndex = 0
+  return stops
+}
+
+/** Same angle and stops as a shape fill, mapped across the image rectangle. */
+function gradientPixels(color: string, w: number, h: number): Uint8ClampedArray | null {
+  const width = Math.max(1, w)
+  const height = Math.max(1, h)
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return null
+  let grad: CanvasGradient | null = null
+  if (color.startsWith('linear-gradient(')) {
+    const m = color.match(/linear-gradient\((\d+(?:\.\d+)?)deg(,.+)\)/)
+    if (!m) return null
+    const stops = gradientStops(m[2])
+    if (stops.length < 2) return null
+    const rad = ((90 - parseFloat(m[1])) * Math.PI) / 180
+    const cx = width / 2
+    const cy = height / 2
+    const len = Math.sqrt(width * width + height * height) / 2
+    grad = ctx.createLinearGradient(
+      cx - Math.cos(rad) * len,
+      cy + Math.sin(rad) * len,
+      cx + Math.cos(rad) * len,
+      cy - Math.sin(rad) * len
+    )
+    for (const s of stops) grad.addColorStop(Math.max(0, Math.min(1, s.pos)), s.color)
+  } else if (color.startsWith('radial-gradient(')) {
+    const m = color.match(/radial-gradient\(circle at (\d+(?:\.\d+)?)% (\d+(?:\.\d+)?)%(,.+)\)/)
+    if (!m) return null
+    const stops = gradientStops(m[3])
+    if (stops.length < 2) return null
+    const gcx = (width * parseFloat(m[1])) / 100
+    const gcy = (height * parseFloat(m[2])) / 100
+    const radius = Math.sqrt(width * width + height * height) / 2
+    grad = ctx.createRadialGradient(gcx, gcy, 0, gcx, gcy, Math.max(1, radius))
+    for (const s of stops) grad.addColorStop(Math.max(0, Math.min(1, s.pos)), s.color)
+  }
+  if (!grad) return null
+  ctx.fillStyle = grad
+  ctx.fillRect(0, 0, width, height)
+  return ctx.getImageData(0, 0, width, height).data
+}
+
+type SlotFill = { solid: Rgba | null; grad: Uint8ClampedArray | null }
+
+function slotFill(color: string, w: number, h: number): SlotFill {
+  const v = color.trim()
+  if (isGradientValue(v)) return { solid: null, grad: gradientPixels(v, w, h) }
+  return { solid: parseHex(v), grad: null }
+}
+
+function slotFills(colors: string[], w: number, h: number): SlotFill[] {
+  const fills: SlotFill[] = []
+  for (let s = 0; s < MAX_PALETTE; s++) fills.push(slotFill(colors[s] || '', w, h))
+  return fills
+}
+
+function paintFill(
+  data: Uint8ClampedArray,
+  i: number,
+  x: number,
+  y: number,
+  w: number,
+  fill: SlotFill | undefined
+): void {
+  if (!fill) return
+  if (fill.grad) {
+    const si = (y * w + x) * 4
+    paintSlot(data, i, [fill.grad[si]!, fill.grad[si + 1]!, fill.grad[si + 2]!, fill.grad[si + 3]!])
+    return
+  }
+  if (fill.solid) paintSlot(data, i, fill.solid)
+}
+
+function fillPunchesAt(fill: SlotFill | undefined, x: number, y: number, w: number): boolean {
+  if (!fill) return false
+  if (fill.grad) {
+    const si = (y * w + x) * 4
+    return fill.grad[si + 3] === 0
+  }
+  return !!fill.solid && fill.solid[3] === 0
+}
+
 /** Quantize to reduce anti-alias / JPEG noise before clustering. */
 function quantize(v: number): number {
   return Math.round(v / 24) * 24
@@ -537,15 +637,20 @@ export async function applyImagePaletteRecolor(
   if (!dataUrl || !palette.length) return dataUrl
 
   const fromRgb: Rgba[] = []
-  const toRgb: Rgba[] = []
+  const toColor: string[] = []
   let changed = false
   for (let i = 0; i < palette.length; i++) {
     const from = parseHex(palette[i])
-    const to = parseHex(replacements[i] || palette[i])
-    if (!from || !to) continue
+    const repl = (replacements[i] || palette[i] || '').trim()
+    if (!from || !repl) continue
     fromRgb.push(from)
-    toRgb.push(to)
-    if (from[0] !== to[0] || from[1] !== to[1] || from[2] !== to[2] || from[3] !== to[3]) changed = true
+    toColor.push(repl)
+    if (isGradientValue(repl)) {
+      changed = true
+      continue
+    }
+    const to = parseHex(repl)
+    if (!to || from[0] !== to[0] || from[1] !== to[1] || from[2] !== to[2] || from[3] !== to[3]) changed = true
   }
   if (!fromRgb.length || !changed) return dataUrl
 
@@ -564,21 +669,25 @@ export async function applyImagePaletteRecolor(
   ctx.drawImage(img, 0, 0)
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
   const data = imageData.data
+  const fills = toColor.map((color) => slotFill(color, canvas.width, canvas.height))
 
-  for (let i = 0; i < data.length; i += 4) {
-    if (data[i + 3] === 0) continue
-    const pixel: [number, number, number] = [data[i], data[i + 1], data[i + 2]]
-    let best = 0
-    let bestDist = rgbDist(pixel, fromRgb[0])
-    for (let s = 1; s < fromRgb.length; s++) {
-      const d = rgbDist(pixel, fromRgb[s])
-      if (d < bestDist) {
-        bestDist = d
-        best = s
+  for (let y = 0; y < canvas.height; y++) {
+    for (let x = 0; x < canvas.width; x++) {
+      const i = (y * canvas.width + x) * 4
+      if (data[i + 3] === 0) continue
+      const pixel: [number, number, number] = [data[i], data[i + 1], data[i + 2]]
+      let best = 0
+      let bestDist = rgbDist(pixel, fromRgb[0])
+      for (let s = 1; s < fromRgb.length; s++) {
+        const d = rgbDist(pixel, fromRgb[s])
+        if (d < bestDist) {
+          bestDist = d
+          best = s
+        }
       }
+      if (bestDist > MAP_DIST) continue
+      paintFill(data, i, x, y, canvas.width, fills[best])
     }
-    if (bestDist > MAP_DIST) continue
-    paintSlot(data, i, toRgb[best])
   }
 
   ctx.putImageData(imageData, 0, 0)
@@ -610,13 +719,7 @@ export async function resolveImageDataUrl(fields: {
   // Draw from a capped bitmap. Full-size photos made recolour (and save) fail,
   // so the canvas and the upload preview stayed on the original pixels.
   const src = await fitRasterDataUrl(raw)
-  const colors = [
-    slotPaintColor(fields.imageColor1 || fields.imagePalette?.[0] || ''),
-    slotPaintColor(fields.imageColor2 || fields.imagePalette?.[1] || ''),
-    slotPaintColor(fields.imageColor3 || fields.imagePalette?.[2] || ''),
-    slotPaintColor(fields.imageColor4 || fields.imagePalette?.[3] || ''),
-    slotPaintColor(fields.imageColor5 || fields.imagePalette?.[4] || '')
-  ]
+  const colors = imageSlotColors(fields)
   const palette = fields.imagePalette ?? []
   const recolorByPalette = async (base: string): Promise<string> => {
     if (!palette.length) return base
@@ -650,23 +753,13 @@ export async function resolveImageDataUrl(fields: {
 
 type ImageSlotFields = Parameters<typeof resolveImageDataUrl>[0]
 
-function slotPaintColor(value: string): string {
-  const v = value.trim()
-  if (!v) return ''
-  if (v.startsWith('linear-gradient(') || v.startsWith('radial-gradient(')) {
-    const m = v.match(/#[0-9a-fA-F]{3,8}/)
-    return m ? m[0] : ''
-  }
-  return v
-}
-
 function imageSlotColors(fields: ImageSlotFields): string[] {
   return [
-    slotPaintColor(fields.imageColor1 || fields.imagePalette?.[0] || ''),
-    slotPaintColor(fields.imageColor2 || fields.imagePalette?.[1] || ''),
-    slotPaintColor(fields.imageColor3 || fields.imagePalette?.[2] || ''),
-    slotPaintColor(fields.imageColor4 || fields.imagePalette?.[3] || ''),
-    slotPaintColor(fields.imageColor5 || fields.imagePalette?.[4] || '')
+    (fields.imageColor1 || fields.imagePalette?.[0] || '').trim(),
+    (fields.imageColor2 || fields.imagePalette?.[1] || '').trim(),
+    (fields.imageColor3 || fields.imagePalette?.[2] || '').trim(),
+    (fields.imageColor4 || fields.imagePalette?.[3] || '').trim(),
+    (fields.imageColor5 || fields.imagePalette?.[4] || '').trim()
   ]
 }
 
@@ -678,11 +771,13 @@ function imageSlotColors(fields: ImageSlotFields): string[] {
 export async function imageZeroAlphaPunchMask(fields: ImageSlotFields): Promise<string> {
   if (fields.imageUseOriginalColors !== false || !fields.imageDataUrl) return ''
   const colors = imageSlotColors(fields)
-  const zero = colors.map((hex) => {
-    const rgba = parseHex(hex)
+  const mayPunch = colors.map((hex) => {
+    const v = hex.trim()
+    if (isGradientValue(v)) return /#[0-9a-fA-F]{6}00/i.test(v)
+    const rgba = parseHex(v)
     return !!rgba && rgba[3] === 0
   })
-  if (!zero.some(Boolean)) return ''
+  if (!mayPunch.some(Boolean)) return ''
 
   const src = await fitRasterDataUrl(fields.imageDataUrl)
   const img = await loadCachedImage(src)
@@ -744,6 +839,7 @@ export async function imageZeroAlphaPunchMask(fields: ImageSlotFields): Promise<
   ctx.drawImage(img, 0, 0)
   const srcData = ctx.getImageData(0, 0, canvas.width, canvas.height).data
   const out = ctx.createImageData(canvas.width, canvas.height)
+  const fills = slotFills(colors, canvas.width, canvas.height)
   let any = false
 
   for (let y = 0; y < canvas.height; y++) {
@@ -782,7 +878,8 @@ export async function imageZeroAlphaPunchMask(fields: ImageSlotFields): Promise<
         }
         if (bestDist <= MAP_DIST) slot = best + 1
       }
-      if (slot < 1 || !zero[slot - 1]) continue
+      if (slot < 1 || !mayPunch[slot - 1]) continue
+      if (!fillPunchesAt(fills[slot - 1], x, y, canvas.width)) continue
       out.data[i + 3] = 255
       any = true
     }
@@ -803,8 +900,8 @@ export async function applyUnmarkedRestRecolor(
   colors: string[]
 ): Promise<string> {
   if (!dataUrl || !regionPng || unmarkedSlot < 1 || unmarkedSlot > MAX_PALETTE) return dataUrl
-  const rgb = parseHex(colors[unmarkedSlot - 1] || '')
-  if (!rgb) return dataUrl
+  const color = (colors[unmarkedSlot - 1] || '').trim()
+  if (!color || (!isGradientValue(color) && !parseHex(color))) return dataUrl
   const img = await loadCachedImage(dataUrl)
   const regionImg = await loadCachedImage(regionPng)
   if (!img || !regionImg) return dataUrl
@@ -816,6 +913,8 @@ export async function applyUnmarkedRestRecolor(
   ctx.drawImage(img, 0, 0)
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
   const data = imageData.data
+  const fill = slotFill(color, canvas.width, canvas.height)
+  if (!fill.solid && !fill.grad) return dataUrl
 
   const rc = document.createElement('canvas')
   rc.width = regionImg.width
@@ -840,7 +939,7 @@ export async function applyUnmarkedRestRecolor(
       }
       // Blue channel flags Unmarked leftovers.
       if (rd[ri + 2]! <= 0) continue
-      paintSlot(data, i, rgb)
+      paintFill(data, i, x, y, canvas.width, fill)
     }
   }
   ctx.putImageData(imageData, 0, 0)
@@ -1049,10 +1148,7 @@ export async function applyColorMarksRecolor(
   ctx.drawImage(img, 0, 0)
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
   const data = imageData.data
-  const toRgb: (Rgba | null)[] = []
-  for (let s = 0; s < MAX_PALETTE; s++) {
-    toRgb.push(parseHex(colors[s] || '') )
-  }
+  const fills = slotFills(colors, canvas.width, canvas.height)
   const mw = w
   const mh = h
   const sameSize = mw === canvas.width && mh === canvas.height
@@ -1069,9 +1165,7 @@ export async function applyColorMarksRecolor(
         mark = marks[my * mw + mx] ?? 0
       }
       if (mark < 1 || mark > MAX_PALETTE) continue
-      const rgb = toRgb[mark - 1]
-      if (!rgb) continue
-      paintSlot(data, i, rgb)
+      paintFill(data, i, x, y, canvas.width, fills[mark - 1])
     }
   }
   ctx.putImageData(imageData, 0, 0)

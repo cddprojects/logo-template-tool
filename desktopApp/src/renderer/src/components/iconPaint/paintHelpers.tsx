@@ -63,6 +63,19 @@ export const BRUSH_TIPS: { value: BrushTip; label: string }[] = [
   { value: 'spray', label: 'Spray' }
 ]
 
+function brushInk(
+  ctx: CanvasRenderingContext2D,
+  color: string,
+  erase: boolean,
+  box?: { x: number; y: number; w: number; h: number }
+): string | CanvasGradient {
+  if (erase) return '#000'
+  if (box && isGradientColor(color)) {
+    return resolveCanvasColor(ctx, color, box.x, box.y, Math.max(1, box.w), Math.max(1, box.h))
+  }
+  return color
+}
+
 export function stampBrushTip(
   ctx: CanvasRenderingContext2D,
   tip: BrushTip,
@@ -70,11 +83,12 @@ export function stampBrushTip(
   y: number,
   brushSize: number,
   color: string,
-  erase: boolean
+  erase: boolean,
+  box?: { x: number; y: number; w: number; h: number }
 ): void {
   ctx.save()
   if (erase) ctx.globalCompositeOperation = 'destination-out'
-  ctx.fillStyle = erase ? '#000' : color
+  ctx.fillStyle = brushInk(ctx, color, erase, box)
   const r = Math.max(0.5, brushSize / 2)
   switch (tip) {
     case 'round':
@@ -122,12 +136,13 @@ export function strokeBrushTip(
   y1: number,
   brushSize: number,
   color: string,
-  erase: boolean
+  erase: boolean,
+  box?: { x: number; y: number; w: number; h: number }
 ): void {
   if (tip === 'round' || tip === 'square') {
     ctx.save()
     if (erase) ctx.globalCompositeOperation = 'destination-out'
-    ctx.strokeStyle = erase ? '#000' : color
+    ctx.strokeStyle = brushInk(ctx, color, erase, box)
     ctx.lineWidth = brushSize
     ctx.lineCap = tip === 'square' ? 'square' : 'round'
     ctx.lineJoin = tip === 'square' ? 'miter' : 'round'
@@ -137,8 +152,8 @@ export function strokeBrushTip(
     ctx.stroke()
     ctx.restore()
     if (tip === 'square') {
-      stampBrushTip(ctx, tip, x0, y0, brushSize, color, erase)
-      stampBrushTip(ctx, tip, x1, y1, brushSize, color, erase)
+      stampBrushTip(ctx, tip, x0, y0, brushSize, color, erase, box)
+      stampBrushTip(ctx, tip, x1, y1, brushSize, color, erase, box)
     }
     return
   }
@@ -147,7 +162,7 @@ export function strokeBrushTip(
   const n = Math.max(1, Math.ceil(dist / step))
   for (let i = 0; i <= n; i++) {
     const t = i / n
-    stampBrushTip(ctx, tip, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, brushSize, color, erase)
+    stampBrushTip(ctx, tip, x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, brushSize, color, erase, box)
   }
 }
 
@@ -168,8 +183,9 @@ export function drawPaintStrokesInBox(
     if (!points.length) continue
     const brushSize = Math.max(0.5, stroke.size * Math.min(w, h))
     const erase = stroke.tool === 'eraser'
+    const inkBox = { x, y, w, h }
     if (points.length === 1) {
-      stampBrushTip(ctx, stroke.tip, points[0].x, points[0].y, brushSize, stroke.color, erase)
+      stampBrushTip(ctx, stroke.tip, points[0].x, points[0].y, brushSize, stroke.color, erase, inkBox)
       continue
     }
     for (let i = 1; i < points.length; i++) {
@@ -177,7 +193,7 @@ export function drawPaintStrokesInBox(
         ctx, stroke.tip,
         points[i - 1].x, points[i - 1].y,
         points[i].x, points[i].y,
-        brushSize, stroke.color, erase
+        brushSize, stroke.color, erase, inkBox
       )
     }
   }
@@ -3816,12 +3832,13 @@ export function renderLine(
       c.scale(l.scaleX ?? 1, l.scaleY ?? 1)
       c.translate(-center.x, -center.y)
     }
+    const inkBox = { x, y, w, h }
     for (const stroke of l.paintStrokes!) {
       const points = stroke.pts.map((p) => ({ x: x + p.x * w, y: y + p.y * h }))
       if (!points.length) continue
       const brushSize = Math.max(0.5, stroke.size * Math.min(w, h))
       if (points.length === 1) {
-        stampBrushTip(c, stroke.tip, points[0].x, points[0].y, brushSize, stroke.color, stroke.tool === 'eraser')
+        stampBrushTip(c, stroke.tip, points[0].x, points[0].y, brushSize, stroke.color, stroke.tool === 'eraser', inkBox)
         continue
       }
       for (let i = 1; i < points.length; i++) {
@@ -3829,7 +3846,7 @@ export function renderLine(
           c, stroke.tip,
           points[i - 1].x, points[i - 1].y,
           points[i].x, points[i].y,
-          brushSize, stroke.color, stroke.tool === 'eraser'
+          brushSize, stroke.color, stroke.tool === 'eraser', inkBox
         )
       }
     }
@@ -3960,19 +3977,20 @@ export function renderGroup(
     const a = group.pts[0], b = group.pts[1]
     const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
     const w = Math.max(1, Math.abs(b.x - a.x)), h = Math.max(1, Math.abs(b.y - a.y))
+    const inkBox = { x, y, w, h }
     for (const stroke of group.paintStrokes ?? []) {
       const points = stroke.pts.map((p) => ({ x: x + p.x * w, y: y + p.y * h }))
       if (!points.length) continue
       const brushSize = Math.max(0.5, stroke.size * Math.min(w, h))
       if (points.length === 1) {
-        stampBrushTip(layerCtx, stroke.tip, points[0].x, points[0].y, brushSize, stroke.color, stroke.tool === 'eraser')
+        stampBrushTip(layerCtx, stroke.tip, points[0].x, points[0].y, brushSize, stroke.color, stroke.tool === 'eraser', inkBox)
       } else {
         for (let i = 1; i < points.length; i++) {
           strokeBrushTip(
             layerCtx, stroke.tip,
             points[i - 1].x, points[i - 1].y,
             points[i].x, points[i].y,
-            brushSize, stroke.color, stroke.tool === 'eraser'
+            brushSize, stroke.color, stroke.tool === 'eraser', inkBox
           )
         }
       }
