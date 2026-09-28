@@ -707,8 +707,8 @@ interface ColorRowProps {
   /** When set, clicking the label picks this Color slot (Unmarked mode). */
   onLabelClick?: () => void
   labelActive?: boolean
-  /** Opacity slider, same idea as the paint colour slot. */
-  showOpacity?: boolean
+  /** Opacity and See-through / Punch stay inside the colour window. */
+  hideInlinePunch?: boolean
 }
 
 export function ColorRow({
@@ -720,7 +720,7 @@ export function ColorRow({
   onSwapClick,
   onLabelClick,
   labelActive,
-  showOpacity = false
+  hideInlinePunch = false
 }: ColorRowProps): JSX.Element {
   const [open, setOpen] = React.useState(false)
   const [anchorRect, setAnchorRect] = React.useState<DOMRect | null>(null)
@@ -756,7 +756,7 @@ export function ColorRow({
 
   const emit = (v: string) => onChange(solidOnly ? firstSolidColor(v) : v)
   const punchCtx = React.useContext(TransparentFillModeContext)
-  const showPunchToggle = !!punchCtx && !isGrad && isZeroAlphaHex(effectiveValue)
+  const showPunchToggle = !hideInlinePunch && !!punchCtx && !isGrad && isZeroAlphaHex(effectiveValue)
 
   const swapLeading = onSwapClick ? (
     <button
@@ -830,23 +830,6 @@ export function ColorRow({
             />
           )}
         </div>
-
-        {showOpacity && !isGrad && (
-          <div className="flex items-center gap-2 min-w-0 w-full">
-            <span className="text-[10px] text-muted shrink-0">Opacity</span>
-            <input
-              type="range"
-              min={0}
-              max={100}
-              value={hexAlphaPct(effectiveValue)}
-              onChange={(e) => emit(withHexAlpha(effectiveValue, Number(e.target.value)))}
-              className="flex-1 min-w-0"
-            />
-            <span className="text-[10px] text-muted w-8 text-right tabular-nums shrink-0">
-              {hexAlphaPct(effectiveValue)}%
-            </span>
-          </div>
-        )}
 
         {showPunchToggle && punchCtx && (
           <TransparentFillToggle
@@ -2350,7 +2333,7 @@ export function ImageRecolorControls({
                   })
                 }
                 labelActive={!!unmarkedPick}
-                showOpacity
+                hideInlinePunch
                 onLabelClick={
                   unmarkedPick ? () => void applyUnmarkedSlot(i + 1) : undefined
                 }

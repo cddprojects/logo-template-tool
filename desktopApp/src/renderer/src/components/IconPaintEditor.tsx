@@ -58,7 +58,6 @@ import { loadFont } from '../utils/fontLoader'
 import {
   ColorPickerPopup,
   isGradientColor,
-  isZeroAlphaHex,
   firstSolidColor,
   TransparentFillModeContext,
   TransparentFillToggle
@@ -12634,40 +12633,6 @@ export function IconPaintEditor({
                   </div>
                 )
               })}
-              {([1, 2, 3, 4, 5] as const).some((slot) => {
-                const key = `imageColor${slot}` as
-                  | 'imageColor1'
-                  | 'imageColor2'
-                  | 'imageColor3'
-                  | 'imageColor4'
-                  | 'imageColor5'
-                const value = (matchObj[key] || '').trim() || matchObj.imagePalette?.[slot - 1] || ''
-                return isZeroAlphaHex(value)
-              }) && (
-                <TransparentFillToggle
-                  mode={transparentFillMode}
-                  onChange={applyTransparentFillMode}
-                  showLabel={false}
-                  showInfo={false}
-                  compact
-                  onOpen={() => {
-                    const zero = ([1, 2, 3, 4, 5] as const).find((slot) => {
-                      const key = `imageColor${slot}` as
-                        | 'imageColor1'
-                        | 'imageColor2'
-                        | 'imageColor3'
-                        | 'imageColor4'
-                        | 'imageColor5'
-                      const value = (matchObj[key] || '').trim() || matchObj.imagePalette?.[slot - 1] || ''
-                      return isZeroAlphaHex(value)
-                    })
-                    const el = zero != null ? imageSlotSwatchRefs.current[zero] : null
-                    if (zero != null && el) {
-                      setImageSlotPopup({ slot: zero, rect: el.getBoundingClientRect() })
-                    }
-                  }}
-                />
-              )}
               {imageSlotPopup && (() => {
                 const key = `imageColor${imageSlotPopup.slot}` as
                   | 'imageColor1'
