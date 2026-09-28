@@ -9871,7 +9871,7 @@ export function IconPaintEditor({
           )
         if (sel && !isTransparentPaintColor(color)) {
           const local = unmapObjDisplayPt(pt, sel)
-          const marked = await fillMarkedSectionsOnImageProxy(sel, local, pixelColor(color))
+          const marked = await fillMarkedSectionsOnImageProxy(sel, local, color)
           if (marked) {
             commitLines(
               linesRef.current.map((l) => (l.id === marked.item.id ? marked.item : l))

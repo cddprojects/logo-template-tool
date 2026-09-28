@@ -1525,11 +1525,14 @@ export async function fillMarkedSectionsOnImageProxy(
     mark = best
   }
   if (mark < 1 || mark > 5) return null
-  const raw = fillCss.trim().toLowerCase()
-  const hex = (raw.startsWith('#') ? raw.slice(0, 7) : raw)
-  if (!/^#[0-9a-f]{6}$/.test(hex)) return null
+  const raw = fillCss.trim()
+  const lower = raw.toLowerCase()
   // See-through / Punch is a hole, not a Color 1–5 recolor.
-  if (/^#[0-9a-f]{8}$/.test(raw) && raw.slice(7, 9) === '00') return null
+  if (/^#[0-9a-f]{8}$/.test(lower) && lower.slice(7, 9) === '00') return null
+  const gradient = isGradientPaint(raw)
+  const hex = lower.startsWith('#') ? lower.slice(0, 7) : lower
+  const paint = gradient ? raw : hex
+  if (!gradient && !/^#[0-9a-f]{6}$/.test(hex)) return null
   const clickedSlot = shownSlotHex(item, mark)
   const next: LineObj = {
     ...item,
@@ -1546,9 +1549,15 @@ export async function fillMarkedSectionsOnImageProxy(
     const shown = shownSlotHex(item, slot)
     if (!(next[key] || '').trim() && shown) next[key] = shown
     if (slot !== mark && !(shown && clickedSlot && sameSolidColor(shown, clickedSlot))) continue
-    next[key] = hex
+    next[key] = paint
+  }
+  if (clickedSlot) {
+    next.paintStrokes = retintMatchingStrokes(item.paintStrokes, [clickedSlot], [paint])
   }
   if (!item.colorMarkPng) {
+    if (gradient) {
+      return { item: await refreshStampFromMarks(next), mark }
+    }
     return {
       item: { ...next, imageDataUrl: await recolorSameColor(displayUrl, clicked, hex) },
       mark
