@@ -968,11 +968,30 @@ function regionLabelCandidates(
   return []
 }
 
+/** Same-colour sections can sit further apart than the first slot match. */
+const SAME_COLOR_DIST = 96
+
+type ColorGroup = {
+  slot: number
+  show: boolean
+  n: number
+  r: number
+  g: number
+  b: number
+}
+
 /**
- * A visible region with no mark, whose colour is already one of Color 1–5,
- * gets that mark. Leftover Unmarked regions stay unmarked.
+ * Group every visible section by colour, not by the mark it already has.
+ * A section with no number still belongs to a Color slot when its colour
+ * matches sections that already do. The 5% test uses that whole group.
  */
-export async function claimVisibleRegions(item: LineObj): Promise<LineObj | null> {
+async function groupRegionsByColor(item: LineObj): Promise<{
+  regionMap: ImageRegionMap
+  groups: Map<number, ColorGroup>
+  nextMarks: Uint8Array | null
+  markW: number
+  markH: number
+} | null> {
   const source = item.imageSourceDataUrl || item.imageDataUrl
   if (!source || !item.colorMarkPng || !item.colorRegionPng) return null
   const regionMap = await decodeRegionPng(item.colorRegionPng)
@@ -988,8 +1007,9 @@ export async function claimVisibleRegions(item: LineObj): Promise<LineObj | null
   if (!ctx) return null
   ctx.drawImage(img, 0, 0, regionMap.w, regionMap.h)
   const { data } = ctx.getImageData(0, 0, regionMap.w, regionMap.h)
-  type Acc = { n: number; r: number; g: number; b: number; marked: boolean }
-  const regions = new Map<number, Acc>()
+
+  type RegionStat = { n: number; r: number; g: number; b: number; slot: number; votes: number[] }
+  const regions = new Map<number, RegionStat>()
   for (let p = 0; p < regionMap.regions.length; p++) {
     const id = regionMap.regions[p]
     if (!id || rest[id]) continue
@@ -997,61 +1017,159 @@ export async function claimVisibleRegions(item: LineObj): Promise<LineObj | null
     if ((data[i + 3] ?? 0) < 16) continue
     let row = regions.get(id)
     if (!row) {
-      row = { n: 0, r: 0, g: 0, b: 0, marked: false }
+      row = { n: 0, r: 0, g: 0, b: 0, slot: 0, votes: [0, 0, 0, 0, 0, 0] }
       regions.set(id, row)
     }
     const slot = markMap.marks[p] ?? 0
-    if (slot >= 1 && slot <= 5) row.marked = true
+    if (slot >= 1 && slot <= 5) row.votes[slot] = (row.votes[slot] ?? 0) + 1
     row.n++
     row.r += data[i] ?? 0
     row.g += data[i + 1] ?? 0
     row.b += data[i + 2] ?? 0
   }
+  for (const row of regions.values()) {
+    let best = 0
+    let bestN = 0
+    for (let s = 1; s <= 5; s++) {
+      const n = row.votes[s] ?? 0
+      if (n > bestN) {
+        bestN = n
+        best = s
+      }
+    }
+    row.slot = best
+    if (row.n > 0) {
+      row.r /= row.n
+      row.g /= row.n
+      row.b /= row.n
+    }
+  }
+
+  type Mean = { n: number; r: number; g: number; b: number }
+  const slotMean = new Map<number, Mean>()
+  let opaque = 0
+  for (const row of regions.values()) {
+    opaque += row.n
+    if (row.slot < 1) continue
+    const mean = slotMean.get(row.slot) ?? { n: 0, r: 0, g: 0, b: 0 }
+    mean.r += row.r * row.n
+    mean.g += row.g * row.n
+    mean.b += row.b * row.n
+    mean.n += row.n
+    slotMean.set(row.slot, mean)
+  }
+  for (const mean of slotMean.values()) {
+    if (mean.n < 1) continue
+    mean.r /= mean.n
+    mean.g /= mean.n
+    mean.b /= mean.n
+  }
+
+  const parent = [0, 1, 2, 3, 4, 5]
+  const find = (slot: number): number => {
+    let x = slot
+    while (parent[x] !== x) x = parent[x]!
+    return x
+  }
+  const unite = (a: number, b: number) => {
+    const ra = find(a)
+    const rb = find(b)
+    if (ra !== rb) parent[rb] = ra
+  }
+  const slotDist = (a: Mean, b: Mean) =>
+    Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b)
+  const slots = [...slotMean.keys()]
+  for (let i = 0; i < slots.length; i++) {
+    for (let j = i + 1; j < slots.length; j++) {
+      const a = slotMean.get(slots[i]!)
+      const b = slotMean.get(slots[j]!)
+      if (a && b && slotDist(a, b) <= SAME_COLOR_DIST) unite(slots[i]!, slots[j]!)
+    }
+  }
+  for (const row of regions.values()) {
+    if (row.slot >= 1 || row.n < 1) continue
+    let best = 0
+    let bestDist = Infinity
+    for (const [slot, mean] of slotMean) {
+      const dist = Math.abs(row.r - mean.r) + Math.abs(row.g - mean.g) + Math.abs(row.b - mean.b)
+      if (dist < bestDist) {
+        bestDist = dist
+        best = slot
+      }
+    }
+    if (best && bestDist <= SAME_COLOR_DIST) row.slot = best
+  }
+
+  const clusterArea = new Map<number, number>()
+  const primaryArea = new Map<number, number>()
+  for (const row of regions.values()) {
+    if (row.slot < 1) continue
+    const root = find(row.slot)
+    clusterArea.set(root, (clusterArea.get(root) ?? 0) + row.n)
+    if ((row.votes[row.slot] ?? 0) > 0) {
+      primaryArea.set(row.slot, (primaryArea.get(row.slot) ?? 0) + row.n)
+    }
+  }
+  const primaryOf = new Map<number, number>()
+  for (const slot of slots) {
+    const root = find(slot)
+    const current = primaryOf.get(root) ?? 0
+    const area = primaryArea.get(slot) ?? slotMean.get(slot)?.n ?? 0
+    const currentArea = primaryArea.get(current) ?? 0
+    if (!current || area > currentArea) primaryOf.set(root, slot)
+  }
+
+  const groups = new Map<number, ColorGroup>()
   const marks = new Uint8Array(markMap.marks)
   let changed = false
   for (const [id, row] of regions) {
-    if (row.marked || row.n < 1) continue
-    const hex = toHex(row.r / row.n, row.g / row.n, row.b / row.n)
-    let best = 0
-    let bestDist = Infinity
-    for (let n = 1; n <= 5; n++) {
-      const shown = shownSlotHex(item, n)
-      const palette = (item.imagePalette?.[n - 1] || '').trim()
-      for (const candidate of [shown, palette]) {
-        if (!candidate) continue
-        const dist = colorDist(hex, candidate)
-        if (dist < bestDist) {
-          bestDist = dist
-          best = n
-        }
-      }
-    }
-    if (!best || bestDist > 48) continue
+    if (row.n < 1 || row.slot < 1) continue
+    const root = find(row.slot)
+    const slot = primaryOf.get(root) ?? row.slot
+    const total = clusterArea.get(root) ?? 0
+    const show = opaque > 0 && total / opaque > 0.05
+    groups.set(id, { slot, show, n: row.n, r: row.r, g: row.g, b: row.b })
+    if (!show) continue
     for (let p = 0; p < regionMap.regions.length; p++) {
       if (regionMap.regions[p] !== id) continue
-      if ((marks[p] ?? 0) >= 1) continue
-      marks[p] = best
+      if ((marks[p] ?? 0) === slot) continue
+      marks[p] = slot
       changed = true
     }
   }
-  if (!changed) return null
-  return { ...item, colorMarkPng: encodeColorMarkPng(marks, markMap.w, markMap.h) }
+  return {
+    regionMap,
+    groups,
+    nextMarks: changed ? marks : null,
+    markW: markMap.w,
+    markH: markMap.h
+  }
+}
+
+/**
+ * Sections of a colour that already covers more than 5% get that colour's mark.
+ * Leftover Unmarked regions stay unmarked.
+ */
+export async function claimVisibleRegions(item: LineObj): Promise<LineObj | null> {
+  const grouped = await groupRegionsByColor(item)
+  if (!grouped?.nextMarks) return null
+  return {
+    ...item,
+    colorMarkPng: encodeColorMarkPng(grouped.nextMarks, grouped.markW, grouped.markH)
+  }
 }
 
 /** Labels for Match overlay (one per marked region), on solid ink, non-overlapping. */
 export async function buildMatchSectionLabels(
   item: LineObj,
   company?: LineObj[],
-  canvas?: { w: number; h: number }
+  stage?: { w: number; h: number }
 ): Promise<MatchSectionLabel[]> {
+  const grouped = await groupRegionsByColor(item)
+  if (!grouped) return []
+  const { regionMap, groups } = grouped
   const source = item.imageSourceDataUrl || item.imageDataUrl
-  if (!source || !item.colorMarkPng) return []
-  const regionMap = await decodeRegionPng(item.colorRegionPng)
-  const markMap = await decodeColorMarkPng(item.colorMarkPng)
-  if (!regionMap || !markMap) return []
-  // Unmarked leftovers may share a fill colour but must never show Match numbers.
-  const rest = await restFlagsByRegion(item.colorRegionPng, regionMap)
-
+  if (!source) return []
   const img = await loadCachedImage(source)
   if (!img) return []
   const displaySrc = item.imageDataUrl || source
@@ -1073,32 +1191,29 @@ export async function buildMatchSectionLabels(
     slot: number
   }
   const sums = new Map<number, Acc>()
+  for (const [id, group] of groups) {
+    if (!group.show) continue
+    sums.set(id, { n: 0, r: 0, g: 0, b: 0, slot: group.slot })
+  }
   for (let p = 0; p < regionMap.regions.length; p++) {
     const id = regionMap.regions[p]
-    if (!id || rest[id]) continue
-    const slot = markMap.marks[p] ?? 0
-    if (slot < 1 || slot > 5) continue
+    const s = id ? sums.get(id) : undefined
+    if (!s) continue
     const i = p * 4
-    let s = sums.get(id)
-    if (!s) {
-      s = { n: 0, r: 0, g: 0, b: 0, slot }
-      sums.set(id, s)
-    }
+    if ((data[i + 3] ?? 0) < 16) continue
     s.n++
-    s.r += data[i]!
-    s.g += data[i + 1]!
-    s.b += data[i + 2]!
-    s.slot = slot
+    s.r += data[i] ?? 0
+    s.g += data[i + 1] ?? 0
+    s.b += data[i + 2] ?? 0
   }
-
-  let marked = 0
-  const slotArea = new Map<number, number>()
   for (const s of sums.values()) {
     if (s.n < 1) continue
-    marked += s.n
-    slotArea.set(s.slot, (slotArea.get(s.slot) ?? 0) + s.n)
+    s.r /= s.n
+    s.g /= s.n
+    s.b /= s.n
   }
-  const ranked = [...sums.entries()].sort((a, b) => b[1].n - a[1].n)
+
+  const ranked = [...sums.entries()].sort((a, b) => (groups.get(b[0])?.n ?? 0) - (groups.get(a[0])?.n ?? 0))
   const minSep = Math.max(16, Math.round(Math.min(regionMap.w, regionMap.h) * 0.045))
   const minSep2 = minSep * minSep
   const placed: { x: number; y: number }[] = []
@@ -1106,10 +1221,6 @@ export async function buildMatchSectionLabels(
 
   for (const [regionId, s] of ranked) {
     if (s.n < 1) continue
-    // The 5% is this colour's total coverage, not the size of one piece.
-    // A colour at or under 5% keeps its Color slot and hides every number.
-    const total = slotArea.get(s.slot) ?? 0
-    if (marked > 0 && total / marked <= 0.05) continue
     const cands = regionLabelCandidates(regionId, regionMap.regions, regionMap.w, regionMap.h)
     if (!cands.length) continue
     let chosen = cands[0]!
@@ -1169,7 +1280,7 @@ export async function buildMatchSectionLabels(
     }
 
     placed.push({ x: chosen.x, y: chosen.y })
-    const sectionHex = toHex(s.r / s.n, s.g / s.n, s.b / s.n)
+    const sectionHex = toHex(s.r, s.g, s.b)
     out.push({
       regionId,
       slot: s.slot,
@@ -1219,7 +1330,7 @@ export async function buildMatchSectionLabels(
   }
   const a = item.pts?.[0]
   const b = item.pts?.[1]
-  if (canvas && a && b && canvas.w > 0 && canvas.h > 0) {
+  if (stage && a && b && stage.w > 0 && stage.h > 0) {
     const bx = Math.min(a.x, b.x)
     const by = Math.min(a.y, b.y)
     const dw = Math.max(1, Math.abs(b.x - a.x))
@@ -1234,8 +1345,8 @@ export async function buildMatchSectionLabels(
           sx += pt.x
           sy += pt.y
         }
-        const cx = (sx / stroke.pts.length) * canvas.w
-        const cy = (sy / stroke.pts.length) * canvas.h
+        const cx = (sx / stroke.pts.length) * stage.w
+        const cy = (sy / stroke.pts.length) * stage.h
         const ix = ((cx - bx) / dw) * regionMap.w
         const iy = ((cy - by) / dh) * regionMap.h
         if (ix < 0 || iy < 0 || ix >= regionMap.w || iy >= regionMap.h) continue
