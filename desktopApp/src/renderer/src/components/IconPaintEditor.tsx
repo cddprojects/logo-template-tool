@@ -100,7 +100,6 @@ import {
   applyUnmarkedBrushOnVectors,
   unmatchedBrushStrokeCount,
   imageSlotHexes,
-  imageSlotPaint,
   type MatchSectionLabel
 } from '../utils/imageColorMatch'
 import { fitRasterDataUrl } from '../utils/imageFit'
@@ -9509,10 +9508,9 @@ export function IconPaintEditor({
         lastPt.current = pt
         return
       }
-      const c = isGradientColor(color) ? color : pixelColor(color)
-      const inkBox = { x: 0, y: 0, w: W, h: H }
+      const c = pixelColor(color)
       for (const ctx of brushDestCtxs()) {
-        strokeBrushTip(ctx, brushTip, lastPt.current.x, lastPt.current.y, pt.x, pt.y, size, c, false, inkBox)
+        strokeBrushTip(ctx, brushTip, lastPt.current.x, lastPt.current.y, pt.x, pt.y, size, c, false)
       }
       markOuterOverlayPreserved()
       lastPt.current = pt
@@ -9765,7 +9763,7 @@ export function IconPaintEditor({
         tool: tool === 'eraser' ? 'eraser' : 'brush',
         pts: [shapeLocalPaintPoint(paintShape, snapped.pt)],
         size: size / shortSide,
-        color: isGradientColor(color) ? color : pixelColor(color),
+        color: pixelColor(color),
         tip: tool === 'eraser' ? eraserTip : brushTip
       }
       paintShape.paintStrokes = [...(paintShape.paintStrokes ?? []), stroke]
@@ -9827,16 +9825,12 @@ export function IconPaintEditor({
         })
         const strokeIndex = strokeHost ? paintStrokeHitIndex(strokeHost, pt) : -1
         if (strokeHost?.paintStrokes && strokeIndex >= 0) {
-          const paint = imageSlotPaint(sel, armed) || imageSlotHexes(sel)[armed - 1]
-          if (!paint) return
+          const hex = imageSlotHexes(sel)[armed - 1]
+          if (!hex) return
           const paintStrokes = strokeHost.paintStrokes.map((stroke, index) => {
             if (stroke.tool === 'eraser' || index !== strokeIndex) return stroke
-            if (isGradientColor(paint)) {
-              return { ...stroke, color: paint, colorSlot: armed, unmarkedInk: undefined }
-            }
-            const solid = paint.trim().slice(0, 7)
             const alpha = /^#[0-9a-fA-F]{8}$/.test(stroke.color.trim()) ? stroke.color.trim().slice(7, 9) : ''
-            return { ...stroke, color: solid + alpha, colorSlot: armed, unmarkedInk: undefined }
+            return { ...stroke, color: hex + alpha, colorSlot: armed, unmarkedInk: undefined }
           })
           const painted = linesRef.current.map((item) =>
             item.id === strokeHost.id ? { ...item, paintStrokes } : item
@@ -10005,7 +9999,7 @@ export function IconPaintEditor({
         tool: 'brush',
         pts: [{ x: pt.x / Math.max(1, W), y: pt.y / Math.max(1, H) }],
         size: size / Math.max(1, Math.min(W, H)),
-        color: isGradientColor(color) ? color : pixelColor(color),
+        color: pixelColor(color),
         tip: brushTip
       }
       const topBrush = [...linesRef.current].reverse().find((item) => item.brushLayer && isVectorVisible(item))
@@ -10044,10 +10038,9 @@ export function IconPaintEditor({
       return
     }
     if (tool === 'brush') {
-      const c = isGradientColor(color) ? color : pixelColor(color)
-      const inkBox = { x: 0, y: 0, w: W, h: H }
+      const c = pixelColor(color)
       for (const ctx of addPaintCtxs()) {
-        stampBrushTip(ctx, brushTip, pt.x, pt.y, size, c, false, inkBox)
+        stampBrushTip(ctx, brushTip, pt.x, pt.y, size, c, false)
       }
       markOuterOverlayPreserved()
       redrawLines()

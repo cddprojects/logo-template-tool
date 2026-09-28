@@ -1456,10 +1456,6 @@ function shownSlotPaint(item: LineObj, slot: number): string {
   return slotColorRaw(item, slot)
 }
 
-export function imageSlotPaint(item: LineObj, slot: number): string {
-  return shownSlotPaint(item, slot)
-}
-
 function markNear(
   marks: Uint8Array,
   w: number,
@@ -1686,11 +1682,9 @@ function isGradientPaint(color: string): boolean {
   return v.startsWith('linear-gradient(') || v.startsWith('radial-gradient(')
 }
 
-/** Solid keeps the stroke's own alpha. A gradient is stored whole so the first stop is not treated as "already that colour". */
+/** Solid keeps the stroke's own alpha. A gradient slot uses its first colour. */
 function unmarkedStrokeColor(target: string, strokeColor: string): string {
-  const t = target.trim()
-  if (isGradientPaint(t)) return t
-  const solid = solidColorKey(t)
+  const solid = solidColorKey(target.trim())
   if (!/^#[0-9a-f]{6}$/.test(solid)) return ''
   const stroke = strokeColor.trim()
   if (/^#[0-9a-fA-F]{8}$/.test(stroke)) return solid + stroke.slice(7, 9).toLowerCase()
@@ -1774,16 +1768,14 @@ export function retintMatchingStrokes<T extends StrokeLike>(
   if (!strokes?.length) return strokes
   const pairs = fromColors
     .map((from, i) => {
-      const toRaw = (toColors[i] || '').trim()
+      const toSolid = solidColorKey(toRaw)
       const gradient = toRaw.startsWith('linear-gradient(') || toRaw.startsWith('radial-gradient(')
-      return { from: solidColorKey(from), to: gradient ? toRaw : solidColorKey(toRaw), gradient, toRaw }
+      return { from: solidColorKey(from), to: toSolid, gradient, toRaw }
     })
     .filter(
       (p) => /^#[0-9a-f]{6}$/.test(p.from) && (p.gradient || /^#[0-9a-f]{6}$/.test(p.to))
     )
   const paintAssigned = (stroke: T, toRaw: string): T => {
-    const gradient = toRaw.startsWith('linear-gradient(') || toRaw.startsWith('radial-gradient(')
-    if (gradient) return { ...stroke, color: toRaw }
     const solid = solidColorKey(toRaw)
     if (!/^#[0-9a-f]{6}$/.test(solid)) return stroke
     const alpha = /^#[0-9a-f]{8}$/i.test(stroke.color.trim()) ? stroke.color.trim().slice(7, 9) : ''
@@ -1812,7 +1804,6 @@ export function retintMatchingStrokes<T extends StrokeLike>(
       stroke.color.startsWith('linear-gradient(') || stroke.color.startsWith('radial-gradient(')
     if (!pair.gradient && !strokeIsGrad && exact === pair.to) return stroke
     changed = true
-    if (pair.gradient) return { ...stroke, color: pair.to }
     const alpha = /^#[0-9a-f]{8}$/i.test(stroke.color.trim()) ? stroke.color.trim().slice(7, 9) : ''
     return { ...stroke, color: pair.to + alpha }
   })
