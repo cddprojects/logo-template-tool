@@ -4119,7 +4119,15 @@ export function punchObjectFromComposite(
   // Uploaded images keep the clicked section in display-space bits. Cut those
   // pixels out of the whole stack (image + background + anything below). The
   // local UV mask can miss that section and leave the background colour showing.
-  if (item.contentBound && item.type === 'stamp' && (item.imageSourceDataUrl || item.imageDataUrl)) {
+  if (
+    item.type === 'stamp' &&
+    (item.imageSourceDataUrl || item.imageDataUrl) &&
+    (item.contentBound ||
+      item.contentProxySlot ||
+      item.imageSourceDataUrl ||
+      item.name === 'Inner content' ||
+      item.colorMarkPng)
+  ) {
     const bits = punchMaskBits.get(item.id)
     if (bits && bits.length === w * h && bits.some((v) => v)) {
       destOutFilledMask(ctx, bits, w, h)

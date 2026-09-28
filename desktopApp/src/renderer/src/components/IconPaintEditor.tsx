@@ -5087,9 +5087,24 @@ export function IconPaintEditor({
    * Clear the punched display region out of an uploaded image bitmap.
    * Punch-through masks cut layers below; without this the image pixels stay solid.
    */
-  const eraseUploadedImageRegion = (item: LineObj, displayRegion: Uint8Array): Partial<LineObj> | null => {
-    if (!isInnerUploadedImageProxy(item) || !item.imageDataUrl || item.pts.length < 2) return null
-    const image = ensureStampImage(item.imageDataUrl)
+  const imageHoleTarget = (item: LineObj): boolean =>
+    item.type === 'stamp' &&
+    !!(item.imageDataUrl || item.imageSourceDataUrl) &&
+    !!(
+      item.contentBound ||
+      item.contentProxySlot ||
+      item.imageSourceDataUrl ||
+      item.name === 'Inner content' ||
+      item.colorMarkPng
+    )
+
+  const zeroImageAlphaInDisplayRegion = (
+    dataUrl: string,
+    item: LineObj,
+    displayRegion: Uint8Array
+  ): string | null => {
+    if (item.pts.length < 2) return null
+    const image = ensureStampImage(dataUrl)
     if (!image) return null
     const a = item.pts[0]
     const b = item.pts[1]
@@ -5126,10 +5141,26 @@ export function IconPaintEditor({
     }
     if (!changed) return null
     ctx.putImageData(imageData, 0, 0)
-    const imageDataUrl = canvas.toDataURL('image/png')
+    return canvas.toDataURL('image/png')
+  }
+
+  const eraseUploadedImageRegion = (item: LineObj, displayRegion: Uint8Array): Partial<LineObj> | null => {
+    if (!imageHoleTarget(item)) return null
+    const displayUrl = item.imageDataUrl || item.imageSourceDataUrl
+    if (!displayUrl) return null
+    const imageDataUrl = zeroImageAlphaInDisplayRegion(displayUrl, item, displayRegion)
+    if (!imageDataUrl) return null
+    let imageSourceDataUrl = item.imageSourceDataUrl
+    if (imageSourceDataUrl && imageSourceDataUrl !== displayUrl) {
+      const punchedSource = zeroImageAlphaInDisplayRegion(imageSourceDataUrl, item, displayRegion)
+      if (punchedSource) imageSourceDataUrl = punchedSource
+    } else {
+      imageSourceDataUrl = imageDataUrl
+    }
     ensureStampImage(imageDataUrl, () => redrawLinesRef.current())
     return {
       imageDataUrl,
+      imageSourceDataUrl,
       rasterEdited: true,
       sourceSvgMarkup: undefined,
       sourceStampSize: undefined,
@@ -5162,7 +5193,7 @@ export function IconPaintEditor({
       const clickI = (clickY * W + clickX) * 4
       // Soft fringe may receive the click, but flood must use a solid-ink
       // threshold so AA does not bridge separated islands (i-dot vs stem).
-      const imageProxy = isInnerUploadedImageProxy(item)
+      const imageProxy = imageHoleTarget(item)
       // Photos and soft image edges sit under the text/shape ink threshold, so
       // Punch never started a region. Images use a lower alpha floor.
       const inkHitT = item.type === 'text' ? 28 : imageProxy ? 16 : 80
@@ -5347,17 +5378,19 @@ export function IconPaintEditor({
           }
         }
         setLocalPunchFromFilled(item, region, W, H, { mode: 'see-through' })
+        const seeThroughErased = eraseUploadedImageRegion(item, region)
+        const seeThroughItem = seeThroughErased ? { ...item, ...seeThroughErased } : item
         if (nearlyWhole && item.type !== 'stamp' && !hasPunchCoverage(item.id)) {
           // Whole-glyph see-through: keep live colour; flags from coverage.
           return {
-            ...item,
+            ...seeThroughItem,
             punchThrough: false,
             punchEnclosedHole: false,
             ...(item.type === 'shape' || item.type === 'poly' ? { fill: true as const } : {})
           }
         }
         return {
-          ...item,
+          ...seeThroughItem,
           punchThrough: hasPunchCoverage(item.id),
           punchEnclosedHole: isInnerUploadedImageProxy(item)
             ? false
@@ -9774,7 +9807,7 @@ export function IconPaintEditor({
               fillableInnerImage(l) &&
               objectOwnsFillClick(l, pt)
           )
-        if (sel) {
+        if (sel && !isTransparentPaintColor(color)) {
           const local = unmapObjDisplayPt(pt, sel)
           const marked = await fillMarkedSectionsOnImageProxy(sel, local, pixelColor(color))
           if (marked) {

@@ -1511,8 +1511,11 @@ export async function fillMarkedSectionsOnImageProxy(
     mark = best
   }
   if (mark < 1 || mark > 5) return null
-  const hex = (fillCss.startsWith('#') ? fillCss.slice(0, 7) : fillCss).toLowerCase()
+  const raw = fillCss.trim().toLowerCase()
+  const hex = (raw.startsWith('#') ? raw.slice(0, 7) : raw)
   if (!/^#[0-9a-f]{6}$/.test(hex)) return null
+  // See-through / Punch is a hole, not a Color 1–5 recolor.
+  if (/^#[0-9a-f]{8}$/.test(raw) && raw.slice(7, 9) === '00') return null
   const clickedSlot = shownSlotHex(item, mark)
   const next: LineObj = {
     ...item,
