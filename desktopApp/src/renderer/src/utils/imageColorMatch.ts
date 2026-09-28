@@ -968,9 +968,81 @@ function regionLabelCandidates(
   return []
 }
 
+/**
+ * A visible region with no mark, whose colour is already one of Color 1–5,
+ * gets that mark. Leftover Unmarked regions stay unmarked.
+ */
+export async function claimVisibleRegions(item: LineObj): Promise<LineObj | null> {
+  const source = item.imageSourceDataUrl || item.imageDataUrl
+  if (!source || !item.colorMarkPng || !item.colorRegionPng) return null
+  const regionMap = await decodeRegionPng(item.colorRegionPng)
+  const markMap = await decodeColorMarkPng(item.colorMarkPng)
+  if (!regionMap || !markMap || markMap.w !== regionMap.w || markMap.h !== regionMap.h) return null
+  const rest = await restFlagsByRegion(item.colorRegionPng, regionMap)
+  const img = await loadCachedImage(source)
+  if (!img) return null
+  const canvas = document.createElement('canvas')
+  canvas.width = regionMap.w
+  canvas.height = regionMap.h
+  const ctx = canvas.getContext('2d', { willReadFrequently: true })
+  if (!ctx) return null
+  ctx.drawImage(img, 0, 0, regionMap.w, regionMap.h)
+  const { data } = ctx.getImageData(0, 0, regionMap.w, regionMap.h)
+  type Acc = { n: number; r: number; g: number; b: number; marked: boolean }
+  const regions = new Map<number, Acc>()
+  for (let p = 0; p < regionMap.regions.length; p++) {
+    const id = regionMap.regions[p]
+    if (!id || rest[id]) continue
+    const i = p * 4
+    if ((data[i + 3] ?? 0) < 16) continue
+    let row = regions.get(id)
+    if (!row) {
+      row = { n: 0, r: 0, g: 0, b: 0, marked: false }
+      regions.set(id, row)
+    }
+    const slot = markMap.marks[p] ?? 0
+    if (slot >= 1 && slot <= 5) row.marked = true
+    row.n++
+    row.r += data[i] ?? 0
+    row.g += data[i + 1] ?? 0
+    row.b += data[i + 2] ?? 0
+  }
+  const marks = new Uint8Array(markMap.marks)
+  let changed = false
+  for (const [id, row] of regions) {
+    if (row.marked || row.n < 1) continue
+    const hex = toHex(row.r / row.n, row.g / row.n, row.b / row.n)
+    let best = 0
+    let bestDist = Infinity
+    for (let n = 1; n <= 5; n++) {
+      const shown = shownSlotHex(item, n)
+      const palette = (item.imagePalette?.[n - 1] || '').trim()
+      for (const candidate of [shown, palette]) {
+        if (!candidate) continue
+        const dist = colorDist(hex, candidate)
+        if (dist < bestDist) {
+          bestDist = dist
+          best = n
+        }
+      }
+    }
+    if (!best || bestDist > 48) continue
+    for (let p = 0; p < regionMap.regions.length; p++) {
+      if (regionMap.regions[p] !== id) continue
+      if ((marks[p] ?? 0) >= 1) continue
+      marks[p] = best
+      changed = true
+    }
+  }
+  if (!changed) return null
+  return { ...item, colorMarkPng: encodeColorMarkPng(marks, markMap.w, markMap.h) }
+}
+
 /** Labels for Match overlay (one per marked region), on solid ink, non-overlapping. */
 export async function buildMatchSectionLabels(
-  item: LineObj
+  item: LineObj,
+  company?: LineObj[],
+  canvas?: { w: number; h: number }
 ): Promise<MatchSectionLabel[]> {
   const source = item.imageSourceDataUrl || item.imageDataUrl
   if (!source || !item.colorMarkPng) return []
@@ -1020,11 +1092,11 @@ export async function buildMatchSectionLabels(
   }
 
   let marked = 0
-  for (const s of sums.values()) marked += s.n
-  const sectionsPerSlot = new Map<number, number>()
+  const slotArea = new Map<number, number>()
   for (const s of sums.values()) {
     if (s.n < 1) continue
-    sectionsPerSlot.set(s.slot, (sectionsPerSlot.get(s.slot) ?? 0) + 1)
+    marked += s.n
+    slotArea.set(s.slot, (slotArea.get(s.slot) ?? 0) + s.n)
   }
   const ranked = [...sums.entries()].sort((a, b) => b[1].n - a[1].n)
   const minSep = Math.max(16, Math.round(Math.min(regionMap.w, regionMap.h) * 0.045))
@@ -1034,10 +1106,10 @@ export async function buildMatchSectionLabels(
 
   for (const [regionId, s] of ranked) {
     if (s.n < 1) continue
-    // Stay on Color 1–5. When that colour is already more than five pieces,
-    // hide the number on any piece under 5% of the marked image.
-    const crowded = (sectionsPerSlot.get(s.slot) ?? 0) > 5
-    if (crowded && marked > 0 && s.n / marked < 0.05) continue
+    // The 5% is this colour's total coverage, not the size of one piece.
+    // A colour at or under 5% keeps its Color slot and hides every number.
+    const total = slotArea.get(s.slot) ?? 0
+    if (marked > 0 && total / marked <= 0.05) continue
     const cands = regionLabelCandidates(regionId, regionMap.regions, regionMap.w, regionMap.h)
     if (!cands.length) continue
     let chosen = cands[0]!
@@ -1108,6 +1180,68 @@ export async function buildMatchSectionLabels(
       sectionHex,
       labelColor: contrastLabelColor(sectionHex)
     })
+  }
+  const addBrushLabel = (ix: number, iy: number, color: string) => {
+    let slot = 0
+    let bestDist = Infinity
+    for (let n = 1; n <= 5; n++) {
+      const hex = shownSlotHex(item, n)
+      if (!hex) continue
+      const dist = colorDist(color, hex)
+      if (dist < bestDist) {
+        bestDist = dist
+        slot = n
+      }
+    }
+    if (!slot) return
+    const sectionHex = solidColorKey(color)
+    out.push({
+      regionId: -(out.length + 1),
+      slot,
+      ix,
+      iy,
+      imgW: regionMap.w,
+      imgH: regionMap.h,
+      sectionHex,
+      labelColor: contrastLabelColor(sectionHex)
+    })
+  }
+  // Strokes on the image are 0–1 of the stamp. A pinned Brush layer is 0–1 of the canvas.
+  for (const stroke of item.paintStrokes ?? []) {
+    if (stroke.tool === 'eraser' || !stroke.pts.length) continue
+    let sx = 0
+    let sy = 0
+    for (const pt of stroke.pts) {
+      sx += pt.x
+      sy += pt.y
+    }
+    addBrushLabel((sx / stroke.pts.length) * regionMap.w, (sy / stroke.pts.length) * regionMap.h, stroke.color)
+  }
+  const a = item.pts?.[0]
+  const b = item.pts?.[1]
+  if (canvas && a && b && canvas.w > 0 && canvas.h > 0) {
+    const bx = Math.min(a.x, b.x)
+    const by = Math.min(a.y, b.y)
+    const dw = Math.max(1, Math.abs(b.x - a.x))
+    const dh = Math.max(1, Math.abs(b.y - a.y))
+    for (const other of company ?? []) {
+      if (other.id === item.id || !other.brushLayer) continue
+      for (const stroke of other.paintStrokes ?? []) {
+        if (stroke.tool === 'eraser' || !stroke.pts.length) continue
+        let sx = 0
+        let sy = 0
+        for (const pt of stroke.pts) {
+          sx += pt.x
+          sy += pt.y
+        }
+        const cx = (sx / stroke.pts.length) * canvas.w
+        const cy = (sy / stroke.pts.length) * canvas.h
+        const ix = ((cx - bx) / dw) * regionMap.w
+        const iy = ((cy - by) / dh) * regionMap.h
+        if (ix < 0 || iy < 0 || ix >= regionMap.w || iy >= regionMap.h) continue
+        addBrushLabel(ix, iy, stroke.color)
+      }
+    }
   }
   return out
 }

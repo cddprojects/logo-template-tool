@@ -85,6 +85,7 @@ import {
 } from '../utils/paintSettingsSync'
 import {
   buildMatchSectionLabels,
+  claimVisibleRegions,
   enrichImageProxyWithMatch,
   fillMarkedSectionsOnImageProxy,
   hydrateImageProxyColors,
@@ -11306,9 +11307,24 @@ export function IconPaintEditor({
     const target = selectedObj && isInnerUploadedImageProxy(selectedObj) ? selectedObj : null
     if (!target) return
     let cancelled = false
-    void buildMatchSectionLabels(target).then((labels) => {
+    void (async () => {
+      const claimed = await claimVisibleRegions(target)
+      let next = target
+      if (claimed) {
+        const refreshed = await refreshStampFromMarks(claimed)
+        next = refreshed ?? claimed
+        if (cancelled) return
+        commitLines(linesRef.current.map((l) => (l.id === next.id ? next : l)))
+        if (next.imageDataUrl) {
+          ensureStampImage(next.imageDataUrl, () => {
+            redrawLinesRef.current()
+            drawHandles()
+          })
+        }
+      }
+      const labels = await buildMatchSectionLabels(next, linesRef.current, { w: W, h: H })
       if (!cancelled) setMatchLabels(labels)
-    })
+    })()
     return () => {
       cancelled = true
     }
@@ -12372,10 +12388,7 @@ export function IconPaintEditor({
                               current?.paintStrokes ?? next.paintStrokes,
                               [previous],
                               [v]
-                            ),
-                            ...(tool === 'match'
-                              ? { imageDataUrl: current?.imageDataUrl ?? matchObj.imageDataUrl }
-                              : {})
+                            )
                           }
                           stampStrokeLiveCache.delete(stored.id)
                           const owned = new Set<string>()
@@ -12406,7 +12419,7 @@ export function IconPaintEditor({
                               return { ...l, paintStrokes }
                             })
                           )
-                          if (tool !== 'match' && stored.imageDataUrl) {
+                          if (stored.imageDataUrl) {
                             ensureStampImage(stored.imageDataUrl, () => {
                               redrawLinesRef.current()
                               drawHandles()
