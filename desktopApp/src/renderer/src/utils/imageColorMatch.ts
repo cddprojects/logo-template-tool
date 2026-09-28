@@ -1019,6 +1019,15 @@ export async function buildMatchSectionLabels(
     s.slot = slot
   }
 
+  let opaque = 0
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i]! >= 16) opaque++
+  }
+  const sectionsPerSlot = new Map<number, number>()
+  for (const s of sums.values()) {
+    if (s.n < 1) continue
+    sectionsPerSlot.set(s.slot, (sectionsPerSlot.get(s.slot) ?? 0) + 1)
+  }
   const ranked = [...sums.entries()].sort((a, b) => b[1].n - a[1].n)
   const minSep = Math.max(16, Math.round(Math.min(regionMap.w, regionMap.h) * 0.045))
   const minSep2 = minSep * minSep
@@ -1027,6 +1036,10 @@ export async function buildMatchSectionLabels(
 
   for (const [regionId, s] of ranked) {
     if (s.n < 1) continue
+    // Still Color 1–5. Hide the number only when this colour is already split
+    // into more than five sections and this piece is under 5% of the image.
+    const crowded = (sectionsPerSlot.get(s.slot) ?? 0) > 5
+    if (crowded && opaque > 0 && s.n / opaque < 0.05) continue
     const cands = regionLabelCandidates(regionId, regionMap.regions, regionMap.w, regionMap.h)
     if (!cands.length) continue
     let chosen = cands[0]!
@@ -1305,7 +1318,11 @@ export function retintMatchingStrokes<T extends StrokeLike>(
   let changed = false
   const next = strokes.map((stroke) => {
     if (stroke.tool === 'eraser') return stroke
-    const pair = pairs.find((p) => p.from === solidColorKey(stroke.color))
+    const exact = solidColorKey(stroke.color)
+    // A rescanned brush can sit a step off the Color slot it was filed under.
+    const pair =
+      pairs.find((p) => p.from === exact) ??
+      pairs.find((p) => colorDist(stroke.color, p.from) <= 48)
     if (!pair) return stroke
     changed = true
     const alpha = stroke.color.trim().length >= 9 ? stroke.color.trim().slice(7, 9) : ''
@@ -1634,6 +1651,43 @@ export function retintBaseImageStrokes(
     return { ...v, paintStrokes }
   })
   return changed ? { ...session, vectors } : session
+}
+
+/** Brush paint on the Inner overlay or the front canvas, not only vector strokes. */
+export async function recolorBaseBrushOverlays(
+  session: PaintSession | null | undefined,
+  fromColors: string[],
+  toColors: string[]
+): Promise<PaintSession | null | undefined> {
+  if (!session) return session
+  const pairs = fromColors
+    .map((from, i) => ({ from, to: toColors[i] || '' }))
+    .filter((p) => p.from && p.to && !sameSolidColor(p.from, p.to))
+  if (!pairs.length) return session
+  let next = session
+  const base = (next.vectors ?? []).find(isBaseImageVector)
+  const box = base ? stampBoxOf(base) : null
+  const boxed = [
+    'contentPng',
+    'contentDecorationsPng',
+    'contentAboveDecorationsPng',
+    'contentBelowDecorationsPng'
+  ] as const
+  if (box) {
+    for (const key of boxed) {
+      let url = next[key]
+      for (const pair of pairs) {
+        url = await replaceRgbInPngBox(url, box, pair.from, pair.to)
+      }
+      if (url !== next[key]) next = { ...next, [key]: url }
+    }
+  }
+  let front = next.contentFrontPng
+  for (const pair of pairs) {
+    front = await replaceRgbInPngBox(front, { x: 0, y: 0, w: 1e7, h: 1e7 }, pair.from, pair.to)
+  }
+  if (front !== next.contentFrontPng) next = { ...next, contentFrontPng: front }
+  return next
 }
 
 function colorDist(a: string, b: string): number {

@@ -12378,8 +12378,33 @@ export function IconPaintEditor({
                               : {})
                           }
                           stampStrokeLiveCache.delete(stored.id)
+                          const owned = new Set<string>()
+                          for (const item of linesRef.current) {
+                            const base =
+                              !!item.brushLayer ||
+                              !!item.contentBound ||
+                              !!item.contentProxySlot ||
+                              !!item.imageSourceDataUrl ||
+                              (item.type === 'stamp' && item.name === 'Inner content')
+                            if (!base) continue
+                            owned.add(item.id)
+                            let parentId = item.parentId
+                            const seen = new Set<string>()
+                            while (parentId && !seen.has(parentId)) {
+                              seen.add(parentId)
+                              owned.add(parentId)
+                              parentId = linesRef.current.find((row) => row.id === parentId)?.parentId
+                            }
+                          }
                           commitLines(
-                            linesRef.current.map((l) => (l.id === stored.id ? stored : l))
+                            linesRef.current.map((l) => {
+                              if (l.id === stored.id) return stored
+                              if (!owned.has(l.id) || !l.paintStrokes?.length) return l
+                              const paintStrokes = retintMatchingStrokes(l.paintStrokes, [previous], [v])
+                              if (paintStrokes === l.paintStrokes) return l
+                              stampStrokeLiveCache.delete(l.id)
+                              return { ...l, paintStrokes }
+                            })
                           )
                           if (tool !== 'match' && stored.imageDataUrl) {
                             ensureStampImage(stored.imageDataUrl, () => {

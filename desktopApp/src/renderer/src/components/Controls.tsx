@@ -12,7 +12,8 @@ import {
   inspectUnmarkedInk,
   recolorUnmarkedGroup,
   rescanBaseLayerColors,
-  retintBaseImageStrokes
+  retintBaseImageStrokes,
+  recolorBaseBrushOverlays
 } from '../utils/imageColorMatch'
 import {
   bakeImageSoftAaBleed,
@@ -1995,6 +1996,17 @@ export function ImageRecolorControls({
   const colors = [imageColor1, imageColor2, imageColor3, imageColor4, imageColor5]
   const colorKeys = ['imageColor1', 'imageColor2', 'imageColor3', 'imageColor4', 'imageColor5'] as const
 
+  const recolorBrushForSlots = (fromColors: string[], toColors: string[]) => {
+    if (!paintSession || !onPaintSession) return
+    if (!fromColors.some((from, i) => from && toColors[i] && from !== toColors[i])) return
+    const retinted = retintBaseImageStrokes(paintSession, fromColors, toColors)
+    const base = retinted ?? paintSession
+    if (retinted && retinted !== paintSession) onPaintSession(retinted)
+    void recolorBaseBrushOverlays(base, fromColors, toColors).then((painted) => {
+      if (painted && painted !== base) onPaintSession(painted)
+    })
+  }
+
   useEffect(() => {
     if (imageUseOriginalColors || !imageDataUrl) {
       setUnmarkedCount(0)
@@ -2237,10 +2249,7 @@ export function ImageRecolorControls({
                   const stored = v === orig ? '' : v
                   const visibleNext = (stored || orig).trim()
                   onChange({ [key]: stored })
-                  if (paintSession && onPaintSession && shown && visibleNext) {
-                    const next = retintBaseImageStrokes(paintSession, [shown], [visibleNext])
-                    if (next && next !== paintSession) onPaintSession(next)
-                  }
+                  void recolorBrushForSlots([shown], [visibleNext])
                 }}
                 swapLit={armedIndex === i}
                 onSwapClick={() =>
@@ -2253,8 +2262,7 @@ export function ImageRecolorControls({
                       [colorKeys[b]]: ea
                     } as ImageRecolorPatch)
                     if (paintSession && onPaintSession) {
-                      const next = retintBaseImageStrokes(paintSession, [ea, eb], [eb, ea])
-                      if (next && next !== paintSession) onPaintSession(next)
+                      void recolorBrushForSlots([ea, eb], [eb, ea])
                     }
                   })
                 }
