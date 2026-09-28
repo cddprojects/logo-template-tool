@@ -2183,12 +2183,8 @@ async function rewireBaseRaster(
     .filter((p) => p.from && p.to && !sameSolidColor(p.from, p.to))
   if (!pairs.length) return session
   let next = session
-  const keys = [
-    'contentPng',
-    'contentDecorationsPng',
-    'contentAboveDecorationsPng',
-    'contentBelowDecorationsPng'
-  ] as const
+  // Brush baked on the base image only. Decoration planes also hold shapes.
+  const keys = ['contentPng', 'contentFrontPng'] as const
   for (const key of keys) {
     let url = next[key]
     for (const pair of pairs) {
@@ -2299,13 +2295,9 @@ export async function rescanBaseLayerColors(
   const brushColors = brushStrokeHexes(input.session)
   const contentHasPaint = await pngHasAnyOpaque(planes.content)
   const frontHasPaint = await pngHasAnyOpaque(planes.front)
-  const hasOverlay = !!(
-    contentHasPaint ||
-    frontHasPaint ||
-    (box &&
-      ((planes.below && (await pngBoxHasOpaque(planes.below, box))) ||
-        (planes.above && (await pngBoxHasOpaque(planes.above, box)))))
-  )
+  // Shapes on other layers (a rectangle above the image) live in the decoration
+  // planes. They must not start a rescan or feed Color 1–5.
+  const hasOverlay = !!(contentHasPaint || frontHasPaint)
   if (!hasStrokes && !hasOverlay && !hasBrushLayers && !hasInnerStrokes && brushColors.length === 0) {
     const seeded = await seedUploadedImageColors(source)
     const palette = uploadPalette(input)
@@ -2322,22 +2314,9 @@ export async function rescanBaseLayerColors(
     )
     return { patch: finishUploadedImageSeed(kept, input), session: input.session }
   }
-  const visible = await resolveImageDataUrl({
-    imageDataUrl: source,
-    imageUseOriginalColors: input.imageUseOriginalColors,
-    imagePalette: input.imagePalette,
-    imageColor1: input.imageColor1,
-    imageColor2: input.imageColor2,
-    imageColor3: input.imageColor3,
-    imageColor4: input.imageColor4,
-    imageColor5: input.imageColor5,
-    imageColorMarkPng: input.imageColorMarkPng,
-    imageColorRegionPng: input.imageColorRegionPng,
-    imageUnmarkedColorSlot: input.imageUnmarkedColorSlot
-  })
-  // Count the photo and the brush on one 512px grid. Painting the brush onto
-  // the full-size photo first, then shrinking, drops a thin stroke.
-  const photo = await loadCachedImage(visible || source)
+  // Count the original photo, not the picture already painted by Color 1–5.
+  // Scanning the recolored result makes each Rescan pick a new set.
+  const photo = await loadCachedImage(source)
   const scanScale = photo?.width && photo?.height
     ? Math.min(1, 512 / Math.max(photo.width, photo.height))
     : 1
@@ -2353,14 +2332,13 @@ export async function rescanBaseLayerColors(
     scanW,
     scanH
   )
-  const [contentInk, frontInk, belowInk, strokeInk, brushLayerInk, innerStrokeInk] = await Promise.all([
+  const [contentInk, frontInk, strokeInk, brushLayerInk, innerStrokeInk] = await Promise.all([
     // Inner paint overlay, cropped to the Inner content image so a brush on
     // that layer lines up with the photo instead of the whole canvas.
     box
       ? planeInkCounts(planes.content, box, scanW, scanH)
       : planeInkAll(planes.content, scanW, scanH),
     planeInkAll(planes.front, scanW, scanH),
-    planeInkCounts(planes.below, box, scanW, scanH),
     Promise.resolve(strokeInkCounts(strokes ?? [], scanW, scanH)),
     Promise.resolve(brushLayerInkCounts(input.session, box, scanW, scanH)),
     Promise.resolve(innerContentStrokeInk(input.session, box, scanW, scanH))
@@ -2370,7 +2348,6 @@ export async function rescanBaseLayerColors(
         photoCtx.getImageData(0, 0, scanW, scanH).data,
         5,
         [
-          ...belowInk,
           // Overlay and front brush are smaller than the photo, so they keep a slot.
           ...contentInk.map((ink) => ({ ...ink, protect: true })),
           ...frontInk.map((ink) => ({ ...ink, protect: true })),
@@ -2380,7 +2357,7 @@ export async function rescanBaseLayerColors(
           ...reservedInk.map((ink) => ({ ...ink, protect: true }))
         ]
       )
-    : await scanImagePalette(visible || source, 5, 512)
+    : await scanImagePalette(source, 5, 512)
   const histogram = input.imageKeepColors ? counted : withForcedBrushColors(counted, brushColors)
   if (!histogram.length) {
     const seeded = await seedUploadedImageColors(source)
@@ -2391,8 +2368,8 @@ export async function rescanBaseLayerColors(
   const slotColors = input.imageKeepColors
     ? currentSlotColors(input, first.length ? first : histogram)
     : histogram
-  const marked = await buildDefaultColorMarks(visible || source, slotColors, 140)
-  const regionMap = await buildImageRegions(visible || source)
+  const marked = await buildDefaultColorMarks(source, slotColors, 140)
+  const regionMap = await buildImageRegions(source)
   const seeded = withFirstPalette(
     {
       imageDataUrl: source,
