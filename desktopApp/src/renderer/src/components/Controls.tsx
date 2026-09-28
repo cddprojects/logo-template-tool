@@ -367,10 +367,14 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
   const [solidHex, setSolidHex] = React.useState(initC1)
   const [hexText,  setHexText]  = React.useState(initC1)
   const hexFocused = React.useRef(false)
+  const editingRef = React.useRef(false)
+  const editingTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null)
   React.useEffect(() => { if (!hexFocused.current) setHexText(solidHex) }, [solidHex])
 
   // Keep local fields in sync when the parent value changes (eyedropper, external edits).
+  // Skip while the user is still dragging a gradient so a slow recolour cannot snap the controls back.
   React.useEffect(() => {
+    if (editingRef.current) return
     const lin = value.startsWith('linear-gradient(')
     const rad = value.startsWith('radial-gradient(')
     if (lin) {
@@ -456,7 +460,19 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
       ref={popupRef}
       style={{ position: 'fixed', left, top, width: POPUP_W, zIndex: 9999 }}
       className="bg-surface border border-border rounded-xl shadow-2xl p-3 space-y-2.5"
-      onMouseDown={e => e.stopPropagation()}
+      onPointerDown={e => {
+        e.stopPropagation()
+        editingRef.current = true
+        if (editingTimer.current) clearTimeout(editingTimer.current)
+        const end = () => {
+          window.removeEventListener('pointerup', end)
+          if (editingTimer.current) clearTimeout(editingTimer.current)
+          editingTimer.current = setTimeout(() => {
+            editingRef.current = false
+          }, 200)
+        }
+        window.addEventListener('pointerup', end)
+      }}
     >
       {/* Tabs — hidden when solid-only (shadow colours). */}
       {!solidOnly && (
@@ -2039,10 +2055,10 @@ export function ImageRecolorControls({
   const colors = [imageColor1, imageColor2, imageColor3, imageColor4, imageColor5]
   const colorKeys = ['imageColor1', 'imageColor2', 'imageColor3', 'imageColor4', 'imageColor5'] as const
 
-  const recolorBrushForSlots = (fromColors: string[], toColors: string[]) => {
+  const recolorBrushForSlots = (fromColors: string[], toColors: string[], onlySlot?: number) => {
     if (!paintSession || !onPaintSession) return
     if (!fromColors.some((from, i) => from && toColors[i] && from !== toColors[i])) return
-    const retinted = retintBaseImageStrokes(paintSession, fromColors, toColors)
+    const retinted = retintBaseImageStrokes(paintSession, fromColors, toColors, onlySlot)
     const base = retinted ?? paintSession
     if (retinted && retinted !== paintSession) onPaintSession(retinted)
     void recolorBaseBrushOverlays(base, fromColors, toColors).then((painted) => {
@@ -2315,7 +2331,7 @@ export function ImageRecolorControls({
                   const stored = v === orig ? '' : v
                   const visibleNext = (stored || orig).trim()
                   onChange({ [key]: stored })
-                  void recolorBrushForSlots([shown], [visibleNext])
+                  void recolorBrushForSlots([shown], [visibleNext], i + 1)
                 }}
                 swapLit={armedIndex === i}
                 onSwapClick={() =>

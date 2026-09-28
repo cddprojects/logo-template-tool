@@ -494,6 +494,8 @@ export interface PaintVector {
     tip: 'round' | 'square' | 'flat' | 'calligraphy' | 'spray'
     /** Claimed by Unmarked. Recolour follows the Unmarked colour, not Color 1–5. */
     unmarkedInk?: boolean
+    /** Match assigned this stroke to Color 1–5. The mark stays on that slot. */
+    colorSlot?: number
   }[]
   /** Which paint raster layer this vector belongs to (z-order + visibility). */
   layer?: PaintLayerId

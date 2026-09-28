@@ -100,6 +100,7 @@ import {
   applyUnmarkedBrushOnVectors,
   unmatchedBrushStrokeCount,
   imageSlotHexes,
+  imageSlotPaint,
   type MatchSectionLabel
 } from '../utils/imageColorMatch'
 import { fitRasterDataUrl } from '../utils/imageFit'
@@ -410,6 +411,15 @@ export function IconPaintEditor({
   const [matchSlot, setMatchSlot] = useState<number | null>(null)
   const matchSlotRef = useRef<number | null>(null)
   matchSlotRef.current = matchSlot
+  const imageSlotApplyGen = useRef(0)
+  const imageSlotApplyBusy = useRef(false)
+  const imageSlotApplyTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const imageSlotApplyPending = useRef<{
+    slot: 1 | 2 | 3 | 4 | 5
+    v: string
+    proxyId: string
+    gen: number
+  } | null>(null)
   /** Unmarked mode: next Color 1–5 click fills leftover sections, or recolours them. */
   const [unmarkedPick, setUnmarkedPick] = useState<'assign' | 'recolor' | null>(null)
   const [unmarkedCount, setUnmarkedCount] = useState(0)
@@ -9499,9 +9509,10 @@ export function IconPaintEditor({
         lastPt.current = pt
         return
       }
-      const c = pixelColor(color)
+      const c = isGradientColor(color) ? color : pixelColor(color)
+      const inkBox = { x: 0, y: 0, w: W, h: H }
       for (const ctx of brushDestCtxs()) {
-        strokeBrushTip(ctx, brushTip, lastPt.current.x, lastPt.current.y, pt.x, pt.y, size, c, false)
+        strokeBrushTip(ctx, brushTip, lastPt.current.x, lastPt.current.y, pt.x, pt.y, size, c, false, inkBox)
       }
       markOuterOverlayPreserved()
       lastPt.current = pt
@@ -9754,7 +9765,7 @@ export function IconPaintEditor({
         tool: tool === 'eraser' ? 'eraser' : 'brush',
         pts: [shapeLocalPaintPoint(paintShape, snapped.pt)],
         size: size / shortSide,
-        color: pixelColor(color),
+        color: isGradientColor(color) ? color : pixelColor(color),
         tip: tool === 'eraser' ? eraserTip : brushTip
       }
       paintShape.paintStrokes = [...(paintShape.paintStrokes ?? []), stroke]
@@ -9816,12 +9827,16 @@ export function IconPaintEditor({
         })
         const strokeIndex = strokeHost ? paintStrokeHitIndex(strokeHost, pt) : -1
         if (strokeHost?.paintStrokes && strokeIndex >= 0) {
-          const hex = imageSlotHexes(sel)[armed - 1]
-          if (!hex) return
+          const paint = imageSlotPaint(sel, armed) || imageSlotHexes(sel)[armed - 1]
+          if (!paint) return
           const paintStrokes = strokeHost.paintStrokes.map((stroke, index) => {
             if (stroke.tool === 'eraser' || index !== strokeIndex) return stroke
-            const alpha = stroke.color.trim().length >= 9 ? stroke.color.trim().slice(7, 9) : ''
-            return { ...stroke, color: hex + alpha, unmarkedInk: undefined }
+            if (isGradientColor(paint)) {
+              return { ...stroke, color: paint, colorSlot: armed, unmarkedInk: undefined }
+            }
+            const solid = paint.trim().slice(0, 7)
+            const alpha = /^#[0-9a-fA-F]{8}$/.test(stroke.color.trim()) ? stroke.color.trim().slice(7, 9) : ''
+            return { ...stroke, color: solid + alpha, colorSlot: armed, unmarkedInk: undefined }
           })
           const painted = linesRef.current.map((item) =>
             item.id === strokeHost.id ? { ...item, paintStrokes } : item
@@ -9990,7 +10005,7 @@ export function IconPaintEditor({
         tool: 'brush',
         pts: [{ x: pt.x / Math.max(1, W), y: pt.y / Math.max(1, H) }],
         size: size / Math.max(1, Math.min(W, H)),
-        color: pixelColor(color),
+        color: isGradientColor(color) ? color : pixelColor(color),
         tip: brushTip
       }
       const topBrush = [...linesRef.current].reverse().find((item) => item.brushLayer && isVectorVisible(item))
@@ -10029,9 +10044,10 @@ export function IconPaintEditor({
       return
     }
     if (tool === 'brush') {
-      const c = pixelColor(color)
+      const c = isGradientColor(color) ? color : pixelColor(color)
+      const inkBox = { x: 0, y: 0, w: W, h: H }
       for (const ctx of addPaintCtxs()) {
-        stampBrushTip(ctx, brushTip, pt.x, pt.y, size, c, false)
+        stampBrushTip(ctx, brushTip, pt.x, pt.y, size, c, false, inkBox)
       }
       markOuterOverlayPreserved()
       redrawLines()
@@ -11658,67 +11674,88 @@ export function IconPaintEditor({
     }
   }
 
-  const commitImageSlotColor = (slot: 1 | 2 | 3 | 4 | 5, v: string, proxyId: string) => {
-    void (async () => {
-      const live = linesRef.current.find((l) => l.id === proxyId)
-      if (!live) return
-      const slotKey = `imageColor${slot}` as
-        | 'imageColor1'
-        | 'imageColor2'
-        | 'imageColor3'
-        | 'imageColor4'
-        | 'imageColor5'
-      const previous = (live[slotKey] || live.imagePalette?.[slot - 1] || '').trim()
-      const next = await setImageProxySlotColor(live, slot, v)
-      if (!next) return
-      const current = linesRef.current.find((l) => l.id === proxyId)
-      const stored = {
-        ...next,
-        paintStrokes: retintMatchingStrokes(
-          current?.paintStrokes ?? next.paintStrokes,
-          [previous],
-          [v]
-        )
-      }
-      stampStrokeLiveCache.delete(stored.id)
-      const owned = new Set<string>()
-      for (const item of linesRef.current) {
-        const base =
-          !!item.brushLayer ||
-          !!item.contentBound ||
-          !!item.contentProxySlot ||
-          !!item.imageSourceDataUrl ||
-          (item.type === 'stamp' && item.name === 'Inner content')
-        if (!base) continue
-        owned.add(item.id)
-        let parentId = item.parentId
-        const seen = new Set<string>()
-        while (parentId && !seen.has(parentId)) {
-          seen.add(parentId)
-          owned.add(parentId)
-          parentId = linesRef.current.find((row) => row.id === parentId)?.parentId
+  const drainImageSlotColor = async () => {
+    if (imageSlotApplyBusy.current) return
+    imageSlotApplyBusy.current = true
+    try {
+      while (imageSlotApplyPending.current) {
+        const job = imageSlotApplyPending.current
+        imageSlotApplyPending.current = null
+        const live = linesRef.current.find((l) => l.id === job.proxyId)
+        if (!live || job.gen !== imageSlotApplyGen.current) continue
+        const slotKey = `imageColor${job.slot}` as
+          | 'imageColor1'
+          | 'imageColor2'
+          | 'imageColor3'
+          | 'imageColor4'
+          | 'imageColor5'
+        const previous = (live[slotKey] || live.imagePalette?.[job.slot - 1] || '').trim()
+        const next = await setImageProxySlotColor(live, job.slot, job.v)
+        if (!next || job.gen !== imageSlotApplyGen.current || imageSlotApplyPending.current) continue
+        const current = linesRef.current.find((l) => l.id === job.proxyId)
+        const stored = {
+          ...next,
+          paintStrokes: retintMatchingStrokes(
+            current?.paintStrokes ?? next.paintStrokes,
+            [previous],
+            [job.v],
+            job.slot
+          )
         }
+        stampStrokeLiveCache.delete(stored.id)
+        const owned = new Set<string>()
+        for (const item of linesRef.current) {
+          const base =
+            !!item.brushLayer ||
+            !!item.contentBound ||
+            !!item.contentProxySlot ||
+            !!item.imageSourceDataUrl ||
+            (item.type === 'stamp' && item.name === 'Inner content')
+          if (!base) continue
+          owned.add(item.id)
+          let parentId = item.parentId
+          const seen = new Set<string>()
+          while (parentId && !seen.has(parentId)) {
+            seen.add(parentId)
+            owned.add(parentId)
+            parentId = linesRef.current.find((row) => row.id === parentId)?.parentId
+          }
+        }
+        if (job.gen !== imageSlotApplyGen.current || imageSlotApplyPending.current) continue
+        commitLines(
+          linesRef.current.map((l) => {
+            if (l.id === stored.id) return stored
+            if (!owned.has(l.id) || !l.paintStrokes?.length) return l
+            const paintStrokes = retintMatchingStrokes(l.paintStrokes, [previous], [job.v], job.slot)
+            if (paintStrokes === l.paintStrokes) return l
+            stampStrokeLiveCache.delete(l.id)
+            return { ...l, paintStrokes }
+          })
+        )
+        if (stored.imageDataUrl) {
+          ensureStampImage(stored.imageDataUrl, () => {
+            redrawLinesRef.current()
+            drawHandles()
+          })
+        }
+        pushHistory()
+        redrawLines()
+        drawHandles()
       }
-      commitLines(
-        linesRef.current.map((l) => {
-          if (l.id === stored.id) return stored
-          if (!owned.has(l.id) || !l.paintStrokes?.length) return l
-          const paintStrokes = retintMatchingStrokes(l.paintStrokes, [previous], [v])
-          if (paintStrokes === l.paintStrokes) return l
-          stampStrokeLiveCache.delete(l.id)
-          return { ...l, paintStrokes }
-        })
-      )
-      if (stored.imageDataUrl) {
-        ensureStampImage(stored.imageDataUrl, () => {
-          redrawLinesRef.current()
-          drawHandles()
-        })
-      }
-      pushHistory()
-      redrawLines()
-      drawHandles()
-    })()
+    } finally {
+      imageSlotApplyBusy.current = false
+      if (imageSlotApplyPending.current) void drainImageSlotColor()
+    }
+  }
+
+  const commitImageSlotColor = (slot: 1 | 2 | 3 | 4 | 5, v: string, proxyId: string) => {
+    const gen = ++imageSlotApplyGen.current
+    imageSlotApplyPending.current = { slot, v, proxyId, gen }
+    if (imageSlotApplyTimer.current) clearTimeout(imageSlotApplyTimer.current)
+    imageSlotApplyTimer.current = setTimeout(() => {
+      imageSlotApplyTimer.current = null
+      void drainImageSlotColor()
+    }, 80)
   }
 
   return (

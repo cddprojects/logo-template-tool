@@ -159,6 +159,8 @@ export function FaviconEditor({
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const renderIdRef = useRef(0)
+  const faviconPreviewBusy = useRef(false)
+  const faviconPreviewKick = useRef<() => void>(() => {})
   const [exporting, setExporting] = useState<string | null>(null)
   const [exportNameStyle, setExportNameStyle] = useState<ExportNameStyle>(() => getStoredExportNameStyle())
   const [previewSize, setPreviewSize] = useState(512)
@@ -531,9 +533,29 @@ export function FaviconEditor({
     const renderId = ++renderIdRef.current
 
     const doRender = () => {
-      if (renderId !== renderIdRef.current) return
-      renderFavicon(canvasRef.current!, { ...config, size: previewSize }).catch(() => {})
+      if (renderId !== renderIdRef.current || !canvasRef.current) return
+      if (faviconPreviewBusy.current) return
+      faviconPreviewBusy.current = true
+      const off = document.createElement('canvas')
+      renderFavicon(off, { ...config, size: previewSize })
+        .then(() => {
+          if (renderId !== renderIdRef.current || !canvasRef.current) return
+          const dest = canvasRef.current
+          const ctx = dest.getContext('2d')
+          if (!ctx) return
+          if (dest.width !== off.width || dest.height !== off.height) {
+            dest.width = off.width
+            dest.height = off.height
+          }
+          ctx.drawImage(off, 0, 0)
+        })
+        .catch(() => {})
+        .finally(() => {
+          faviconPreviewBusy.current = false
+          if (renderId !== renderIdRef.current) faviconPreviewKick.current()
+        })
     }
+    faviconPreviewKick.current = doRender
 
     const rafId = requestAnimationFrame(doRender)
 

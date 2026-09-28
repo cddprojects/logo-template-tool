@@ -128,6 +128,8 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const renderIdRef = useRef(0)
+  const logoPreviewBusy = useRef(false)
+  const logoPreviewKick = useRef<() => void>(() => {})
   const imageChangeGen = useRef(0)
   const [exporting, setExporting] = useState<string | null>(null)
   const [exportScale, setExportScale] = useState<number>(4)
@@ -699,9 +701,32 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
     const faviconForIconRender = isSyncedWithFavicon ? faviconCfg : undefined
 
     const doRender = () => {
-      if (renderId !== renderIdRef.current) return
-      renderLogo(canvasRef.current!, renderConfig, 4, true, faviconForIconRender).catch(() => {})
+      if (renderId !== renderIdRef.current || !canvasRef.current) return
+      if (logoPreviewBusy.current) return
+      logoPreviewBusy.current = true
+      const live = canvasRef.current
+      const off = document.createElement('canvas')
+      off.width = live.width
+      off.height = live.height
+      renderLogo(off, renderConfig, 4, true, faviconForIconRender)
+        .then(() => {
+          if (renderId !== renderIdRef.current || !canvasRef.current) return
+          const dest = canvasRef.current
+          const ctx = dest.getContext('2d')
+          if (!ctx) return
+          if (dest.width !== off.width || dest.height !== off.height) {
+            dest.width = off.width
+            dest.height = off.height
+          }
+          ctx.drawImage(off, 0, 0)
+        })
+        .catch(() => {})
+        .finally(() => {
+          logoPreviewBusy.current = false
+          if (renderId !== renderIdRef.current) logoPreviewKick.current()
+        })
     }
+    logoPreviewKick.current = doRender
 
     const rafId = requestAnimationFrame(doRender)
 

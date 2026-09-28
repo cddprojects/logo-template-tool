@@ -1305,19 +1305,25 @@ export async function buildMatchSectionLabels(
       labelColor: contrastLabelColor(sectionHex)
     })
   }
-  const addBrushLabel = (ix: number, iy: number, color: string) => {
+  const addBrushLabel = (ix: number, iy: number, color: string, colorSlot?: number) => {
     let slot = 0
     let bestDist = Infinity
-    for (let n = 1; n <= 5; n++) {
-      const hex = shownSlotHex(item, n)
-      if (!hex) continue
-      const dist = colorDist(color, hex)
-      if (dist < bestDist) {
-        bestDist = dist
-        slot = n
+    const assigned = colorSlot != null && colorSlot >= 1 && colorSlot <= 5
+    if (assigned) {
+      slot = colorSlot
+      bestDist = 0
+    } else {
+      for (let n = 1; n <= 5; n++) {
+        const hex = shownSlotHex(item, n)
+        if (!hex) continue
+        const dist = colorDist(color, hex)
+        if (dist < bestDist) {
+          bestDist = dist
+          slot = n
+        }
       }
     }
-    const matched = slot > 0 && bestDist <= 48
+    const matched = assigned || (slot > 0 && bestDist <= 48)
     const sectionHex = solidColorKey(color)
     out.push({
       regionId: -(out.length + 1),
@@ -1340,7 +1346,12 @@ export async function buildMatchSectionLabels(
       sx += pt.x
       sy += pt.y
     }
-    addBrushLabel((sx / stroke.pts.length) * regionMap.w, (sy / stroke.pts.length) * regionMap.h, stroke.color)
+    addBrushLabel(
+      (sx / stroke.pts.length) * regionMap.w,
+      (sy / stroke.pts.length) * regionMap.h,
+      stroke.color,
+      stroke.colorSlot
+    )
   }
   const a = item.pts?.[0]
   const b = item.pts?.[1]
@@ -1364,9 +1375,54 @@ export async function buildMatchSectionLabels(
         const ix = ((cx - bx) / dw) * regionMap.w
         const iy = ((cy - by) / dh) * regionMap.h
         if (ix < 0 || iy < 0 || ix >= regionMap.w || iy >= regionMap.h) continue
-        addBrushLabel(ix, iy, stroke.color)
+        addBrushLabel(ix, iy, stroke.color, stroke.colorSlot)
       }
     }
+    const ancestors = new Set<string>()
+    let parentId = item.parentId
+    const seenParents = new Set<string>()
+    while (parentId && !seenParents.has(parentId)) {
+      seenParents.add(parentId)
+      ancestors.add(parentId)
+      parentId = (company ?? []).find((row) => row.id === parentId)?.parentId
+    }
+    for (const other of company ?? []) {
+      if (other.id === item.id || other.brushLayer || !ancestors.has(other.id)) continue
+      if (other.pts.length < 2) continue
+      const ha = other.pts[0]
+      const hb = other.pts[1]
+      if (!ha || !hb) continue
+      const hx = Math.min(ha.x, hb.x)
+      const hy = Math.min(ha.y, hb.y)
+      const hw = Math.max(1, Math.abs(hb.x - ha.x))
+      const hh = Math.max(1, Math.abs(hb.y - ha.y))
+      for (const stroke of other.paintStrokes ?? []) {
+        if (stroke.tool === 'eraser' || !stroke.pts.length) continue
+        let sx = 0
+        let sy = 0
+        for (const pt of stroke.pts) {
+          sx += pt.x
+          sy += pt.y
+        }
+        const cx = hx + (sx / stroke.pts.length) * hw
+        const cy = hy + (sy / stroke.pts.length) * hh
+        const ix = ((cx - bx) / dw) * regionMap.w
+        const iy = ((cy - by) / dh) * regionMap.h
+        if (ix < 0 || iy < 0 || ix >= regionMap.w || iy >= regionMap.h) continue
+        addBrushLabel(ix, iy, stroke.color, stroke.colorSlot)
+      }
+    }
+  }
+  const brushMarks = out.filter((lab) => lab.regionId < 0)
+  if (brushMarks.length) {
+    return out.filter((lab) => {
+      if (lab.regionId < 0) return true
+      return !brushMarks.some((mark) => {
+        const dx = lab.ix - mark.ix
+        const dy = lab.iy - mark.iy
+        return dx * dx + dy * dy < minSep2
+      })
+    })
   }
   return out
 }
@@ -1398,6 +1454,10 @@ function shownSlotHex(item: LineObj, slot: number): string {
 /** Colour to paint, including a linear or radial string. */
 function shownSlotPaint(item: LineObj, slot: number): string {
   return slotColorRaw(item, slot)
+}
+
+export function imageSlotPaint(item: LineObj, slot: number): string {
+  return shownSlotPaint(item, slot)
 }
 
 function markNear(
@@ -1552,7 +1612,7 @@ export async function fillMarkedSectionsOnImageProxy(
     next[key] = paint
   }
   if (clickedSlot) {
-    next.paintStrokes = retintMatchingStrokes(item.paintStrokes, [clickedSlot], [paint])
+    next.paintStrokes = retintMatchingStrokes(item.paintStrokes, [clickedSlot], [paint], mark)
   }
   if (!item.colorMarkPng) {
     if (gradient) {
@@ -1593,6 +1653,7 @@ type StrokeLike = {
   color: string
   tip: string
   unmarkedInk?: boolean
+  colorSlot?: number
 }
 
 export function imageSlotHexes(item: LineObj): string[] {
@@ -1648,6 +1709,7 @@ export function applyUnmarkedBrushStrokes<T extends StrokeLike>(
     if (stroke.tool === 'eraser' || !stroke.pts.length) return stroke
     const color = unmarkedStrokeColor(toHex, stroke.color)
     if (!color || stroke.color === color) return stroke
+    if (stroke.colorSlot) return stroke
     const matched = brushStrokeMatchedSlot(stroke.color, slotHexes)
     if (stroke.unmarkedInk && mode === 'recolor') {
       changed = true
@@ -1694,7 +1756,7 @@ export function unmatchedBrushStrokeCount(vectors: PaintVector[]): number {
     if (!hosts.has(v.id)) continue
     for (const stroke of v.paintStrokes ?? []) {
       if (stroke.tool === 'eraser' || !stroke.pts?.length) continue
-      if (stroke.unmarkedInk) continue
+      if (stroke.unmarkedInk || stroke.colorSlot) continue
       if (brushStrokeMatchedSlot(stroke.color, slotHexes) > 0) continue
       n++
     }
@@ -1706,22 +1768,40 @@ export function unmatchedBrushStrokeCount(vectors: PaintVector[]): number {
 export function retintMatchingStrokes<T extends StrokeLike>(
   strokes: T[] | undefined,
   fromColors: string[],
-  toColors: string[]
+  toColors: string[],
+  onlySlot?: number
 ): T[] | undefined {
   if (!strokes?.length) return strokes
   const pairs = fromColors
     .map((from, i) => {
       const toRaw = (toColors[i] || '').trim()
       const gradient = toRaw.startsWith('linear-gradient(') || toRaw.startsWith('radial-gradient(')
-      return { from: solidColorKey(from), to: gradient ? toRaw : solidColorKey(toRaw), gradient }
+      return { from: solidColorKey(from), to: gradient ? toRaw : solidColorKey(toRaw), gradient, toRaw }
     })
     .filter(
       (p) => /^#[0-9a-f]{6}$/.test(p.from) && (p.gradient || /^#[0-9a-f]{6}$/.test(p.to))
     )
-  if (!pairs.length) return strokes
+  const paintAssigned = (stroke: T, toRaw: string): T => {
+    const gradient = toRaw.startsWith('linear-gradient(') || toRaw.startsWith('radial-gradient(')
+    if (gradient) return { ...stroke, color: toRaw }
+    const solid = solidColorKey(toRaw)
+    if (!/^#[0-9a-f]{6}$/.test(solid)) return stroke
+    const alpha = /^#[0-9a-f]{8}$/i.test(stroke.color.trim()) ? stroke.color.trim().slice(7, 9) : ''
+    return { ...stroke, color: solid + alpha }
+  }
   let changed = false
   const next = strokes.map((stroke) => {
     if (stroke.tool === 'eraser') return stroke
+    if (stroke.colorSlot && stroke.colorSlot >= 1 && stroke.colorSlot <= 5) {
+      if (onlySlot && stroke.colorSlot !== onlySlot) return stroke
+      const idx = fromColors.length === 1 ? 0 : stroke.colorSlot - 1
+      if (fromColors.length === 1 && !onlySlot) return stroke
+      const toRaw = (toColors[idx] || '').trim()
+      if (!toRaw || stroke.color === toRaw) return stroke
+      changed = true
+      return paintAssigned(stroke, toRaw)
+    }
+    if (!pairs.length) return stroke
     const exact = solidColorKey(stroke.color)
     // A rescanned brush can sit a step off the Color slot it was filed under.
     const pair =
@@ -2046,14 +2126,15 @@ function stampBoxOf(v: PaintVector): { x: number; y: number; w: number; h: numbe
 export function retintBaseImageStrokes(
   session: PaintSession | null | undefined,
   fromColors: string[],
-  toColors: string[]
+  toColors: string[],
+  onlySlot?: number
 ): PaintSession | null | undefined {
   if (!session?.vectors?.length) return session
   let changed = false
   const brushIds = new Set(baseBrushVectors(session).map((v) => v.id))
   const vectors = session.vectors.map((v) => {
     if (!brushIds.has(v.id) || !v.paintStrokes?.length) return v
-    const paintStrokes = retintMatchingStrokes(v.paintStrokes, fromColors, toColors)
+    const paintStrokes = retintMatchingStrokes(v.paintStrokes, fromColors, toColors, onlySlot)
     if (paintStrokes === v.paintStrokes) return v
     changed = true
     return { ...v, paintStrokes }
@@ -2463,6 +2544,6 @@ export async function setImageProxySlotColor(
     ...item,
     [key]: hex,
     imageUseOriginalColors: false,
-    paintStrokes: retintMatchingStrokes(item.paintStrokes, [previous], [hex])
+    paintStrokes: retintMatchingStrokes(item.paintStrokes, [previous], [hex], slot)
   })
 }

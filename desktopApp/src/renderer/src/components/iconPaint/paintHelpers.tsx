@@ -397,6 +397,8 @@ export interface ObjectPaintStroke {
   tip: BrushTip
   /** Claimed by Unmarked. Recolour follows the Unmarked colour, not Color 1–5. */
   unmarkedInk?: boolean
+  /** Match assigned this stroke to Color 1–5. The mark stays on that slot. */
+  colorSlot?: number
 }
 export interface LineObj {
   id: string
