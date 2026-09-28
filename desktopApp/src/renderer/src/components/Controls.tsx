@@ -203,7 +203,8 @@ export function TransparentFillToggle({
   onChange,
   showLabel = true,
   compact = false,
-  showInfo = true
+  showInfo = true,
+  onOpen
 }: {
   mode: TransparentFillMode
   onChange: (mode: TransparentFillMode) => void
@@ -212,6 +213,8 @@ export function TransparentFillToggle({
   compact?: boolean
   /** Right-panel rows put this note on the row title instead. */
   showInfo?: boolean
+  /** Open the colour window (solid, linear, radial, hex) when ST or PH is clicked. */
+  onOpen?: () => void
 }): JSX.Element {
   return (
     <div className={`flex items-center gap-1.5 min-w-0 ${compact ? 'justify-end' : ''}`}>
@@ -234,7 +237,10 @@ export function TransparentFillToggle({
       <div className="flex items-center rounded-lg border border-border overflow-hidden shrink-0">
         <button
           type="button"
-          onClick={() => onChange('see-through')}
+          onClick={() => {
+            onChange('see-through')
+            onOpen?.()
+          }}
           title="Hide this fill so layers below show through (See-through)"
           className={`px-2 py-1 text-[11px] font-medium transition-colors ${
             mode === 'see-through' ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
@@ -244,7 +250,10 @@ export function TransparentFillToggle({
         </button>
         <button
           type="button"
-          onClick={() => onChange('punch')}
+          onClick={() => {
+            onChange('punch')
+            onOpen?.()
+          }}
           title="Cut a hole through every layer below this fill. Layers above still show. (Punch hole)"
           className={`px-2 py-1 text-[11px] font-medium transition-colors ${
             mode === 'punch' ? 'bg-accent text-white' : 'bg-surface3 text-muted hover:text-text'
@@ -286,6 +295,21 @@ export function firstSolidColor(color: string): string {
 /** Native <input type="color"> only accepts #RRGGBB (6 digits). */
 function toColorInputValue(color: string): string {
   return toHexColor(color).slice(0, 7)
+}
+
+/** Opacity percent for a solid hex. Six-digit colours are fully opaque. */
+export function hexAlphaPct(color: string): number {
+  if (!color || isGradientColor(color)) return 100
+  const hex = toHexColor(color)
+  if (!/^#[0-9a-f]{8}$/.test(hex)) return 100
+  return Math.round((parseInt(hex.slice(7, 9), 16) / 255) * 100)
+}
+
+/** Keep RGB and set opacity to 0–100. */
+export function withHexAlpha(color: string, pct: number): string {
+  const rgb = toHexColor(color).slice(0, 7)
+  const a = Math.round((Math.max(0, Math.min(100, pct)) / 100) * 255)
+  return rgb + a.toString(16).padStart(2, '0')
 }
 
 /** Apply a #RRGGBB pick from the native color input, keeping prior alpha if present. */
@@ -413,7 +437,7 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
   const activeTab = solidOnly ? 'solid' : tab
   const punchCtx = React.useContext(TransparentFillModeContext)
   const showPunchToggle = !!punchCtx && activeTab === 'solid' && isZeroAlphaHex(solidHex)
-  const POPUP_H = (activeTab === 'solid' ? (solidOnly ? 72 : 100) + (showPunchToggle ? 36 : 0) : activeTab === 'linear' ? 248 : 272)
+  const POPUP_H = (activeTab === 'solid' ? (solidOnly ? 72 : 132) + (showPunchToggle ? 36 : 0) : activeTab === 'linear' ? 248 : 272)
   const left = Math.min(rect.left, window.innerWidth - POPUP_W - 8)
   const topBelow = rect.bottom + 6
   const top = topBelow + POPUP_H > window.innerHeight - 8 ? rect.top - POPUP_H - 6 : topBelow
@@ -492,6 +516,20 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
               maxLength={9}
             />
           </div>
+          {!solidOnly && (
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] text-muted w-12 shrink-0">Opacity</span>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={hexAlphaPct(solidHex)}
+                onChange={(e) => applyPrimaryColor(withHexAlpha(solidHex, Number(e.target.value)))}
+                className="flex-1 min-w-0"
+              />
+              <span className="text-[10px] text-muted w-8 text-right tabular-nums">{hexAlphaPct(solidHex)}%</span>
+            </div>
+          )}
           {showPunchToggle && punchCtx && (
             <TransparentFillToggle
               mode={punchCtx.mode}
@@ -669,6 +707,8 @@ interface ColorRowProps {
   /** When set, clicking the label picks this Color slot (Unmarked mode). */
   onLabelClick?: () => void
   labelActive?: boolean
+  /** Opacity slider, same idea as the paint colour slot. */
+  showOpacity?: boolean
 }
 
 export function ColorRow({
@@ -679,7 +719,8 @@ export function ColorRow({
   swapLit = false,
   onSwapClick,
   onLabelClick,
-  labelActive
+  labelActive,
+  showOpacity = false
 }: ColorRowProps): JSX.Element {
   const [open, setOpen] = React.useState(false)
   const [anchorRect, setAnchorRect] = React.useState<DOMRect | null>(null)
@@ -790,6 +831,23 @@ export function ColorRow({
           )}
         </div>
 
+        {showOpacity && !isGrad && (
+          <div className="flex items-center gap-2 min-w-0 w-full">
+            <span className="text-[10px] text-muted shrink-0">Opacity</span>
+            <input
+              type="range"
+              min={0}
+              max={100}
+              value={hexAlphaPct(effectiveValue)}
+              onChange={(e) => emit(withHexAlpha(effectiveValue, Number(e.target.value)))}
+              className="flex-1 min-w-0"
+            />
+            <span className="text-[10px] text-muted w-8 text-right tabular-nums shrink-0">
+              {hexAlphaPct(effectiveValue)}%
+            </span>
+          </div>
+        )}
+
         {showPunchToggle && punchCtx && (
           <TransparentFillToggle
             mode={punchCtx.mode}
@@ -797,6 +855,7 @@ export function ColorRow({
             showLabel={false}
             showInfo={false}
             compact
+            onOpen={openPopup}
           />
         )}
 
@@ -2283,6 +2342,7 @@ export function ImageRecolorControls({
                   })
                 }
                 labelActive={!!unmarkedPick}
+                showOpacity
                 onLabelClick={
                   unmarkedPick ? () => void applyUnmarkedSlot(i + 1) : undefined
                 }

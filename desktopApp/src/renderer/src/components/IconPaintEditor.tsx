@@ -58,6 +58,7 @@ import { loadFont } from '../utils/fontLoader'
 import {
   ColorPickerPopup,
   isGradientColor,
+  isZeroAlphaHex,
   firstSolidColor,
   TransparentFillModeContext,
   TransparentFillToggle
@@ -444,7 +445,9 @@ export function IconPaintEditor({
   const [hexText, setHexText] = useState('#000000ff')
   const [colorPopupOpen, setColorPopupOpen] = useState(false)
   const [colorPopupRect, setColorPopupRect] = useState<DOMRect | null>(null)
+  const [imageSlotPopup, setImageSlotPopup] = useState<{ slot: 1 | 2 | 3 | 4 | 5; rect: DOMRect } | null>(null)
   const colorSwatchRef = useRef<HTMLButtonElement>(null)
+  const imageSlotSwatchRefs = useRef<Partial<Record<number, HTMLButtonElement | null>>>({})
   const [canUndo, setCanUndo] = useState(false)
   const [canRedo, setCanRedo] = useState(false)
   const [layerOrder, setLayerOrder] = useState<PaintLayerId[]>(
@@ -11606,6 +11609,69 @@ export function IconPaintEditor({
     }
   }
 
+  const commitImageSlotColor = (slot: 1 | 2 | 3 | 4 | 5, v: string, proxyId: string) => {
+    void (async () => {
+      const live = linesRef.current.find((l) => l.id === proxyId)
+      if (!live) return
+      const slotKey = `imageColor${slot}` as
+        | 'imageColor1'
+        | 'imageColor2'
+        | 'imageColor3'
+        | 'imageColor4'
+        | 'imageColor5'
+      const previous = (live[slotKey] || live.imagePalette?.[slot - 1] || '').trim()
+      const next = await setImageProxySlotColor(live, slot, v)
+      if (!next) return
+      const current = linesRef.current.find((l) => l.id === proxyId)
+      const stored = {
+        ...next,
+        paintStrokes: retintMatchingStrokes(
+          current?.paintStrokes ?? next.paintStrokes,
+          [previous],
+          [v]
+        )
+      }
+      stampStrokeLiveCache.delete(stored.id)
+      const owned = new Set<string>()
+      for (const item of linesRef.current) {
+        const base =
+          !!item.brushLayer ||
+          !!item.contentBound ||
+          !!item.contentProxySlot ||
+          !!item.imageSourceDataUrl ||
+          (item.type === 'stamp' && item.name === 'Inner content')
+        if (!base) continue
+        owned.add(item.id)
+        let parentId = item.parentId
+        const seen = new Set<string>()
+        while (parentId && !seen.has(parentId)) {
+          seen.add(parentId)
+          owned.add(parentId)
+          parentId = linesRef.current.find((row) => row.id === parentId)?.parentId
+        }
+      }
+      commitLines(
+        linesRef.current.map((l) => {
+          if (l.id === stored.id) return stored
+          if (!owned.has(l.id) || !l.paintStrokes?.length) return l
+          const paintStrokes = retintMatchingStrokes(l.paintStrokes, [previous], [v])
+          if (paintStrokes === l.paintStrokes) return l
+          stampStrokeLiveCache.delete(l.id)
+          return { ...l, paintStrokes }
+        })
+      )
+      if (stored.imageDataUrl) {
+        ensureStampImage(stored.imageDataUrl, () => {
+          redrawLinesRef.current()
+          drawHandles()
+        })
+      }
+      pushHistory()
+      redrawLines()
+      drawHandles()
+    })()
+  }
+
   return (
     <TransparentFillModeContext.Provider
       value={{
@@ -11968,7 +12034,15 @@ export function IconPaintEditor({
           <>
             <div className="w-px h-6 bg-border shrink-0" />
             <div className="flex items-center shrink-0">
-              <TransparentFillToggle mode={transparentFillMode} onChange={applyTransparentFillMode} />
+              <TransparentFillToggle
+                mode={transparentFillMode}
+                onChange={applyTransparentFillMode}
+                onOpen={() => {
+                  if (!colorSwatchRef.current) return
+                  setColorPopupRect(colorSwatchRef.current.getBoundingClientRect())
+                  setColorPopupOpen(true)
+                }}
+              />
             </div>
           </>
         )}
@@ -12371,18 +12445,25 @@ export function IconPaintEditor({
                   '#888888'
                 const active = tool === 'match' && matchSlot === slot
                 return (
-                  <button
+                  <div
                     key={slot}
-                    type="button"
-                    title={
-                      tool === 'match'
-                        ? active
-                          ? `Color ${slot} armed — click again to disarm`
-                          : `Arm Color ${slot} — then click sections`
-                        : `Color ${slot} — click swatch to edit`
-                    }
-                    onClick={() => {
-                      if (unmarkedPick) {
+                    className={`relative flex items-center gap-1 shrink-0 rounded-lg border px-1 py-0.5 transition-colors ${
+                      active || unmarkedPick
+                        ? 'border-accent bg-accent/15 ring-1 ring-accent'
+                        : 'border-border bg-surface3'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      title={
+                        tool === 'match'
+                          ? active
+                            ? `Color ${slot} armed — click again to disarm`
+                            : `Arm Color ${slot} — then click sections`
+                          : `Color ${slot}`
+                      }
+                      onClick={() => {
+                        if (unmarkedPick) {
                         void (async () => {
                           const live =
                             linesRef.current.find((l) => l.id === matchObj.id) ?? matchObj
@@ -12450,86 +12531,80 @@ export function IconPaintEditor({
                         return
                       }
                     }}
-                    className={`relative flex items-center gap-1 shrink-0 rounded-lg border px-1 py-0.5 transition-colors ${
-                      active || unmarkedPick
-                        ? 'border-accent bg-accent/15 ring-1 ring-accent'
-                        : 'border-border bg-surface3'
-                    }`}
+                    className="text-[9px] text-muted w-3 text-center"
                   >
-                    <span className="text-[9px] text-muted w-3 text-center">{slot}</span>
-                    <input
-                      type="color"
-                      value={hex.slice(0, 7)}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => {
-                        const v = e.target.value
-                        const proxyId = matchObj.id
-                        void (async () => {
-                          const live =
-                            linesRef.current.find((l) => l.id === proxyId) ?? matchObj
-                          const slotKey = `imageColor${slot}` as
-                            | 'imageColor1'
-                            | 'imageColor2'
-                            | 'imageColor3'
-                            | 'imageColor4'
-                            | 'imageColor5'
-                          const previous = (live[slotKey] || live.imagePalette?.[slot - 1] || '').trim()
-                          const next = await setImageProxySlotColor(live, slot, v)
-                          if (!next) return
-                          const current = linesRef.current.find((l) => l.id === proxyId)
-                          const stored = {
-                            ...next,
-                            paintStrokes: retintMatchingStrokes(
-                              current?.paintStrokes ?? next.paintStrokes,
-                              [previous],
-                              [v]
-                            )
-                          }
-                          stampStrokeLiveCache.delete(stored.id)
-                          const owned = new Set<string>()
-                          for (const item of linesRef.current) {
-                            const base =
-                              !!item.brushLayer ||
-                              !!item.contentBound ||
-                              !!item.contentProxySlot ||
-                              !!item.imageSourceDataUrl ||
-                              (item.type === 'stamp' && item.name === 'Inner content')
-                            if (!base) continue
-                            owned.add(item.id)
-                            let parentId = item.parentId
-                            const seen = new Set<string>()
-                            while (parentId && !seen.has(parentId)) {
-                              seen.add(parentId)
-                              owned.add(parentId)
-                              parentId = linesRef.current.find((row) => row.id === parentId)?.parentId
-                            }
-                          }
-                          commitLines(
-                            linesRef.current.map((l) => {
-                              if (l.id === stored.id) return stored
-                              if (!owned.has(l.id) || !l.paintStrokes?.length) return l
-                              const paintStrokes = retintMatchingStrokes(l.paintStrokes, [previous], [v])
-                              if (paintStrokes === l.paintStrokes) return l
-                              stampStrokeLiveCache.delete(l.id)
-                              return { ...l, paintStrokes }
-                            })
-                          )
-                          if (stored.imageDataUrl) {
-                            ensureStampImage(stored.imageDataUrl, () => {
-                              redrawLinesRef.current()
-                              drawHandles()
-                            })
-                          }
-                          pushHistory()
-                          redrawLines()
-                          drawHandles()
-                        })()
-                      }}
-                      className="w-6 h-6 rounded cursor-pointer border border-border/50 bg-transparent"
-                    />
+                    {slot}
                   </button>
+                    <button
+                      type="button"
+                      ref={(el) => {
+                        imageSlotSwatchRefs.current[slot] = el
+                      }}
+                      title={`Color ${slot} — colour, opacity, solid, linear, or radial`}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setImageSlotPopup({ slot, rect: e.currentTarget.getBoundingClientRect() })
+                      }}
+                      className="w-6 h-6 rounded cursor-pointer border border-border/50"
+                      style={{ background: hex }}
+                    />
+                  </div>
                 )
               })}
+              {([1, 2, 3, 4, 5] as const).some((slot) => {
+                const key = `imageColor${slot}` as
+                  | 'imageColor1'
+                  | 'imageColor2'
+                  | 'imageColor3'
+                  | 'imageColor4'
+                  | 'imageColor5'
+                const value = (matchObj[key] || '').trim() || matchObj.imagePalette?.[slot - 1] || ''
+                return isZeroAlphaHex(value)
+              }) && (
+                <TransparentFillToggle
+                  mode={transparentFillMode}
+                  onChange={applyTransparentFillMode}
+                  showLabel={false}
+                  showInfo={false}
+                  compact
+                  onOpen={() => {
+                    const zero = ([1, 2, 3, 4, 5] as const).find((slot) => {
+                      const key = `imageColor${slot}` as
+                        | 'imageColor1'
+                        | 'imageColor2'
+                        | 'imageColor3'
+                        | 'imageColor4'
+                        | 'imageColor5'
+                      const value = (matchObj[key] || '').trim() || matchObj.imagePalette?.[slot - 1] || ''
+                      return isZeroAlphaHex(value)
+                    })
+                    const el = zero != null ? imageSlotSwatchRefs.current[zero] : null
+                    if (zero != null && el) {
+                      setImageSlotPopup({ slot: zero, rect: el.getBoundingClientRect() })
+                    }
+                  }}
+                />
+              )}
+              {imageSlotPopup && (() => {
+                const key = `imageColor${imageSlotPopup.slot}` as
+                  | 'imageColor1'
+                  | 'imageColor2'
+                  | 'imageColor3'
+                  | 'imageColor4'
+                  | 'imageColor5'
+                const value =
+                  (matchObj[key] || '').trim() ||
+                  matchObj.imagePalette?.[imageSlotPopup.slot - 1] ||
+                  '#888888'
+                return (
+                  <ColorPickerPopup
+                    value={value}
+                    onChange={(c) => commitImageSlotColor(imageSlotPopup.slot, c, matchObj.id)}
+                    onClose={() => setImageSlotPopup(null)}
+                    rect={imageSlotPopup.rect}
+                  />
+                )
+              })()}
               <button
                 type="button"
                 disabled={unmarkedCount === 0}

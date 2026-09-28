@@ -1378,8 +1378,15 @@ function shownSlotHex(item: LineObj, slot: number): string {
     | 'imageColor3'
     | 'imageColor4'
     | 'imageColor5'
-  const stored = (item[key] || '').trim().slice(0, 7).toLowerCase()
-  const palette = (item.imagePalette?.[slot - 1] || '').trim().slice(0, 7).toLowerCase()
+  const rgb = (value: string) => {
+    const raw = value.trim()
+    const hex = raw.startsWith('linear-gradient(') || raw.startsWith('radial-gradient(')
+      ? raw.match(/#[0-9a-fA-F]{6,8}/i)?.[0] ?? ''
+      : raw
+    return hex.slice(0, 7).toLowerCase()
+  }
+  const stored = rgb(item[key] || '')
+  const palette = rgb(item.imagePalette?.[slot - 1] || '')
   const hex = item.imageUseOriginalColors !== false ? palette || stored : stored || palette
   return /^#[0-9a-f]{6}$/.test(hex) ? hex : ''
 }

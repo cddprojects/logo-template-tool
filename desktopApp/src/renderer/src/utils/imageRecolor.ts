@@ -611,11 +611,11 @@ export async function resolveImageDataUrl(fields: {
   // so the canvas and the upload preview stayed on the original pixels.
   const src = await fitRasterDataUrl(raw)
   const colors = [
-    fields.imageColor1 || fields.imagePalette?.[0] || '',
-    fields.imageColor2 || fields.imagePalette?.[1] || '',
-    fields.imageColor3 || fields.imagePalette?.[2] || '',
-    fields.imageColor4 || fields.imagePalette?.[3] || '',
-    fields.imageColor5 || fields.imagePalette?.[4] || ''
+    slotPaintColor(fields.imageColor1 || fields.imagePalette?.[0] || ''),
+    slotPaintColor(fields.imageColor2 || fields.imagePalette?.[1] || ''),
+    slotPaintColor(fields.imageColor3 || fields.imagePalette?.[2] || ''),
+    slotPaintColor(fields.imageColor4 || fields.imagePalette?.[3] || ''),
+    slotPaintColor(fields.imageColor5 || fields.imagePalette?.[4] || '')
   ]
   const palette = fields.imagePalette ?? []
   const recolorByPalette = async (base: string): Promise<string> => {
@@ -650,13 +650,23 @@ export async function resolveImageDataUrl(fields: {
 
 type ImageSlotFields = Parameters<typeof resolveImageDataUrl>[0]
 
+function slotPaintColor(value: string): string {
+  const v = value.trim()
+  if (!v) return ''
+  if (v.startsWith('linear-gradient(') || v.startsWith('radial-gradient(')) {
+    const m = v.match(/#[0-9a-fA-F]{3,8}/)
+    return m ? m[0] : ''
+  }
+  return v
+}
+
 function imageSlotColors(fields: ImageSlotFields): string[] {
   return [
-    fields.imageColor1 || fields.imagePalette?.[0] || '',
-    fields.imageColor2 || fields.imagePalette?.[1] || '',
-    fields.imageColor3 || fields.imagePalette?.[2] || '',
-    fields.imageColor4 || fields.imagePalette?.[3] || '',
-    fields.imageColor5 || fields.imagePalette?.[4] || ''
+    slotPaintColor(fields.imageColor1 || fields.imagePalette?.[0] || ''),
+    slotPaintColor(fields.imageColor2 || fields.imagePalette?.[1] || ''),
+    slotPaintColor(fields.imageColor3 || fields.imagePalette?.[2] || ''),
+    slotPaintColor(fields.imageColor4 || fields.imagePalette?.[3] || ''),
+    slotPaintColor(fields.imageColor5 || fields.imagePalette?.[4] || '')
   ]
 }
 
