@@ -13279,7 +13279,7 @@ export function IconPaintEditor({
                               : '0 0 2px rgba(255,255,255,0.85)'
                         }}
                       >
-                        {lab.slot}
+                        {lab.text ?? lab.slot}
                       </span>
                     )
                   })}

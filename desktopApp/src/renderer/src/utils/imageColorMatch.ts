@@ -884,6 +884,8 @@ export async function matchClickOnImageProxy(
 export type MatchSectionLabel = {
   regionId: number
   slot: number
+  /** Shown instead of the slot number. Unmarked sections use X. */
+  text?: string
   /** Anchor on solid region ink (image pixels) — not a geometric centroid. */
   ix: number
   iy: number
@@ -974,6 +976,8 @@ const SAME_COLOR_DIST = 96
 type ColorGroup = {
   slot: number
   show: boolean
+  /** Visible section with no Color 1–5 slot. */
+  unmarked?: boolean
   n: number
   r: number
   g: number
@@ -985,6 +989,7 @@ type ColorGroup = {
  * A section with no number still belongs to a Color slot when its colour
  * matches sections that already do. The 5% test uses that whole group.
  * A number is drawn only when that one piece covers more than 0.2%.
+ * A section with no Color 1–5 slot shows X when it covers more than 0.2%.
  */
 async function groupRegionsByColor(item: LineObj): Promise<{
   regionMap: ImageRegionMap
@@ -1124,7 +1129,13 @@ async function groupRegionsByColor(item: LineObj): Promise<{
   const marks = new Uint8Array(markMap.marks)
   let changed = false
   for (const [id, row] of regions) {
-    if (row.n < 1 || row.slot < 1) continue
+    if (row.n < 1) continue
+    if (row.slot < 1) {
+      if (opaque > 0 && row.n / opaque > 0.002) {
+        groups.set(id, { slot: 0, show: true, unmarked: true, n: row.n, r: row.r, g: row.g, b: row.b })
+      }
+      continue
+    }
     const root = find(row.slot)
     const slot = primaryOf.get(root) ?? row.slot
     const total = clusterArea.get(root) ?? 0
@@ -1283,9 +1294,11 @@ export async function buildMatchSectionLabels(
 
     placed.push({ x: chosen.x, y: chosen.y })
     const sectionHex = toHex(s.r, s.g, s.b)
+    const unmarked = groups.get(regionId)?.unmarked
     out.push({
       regionId,
-      slot: s.slot,
+      slot: unmarked ? 0 : s.slot,
+      text: unmarked ? 'X' : undefined,
       ix: chosen.x + 0.5,
       iy: chosen.y + 0.5,
       imgW: regionMap.w,
@@ -1306,11 +1319,12 @@ export async function buildMatchSectionLabels(
         slot = n
       }
     }
-    if (!slot) return
+    const matched = slot > 0 && bestDist <= 48
     const sectionHex = solidColorKey(color)
     out.push({
       regionId: -(out.length + 1),
-      slot,
+      slot: matched ? slot : 0,
+      text: matched ? undefined : 'X',
       ix,
       iy,
       imgW: regionMap.w,

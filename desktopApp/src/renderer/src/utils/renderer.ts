@@ -6,6 +6,7 @@ import {
   applyPaintLayerDecorations,
   applyPaintLayerDecorationsHiRes,
   applyPaintPunchMask,
+  drawUniversalBrushLayers,
   sessionHasPunchMask,
   sessionUsesLayeredPaint,
   shouldSkipLiveInnerForPaintSession,
@@ -1209,6 +1210,7 @@ export async function drawIcon(
       superSample
     )
     await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'content', innerShape)
+    drawUniversalBrushLayers(ctx, icon.paintSession, x, y, size, innerShape)
   } else if (icon.paintSession) {
     // Legacy single-plane decorations on top of Outer + Inner.
     const legacyShape = logoPaintOuterLayout(icon, icon.paintSession.resolution || 512).size
@@ -1223,6 +1225,7 @@ export async function drawIcon(
     )
     await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'container', legacyShape)
     await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'content', legacyShape)
+    drawUniversalBrushLayers(ctx, icon.paintSession, x, y, size, legacyShape)
   }
 }
 
@@ -1819,6 +1822,7 @@ async function renderFaviconInnerAt(
       'content',
       paintShapeFallback
     )
+    drawUniversalBrushLayers(ctx, config.paintSession, 0, 0, size, paintShapeFallback)
   }
 
   if (config.outerShape === 'none') {
@@ -2331,6 +2335,7 @@ export async function renderFavicon(canvas: HTMLCanvasElement, config: FaviconCo
     )
     await applyPaintPunchMask(ctx, config.paintSession, decorX, decorY, decorSize, 'container', legacyShape)
     await applyPaintPunchMask(ctx, config.paintSession, decorX, decorY, decorSize, 'content', legacyShape)
+    drawUniversalBrushLayers(ctx, config.paintSession, decorX, decorY, decorSize, legacyShape)
   }
 }
 

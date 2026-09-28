@@ -836,8 +836,8 @@ function drawBaseImageBrushStrokes(
   ctx.restore()
 }
 
-/** Brush layers stay above every object. They are not baked into the mid overlay. */
-function drawPinnedBrushLayers(
+/** Brush layers stay above every object, including punch, so they stay visible outside Paint. */
+export function drawUniversalBrushLayers(
   ctx: CanvasRenderingContext2D,
   session: PaintSession,
   x: number,
@@ -895,7 +895,6 @@ export async function applyPaintLayerDecorations(
     drawBaseImageBrushStrokes(ctx, session, x, y, size, layer, shapeFallback)
     if (layer === 'content') {
       await drawScaledPng(ctx, session.contentFrontPng, x, y, size, session, shapeFallback)
-      drawPinnedBrushLayers(ctx, session, x, y, size, shapeFallback)
     }
     return
   }
@@ -963,7 +962,6 @@ export async function applyPaintLayerDecorations(
 
   if (layer === 'content') {
     await drawScaledPng(ctx, session.contentFrontPng, x, y, size, session, shapeFallback)
-    drawPinnedBrushLayers(ctx, session, x, y, size, shapeFallback)
   }
 }
 
