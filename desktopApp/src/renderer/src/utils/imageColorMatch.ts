@@ -1019,10 +1019,8 @@ export async function buildMatchSectionLabels(
     s.slot = slot
   }
 
-  let opaque = 0
-  for (let i = 3; i < data.length; i += 4) {
-    if (data[i]! >= 16) opaque++
-  }
+  let marked = 0
+  for (const s of sums.values()) marked += s.n
   const sectionsPerSlot = new Map<number, number>()
   for (const s of sums.values()) {
     if (s.n < 1) continue
@@ -1036,10 +1034,10 @@ export async function buildMatchSectionLabels(
 
   for (const [regionId, s] of ranked) {
     if (s.n < 1) continue
-    // Still Color 1–5. Hide the number only when this colour is already split
-    // into more than five sections and this piece is under 5% of the image.
+    // Stay on Color 1–5. When that colour is already more than five pieces,
+    // hide the number on any piece under 5% of the marked image.
     const crowded = (sectionsPerSlot.get(s.slot) ?? 0) > 5
-    if (crowded && opaque > 0 && s.n / opaque < 0.05) continue
+    if (crowded && marked > 0 && s.n / marked < 0.05) continue
     const cands = regionLabelCandidates(regionId, regionMap.regions, regionMap.w, regionMap.h)
     if (!cands.length) continue
     let chosen = cands[0]!
