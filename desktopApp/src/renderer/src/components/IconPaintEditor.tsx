@@ -5824,11 +5824,13 @@ export function IconPaintEditor({
       }
       if (item.type === 'shape' || item.type === 'poly') {
         // Solid Fill on vectors: colour only — never bake to stamp.
+        // A linear or radial colour stays a gradient on the shape.
+        const vectorColor = isGradientColor(color) ? color : fillColor
         if (!transparent && !item.paintStrokes?.length) {
           changed = true
           return {
             ...item,
-            color: fillColor,
+            color: vectorColor,
             fill: true,
             punchThrough: hasPunchCoverage(item.id),
             punchEnclosedHole:
@@ -5841,10 +5843,10 @@ export function IconPaintEditor({
         if (filled) {
           if (filled.imageDataUrl) imageUrls.push(filled.imageDataUrl)
           changed = true
-          return { ...filled, punchThrough: hasPunchCoverage(item.id) }
+          return { ...filled, color: vectorColor, fill: true, punchThrough: hasPunchCoverage(item.id) }
         }
         changed = true
-        return { ...item, color: fillColor, fill: true, punchThrough: hasPunchCoverage(item.id) }
+        return { ...item, color: vectorColor, fill: true, punchThrough: hasPunchCoverage(item.id) }
       }
       return { ...item, color: fillColor, borderColor: fillColor, punchThrough: hasPunchCoverage(item.id) }
     })
@@ -9837,6 +9839,24 @@ export function IconPaintEditor({
             item.name === 'Inner content' ||
             item.colorMarkPng
           )
+        const top = topmostPaintHit((item) => {
+          if (item.punchMask || !isPaintHitVisible(item)) return false
+          if (
+            item.type !== 'stamp' &&
+            item.type !== 'text' &&
+            item.type !== 'shape' &&
+            item.type !== 'poly'
+          ) {
+            return false
+          }
+          return objectOwnsFillClick(item, pt)
+        })
+        // A rectangle above the image must take the fill. The image path used to
+        // claim every click inside the photo, including ones on that rectangle.
+        if (top && !fillableInnerImage(top)) {
+          fillSelectedObjectLayer(pt)
+          return
+        }
         const hit = topmostPaintHit((item) => {
           if (!isPaintHitVisible(item) || !fillableInnerImage(item)) return false
           return objectOwnsFillClick(item, pt)

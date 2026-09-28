@@ -2716,6 +2716,11 @@ export function paintObjectHit(
   const x = Math.max(0, Math.min(w - 1, Math.floor(canvasPt.x)))
   const y = Math.max(0, Math.min(h - 1, Math.floor(canvasPt.y)))
   if (sampleLineAlphaAt(l, x, y, false) > 12) return 'fill'
+  // An outline shape still owns its interior, so Fill does not fall through to a layer behind it.
+  if ((l.type === 'shape' || l.type === 'poly') && !l.fill) {
+    const filled = sampleLineAlphaAt({ ...l, fill: true, color: '#000000', shadow: false }, x, y, false)
+    if (filled > 12) return 'fill'
+  }
   if (l.shadow && sampleLineAlphaAt(l, x, y, true) > 12) return 'shadow'
   return null
 }
