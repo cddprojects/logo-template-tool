@@ -1371,13 +1371,19 @@ export async function buildMatchSectionLabels(
   return out
 }
 
-function shownSlotHex(item: LineObj, slot: number): string {
+function slotColorRaw(item: LineObj, slot: number): string {
   const key = `imageColor${slot}` as
     | 'imageColor1'
     | 'imageColor2'
     | 'imageColor3'
     | 'imageColor4'
     | 'imageColor5'
+  const stored = (item[key] || '').trim()
+  const palette = (item.imagePalette?.[slot - 1] || '').trim()
+  return item.imageUseOriginalColors !== false ? palette || stored : stored || palette
+}
+
+function shownSlotHex(item: LineObj, slot: number): string {
   const rgb = (value: string) => {
     const raw = value.trim()
     const hex = raw.startsWith('linear-gradient(') || raw.startsWith('radial-gradient(')
@@ -1385,10 +1391,13 @@ function shownSlotHex(item: LineObj, slot: number): string {
       : raw
     return hex.slice(0, 7).toLowerCase()
   }
-  const stored = rgb(item[key] || '')
-  const palette = rgb(item.imagePalette?.[slot - 1] || '')
-  const hex = item.imageUseOriginalColors !== false ? palette || stored : stored || palette
+  const hex = rgb(slotColorRaw(item, slot))
   return /^#[0-9a-f]{6}$/.test(hex) ? hex : ''
+}
+
+/** Colour to paint, including a linear or radial string. */
+function shownSlotPaint(item: LineObj, slot: number): string {
+  return slotColorRaw(item, slot)
 }
 
 function markNear(
@@ -1602,6 +1611,22 @@ export function brushStrokeMatchedSlot(color: string, slotHexes: string[]): numb
  * Changing that Unmarked colour updates strokes it already claimed, plus any stroke still showing X.
  * Strokes that already match a Color slot are left alone.
  */
+function isGradientPaint(color: string): boolean {
+  const v = color.trim()
+  return v.startsWith('linear-gradient(') || v.startsWith('radial-gradient(')
+}
+
+/** Solid keeps the stroke's own alpha. A gradient is stored whole so the first stop is not treated as "already that colour". */
+function unmarkedStrokeColor(target: string, strokeColor: string): string {
+  const t = target.trim()
+  if (isGradientPaint(t)) return t
+  const solid = solidColorKey(t)
+  if (!/^#[0-9a-f]{6}$/.test(solid)) return ''
+  const stroke = strokeColor.trim()
+  if (/^#[0-9a-fA-F]{8}$/.test(stroke)) return solid + stroke.slice(7, 9).toLowerCase()
+  return solid
+}
+
 export function applyUnmarkedBrushStrokes<T extends StrokeLike>(
   strokes: T[] | undefined,
   slotHexes: string[],
@@ -1609,21 +1634,19 @@ export function applyUnmarkedBrushStrokes<T extends StrokeLike>(
   mode: 'assign' | 'recolor'
 ): T[] | undefined {
   if (!strokes?.length) return strokes
-  const to = solidColorKey(toHex)
-  if (!/^#[0-9a-f]{6}$/.test(to)) return strokes
   let changed = false
   const next = strokes.map((stroke) => {
     if (stroke.tool === 'eraser' || !stroke.pts.length) return stroke
-    const alpha = stroke.color.trim().length >= 9 ? stroke.color.trim().slice(7, 9) : ''
+    const color = unmarkedStrokeColor(toHex, stroke.color)
+    if (!color || stroke.color === color) return stroke
     const matched = brushStrokeMatchedSlot(stroke.color, slotHexes)
     if (stroke.unmarkedInk && mode === 'recolor') {
-      if (solidColorKey(stroke.color) === to) return stroke
       changed = true
-      return { ...stroke, color: to + alpha, unmarkedInk: true }
+      return { ...stroke, color, unmarkedInk: true }
     }
     if (matched > 0) return stroke
     changed = true
-    return { ...stroke, color: to + alpha, unmarkedInk: true }
+    return { ...stroke, color, unmarkedInk: true }
   })
   return changed ? next : strokes
 }
@@ -1638,7 +1661,7 @@ export function applyUnmarkedBrushOnVectors<T extends PaintVector>(
   const image = vectors.find((v) => isBaseImageVector(v))
   if (!image) return vectors
   const slotHexes = imageSlotHexes(image as LineObj)
-  const toHex = slotHexes[slot - 1] || ''
+  const toHex = shownSlotPaint(image as LineObj, slot) || slotHexes[slot - 1] || ''
   if (!toHex) return vectors
   const hosts = new Set(baseBrushVectors({ vectors } as PaintSession).map((v) => v.id))
   let changed = false

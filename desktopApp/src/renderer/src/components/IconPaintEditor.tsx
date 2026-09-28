@@ -12444,27 +12444,10 @@ export function IconPaintEditor({
                   matchObj.imagePalette?.[slot - 1] ||
                   '#888888'
                 const active = tool === 'match' && matchSlot === slot
-                return (
-                  <div
-                    key={slot}
-                    className={`relative flex items-center gap-1 shrink-0 rounded-lg border px-1 py-0.5 transition-colors ${
-                      active || unmarkedPick
-                        ? 'border-accent bg-accent/15 ring-1 ring-accent'
-                        : 'border-border bg-surface3'
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      title={
-                        tool === 'match'
-                          ? active
-                            ? `Color ${slot} armed — click again to disarm`
-                            : `Arm Color ${slot} — then click sections`
-                          : `Color ${slot}`
-                      }
-                      onClick={() => {
-                        if (unmarkedPick) {
-                        void (async () => {
+                const choosingSlot = !!unmarkedPick || tool === 'match'
+                const chooseSlot = () => {
+                  if (unmarkedPick) {
+                    void (async () => {
                           const live =
                             linesRef.current.find((l) => l.id === matchObj.id) ?? matchObj
                           const source = live.imageSourceDataUrl || live.imageDataUrl
@@ -12496,7 +12479,18 @@ export function IconPaintEditor({
                             slot,
                             mode
                           ) as typeof nextLines
-                          if (!assigned && brushed === nextLines) return
+                          if (!assigned && brushed === nextLines) {
+                            if (unmarkedPick === 'recolor') {
+                              commitLines(
+                                linesRef.current.map((l) =>
+                                  l.id === live.id ? { ...l, unmarkedColorSlot: slot } : l
+                                )
+                              )
+                              setRestSlot(slot)
+                              setUnmarkedPick(null)
+                            }
+                            return
+                          }
                           if (!assigned) {
                             nextLines = brushed.map((l) =>
                               l.id === live.id
@@ -12526,23 +12520,62 @@ export function IconPaintEditor({
                         })()
                         return
                       }
-                      if (tool === 'match') {
-                        setMatchSlot((s) => (s === slot ? null : slot))
-                        return
-                      }
-                    }}
-                    className="text-[9px] text-muted w-3 text-center"
+                  if (tool === 'match') {
+                    setMatchSlot((s) => (s === slot ? null : slot))
+                  }
+                }
+                return (
+                  <div
+                    key={slot}
+                    role={choosingSlot ? 'button' : undefined}
+                    tabIndex={choosingSlot ? 0 : undefined}
+                    title={
+                      unmarkedPick
+                        ? `Use Color ${slot}`
+                        : tool === 'match'
+                          ? active
+                            ? `Color ${slot} armed — click again to disarm`
+                            : `Arm Color ${slot} — then click sections`
+                          : undefined
+                    }
+                    onClick={choosingSlot ? chooseSlot : undefined}
+                    onKeyDown={
+                      choosingSlot
+                        ? (e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              chooseSlot()
+                            }
+                          }
+                        : undefined
+                    }
+                    className={`relative flex items-center gap-1 shrink-0 rounded-lg border px-1 py-0.5 transition-colors ${
+                      choosingSlot ? 'cursor-pointer' : ''
+                    } ${
+                      active || unmarkedPick
+                        ? 'border-accent bg-accent/15 ring-1 ring-accent'
+                        : 'border-border bg-surface3'
+                    }`}
                   >
-                    {slot}
-                  </button>
+                    <span className="text-[9px] text-muted w-3 text-center pointer-events-none">
+                      {slot}
+                    </span>
                     <button
                       type="button"
                       ref={(el) => {
                         imageSlotSwatchRefs.current[slot] = el
                       }}
-                      title={`Color ${slot} — colour, opacity, solid, linear, or radial`}
+                      title={
+                        choosingSlot
+                          ? `Use Color ${slot}`
+                          : `Color ${slot} — colour, opacity, solid, linear, or radial`
+                      }
                       onClick={(e) => {
                         e.stopPropagation()
+                        if (choosingSlot) {
+                          chooseSlot()
+                          return
+                        }
                         setImageSlotPopup({ slot, rect: e.currentTarget.getBoundingClientRect() })
                       }}
                       className="w-6 h-6 rounded cursor-pointer border border-border/50"

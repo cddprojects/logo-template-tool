@@ -792,16 +792,16 @@ export function ColorRow({
           {/* Swatch — shows gradient or solid color, opens popup */}
           <button
             ref={swatchRef}
-            onClick={openPopup}
+            onClick={onLabelClick ?? openPopup}
             className="w-7 h-7 shrink-0 rounded cursor-pointer border border-border/60 overflow-hidden"
             style={{ background: effectiveValue }}
-            title="Click to edit color"
+            title={onLabelClick ? `Use ${label}` : 'Click to edit color'}
           />
 
           {isGrad ? (
             /* Gradient: show a clickable label */
             <button
-              onClick={openPopup}
+              onClick={onLabelClick ?? openPopup}
               className="flex-1 min-w-0 w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs text-muted font-mono text-left truncate hover:border-accent transition-colors"
             >
               gradient
@@ -2138,7 +2138,15 @@ export function ImageRecolorControls({
         ? applyUnmarkedBrushOnVectors(paintSession.vectors, slot, mode)
         : null
       const strokesChanged = !!paintSession && brushed !== paintSession.vectors
-      if (!assigned && !strokesChanged) return
+      if (!assigned && !strokesChanged) {
+        if (unmarkedPick === 'recolor') {
+          onChange({ imageUnmarkedColorSlot: slot })
+          setRestSlot(slot)
+          setUnmarkedPick(null)
+          clearArmed()
+        }
+        return
+      }
       if (assigned) {
         onChange({
           imageUseOriginalColors: false,
