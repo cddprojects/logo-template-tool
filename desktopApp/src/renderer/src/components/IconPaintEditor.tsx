@@ -97,6 +97,9 @@ import {
   assignUnmarkedInkToSlot,
   inspectUnmarkedInk,
   recolorUnmarkedGroup,
+  applyUnmarkedBrushOnVectors,
+  unmatchedBrushStrokeCount,
+  imageSlotHexes,
   type MatchSectionLabel
 } from '../utils/imageColorMatch'
 import { fitRasterDataUrl } from '../utils/imageFit'
@@ -9762,6 +9765,42 @@ export function IconPaintEditor({
           setSelectedLayerIds(new Set([sel.id]))
         }
         if (!objectOwnsFillClick(sel, pt)) return
+        const hostIds = new Set<string>([sel.id])
+        let parentId = sel.parentId
+        const seen = new Set<string>()
+        while (parentId && !seen.has(parentId)) {
+          seen.add(parentId)
+          hostIds.add(parentId)
+          parentId = linesRef.current.find((item) => item.id === parentId)?.parentId
+        }
+        for (const item of linesRef.current) {
+          if (item.brushLayer) hostIds.add(item.id)
+        }
+        const strokeHost = [...linesRef.current].reverse().find((item) => {
+          if (!hostIds.has(item.id) || !isPaintHitVisible(item) || item.punchMask) return false
+          return paintStrokeHitIndex(item, pt) >= 0
+        })
+        const strokeIndex = strokeHost ? paintStrokeHitIndex(strokeHost, pt) : -1
+        if (strokeHost?.paintStrokes && strokeIndex >= 0) {
+          const hex = imageSlotHexes(sel)[armed - 1]
+          if (!hex) return
+          const paintStrokes = strokeHost.paintStrokes.map((stroke, index) => {
+            if (stroke.tool === 'eraser' || index !== strokeIndex) return stroke
+            const alpha = stroke.color.trim().length >= 9 ? stroke.color.trim().slice(7, 9) : ''
+            return { ...stroke, color: hex + alpha, unmarkedInk: undefined }
+          })
+          const painted = linesRef.current.map((item) =>
+            item.id === strokeHost.id ? { ...item, paintStrokes } : item
+          )
+          commitLines(painted)
+          const live = painted.find((item) => item.id === sel.id) ?? sel
+          const labels = await buildMatchSectionLabels(live, painted, { w: W, h: H })
+          setMatchLabels(labels)
+          pushHistory()
+          redrawLines()
+          drawHandles()
+          return
+        }
         const local = unmapObjDisplayPt(pt, sel)
         const next = await matchClickOnImageProxy(sel, local, armed)
         if (!next) return
@@ -11270,7 +11309,8 @@ export function IconPaintEditor({
       imageUnmarkedColorSlot: unmarkedProxy.unmarkedColorSlot
     }).then((status) => {
       if (cancel || !status) return
-      setUnmarkedCount(status.unmarkedCount)
+      const strokeX = unmatchedBrushStrokeCount(linesRef.current as unknown as PaintVector[])
+      setUnmarkedCount(status.unmarkedCount + strokeX)
       setRestSlot(status.restSlot)
     })
     return () => {
@@ -11282,7 +11322,8 @@ export function IconPaintEditor({
     unmarkedProxy?.imageDataUrl,
     unmarkedProxy?.colorMarkPng,
     unmarkedProxy?.colorRegionPng,
-    unmarkedProxy?.unmarkedColorSlot
+    unmarkedProxy?.unmarkedColorSlot,
+    lines
   ])
 
   const findImageMatchProxy = (): LineObj | null => {
@@ -12343,30 +12384,51 @@ export function IconPaintEditor({
                     onClick={() => {
                       if (unmarkedPick) {
                         void (async () => {
-                          const source = matchObj.imageSourceDataUrl || matchObj.imageDataUrl
-                          if (!source) return
+                          const live =
+                            linesRef.current.find((l) => l.id === matchObj.id) ?? matchObj
+                          const source = live.imageSourceDataUrl || live.imageDataUrl
                           const run =
                             unmarkedPick === 'recolor' ? recolorUnmarkedGroup : assignUnmarkedInkToSlot
-                          const assigned = await run({
-                            imageDataUrl: source,
-                            imageColorMarkPng: matchObj.colorMarkPng,
-                            imageColorRegionPng: matchObj.colorRegionPng,
-                            slot
-                          })
-                          if (!assigned) return
-                          const stamped = await refreshStampFromMarks({
-                            ...matchObj,
-                            imageUseOriginalColors: false,
-                            imageSourceDataUrl: source,
-                            colorMarkPng: assigned.imageColorMarkPng,
-                            colorRegionPng: assigned.imageColorRegionPng,
-                            unmarkedColorSlot: assigned.imageUnmarkedColorSlot
-                          })
-                          commitLines(
-                            linesRef.current.map((l) => (l.id === stamped.id ? stamped : l))
-                          )
-                          if (stamped.imageDataUrl) {
-                            ensureStampImage(stamped.imageDataUrl, () => {
+                          const assigned = source
+                            ? await run({
+                                imageDataUrl: source,
+                                imageColorMarkPng: live.colorMarkPng,
+                                imageColorRegionPng: live.colorRegionPng,
+                                slot
+                              })
+                            : null
+                          let nextLines = linesRef.current
+                          if (assigned && source) {
+                            const stamped = await refreshStampFromMarks({
+                              ...live,
+                              imageUseOriginalColors: false,
+                              imageSourceDataUrl: source,
+                              colorMarkPng: assigned.imageColorMarkPng,
+                              colorRegionPng: assigned.imageColorRegionPng,
+                              unmarkedColorSlot: assigned.imageUnmarkedColorSlot
+                            })
+                            nextLines = nextLines.map((l) => (l.id === stamped.id ? stamped : l))
+                          }
+                          const mode = unmarkedPick === 'recolor' ? 'recolor' : 'assign'
+                          const brushed = applyUnmarkedBrushOnVectors(
+                            nextLines as unknown as PaintVector[],
+                            slot,
+                            mode
+                          ) as typeof nextLines
+                          if (!assigned && brushed === nextLines) return
+                          if (!assigned) {
+                            nextLines = brushed.map((l) =>
+                              l.id === live.id
+                                ? { ...l, imageUseOriginalColors: false, unmarkedColorSlot: slot }
+                                : l
+                            )
+                          } else {
+                            nextLines = brushed
+                          }
+                          commitLines(nextLines)
+                          const shown = nextLines.find((l) => l.id === live.id)
+                          if (shown?.imageDataUrl) {
+                            ensureStampImage(shown.imageDataUrl, () => {
                               redrawLinesRef.current()
                               drawHandles()
                             })
@@ -12376,8 +12438,8 @@ export function IconPaintEditor({
                           pushHistory()
                           redrawLines()
                           drawHandles()
-                          if (tool === 'match') {
-                            const labels = await buildMatchSectionLabels(stamped)
+                          if (tool === 'match' && shown) {
+                            const labels = await buildMatchSectionLabels(shown, nextLines, { w: W, h: H })
                             setMatchLabels(labels)
                           }
                         })()

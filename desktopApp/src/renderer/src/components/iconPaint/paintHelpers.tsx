@@ -379,6 +379,8 @@ export interface ObjectPaintStroke {
   size: number
   color: string
   tip: BrushTip
+  /** Claimed by Unmarked. Recolour follows the Unmarked colour, not Color 1–5. */
+  unmarkedInk?: boolean
 }
 export interface LineObj {
   id: string

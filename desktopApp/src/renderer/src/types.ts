@@ -492,6 +492,8 @@ export interface PaintVector {
     size: number
     color: string
     tip: 'round' | 'square' | 'flat' | 'calligraphy' | 'spray'
+    /** Claimed by Unmarked. Recolour follows the Unmarked colour, not Color 1–5. */
+    unmarkedInk?: boolean
   }[]
   /** Which paint raster layer this vector belongs to (z-order + visibility). */
   layer?: PaintLayerId

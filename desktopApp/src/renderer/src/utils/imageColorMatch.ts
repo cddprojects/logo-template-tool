@@ -397,19 +397,17 @@ export async function inspectUnmarkedInk(opts: {
   }
   const hasRest = loaded.rest.some((v) => v)
   let restSlot: number | null = null
-  if (hasRest) {
-    if (
-      opts.imageUnmarkedColorSlot != null &&
-      opts.imageUnmarkedColorSlot >= 1 &&
-      opts.imageUnmarkedColorSlot <= 5
-    ) {
-      restSlot = opts.imageUnmarkedColorSlot
-    } else {
-      for (let id = 1; id <= loaded.regionMap.count; id++) {
-        if (loaded.rest[id] && loaded.regionSlot[id]) {
-          restSlot = loaded.regionSlot[id]!
-          break
-        }
+  if (
+    opts.imageUnmarkedColorSlot != null &&
+    opts.imageUnmarkedColorSlot >= 1 &&
+    opts.imageUnmarkedColorSlot <= 5
+  ) {
+    restSlot = opts.imageUnmarkedColorSlot
+  } else if (hasRest) {
+    for (let id = 1; id <= loaded.regionMap.count; id++) {
+      if (loaded.rest[id] && loaded.regionSlot[id]) {
+        restSlot = loaded.regionSlot[id]!
+        break
       }
     }
   }
@@ -1564,6 +1562,100 @@ type StrokeLike = {
   size: number
   color: string
   tip: string
+  unmarkedInk?: boolean
+}
+
+export function imageSlotHexes(item: LineObj): string[] {
+  return [1, 2, 3, 4, 5].map((slot) => shownSlotHex(item, slot))
+}
+
+/** Color slot this brush already matches, or 0 when the stroke would show X. */
+export function brushStrokeMatchedSlot(color: string, slotHexes: string[]): number {
+  let slot = 0
+  let best = Infinity
+  for (let i = 0; i < slotHexes.length; i++) {
+    const hex = slotHexes[i] || ''
+    if (!/^#[0-9a-f]{6}$/.test(hex)) continue
+    const dist = colorDist(color, hex)
+    if (dist < best) {
+      best = dist
+      slot = i + 1
+    }
+  }
+  return slot > 0 && best <= 48 ? slot : 0
+}
+
+/**
+ * Unmarked → Color N claims brush strokes that show X.
+ * Changing that Unmarked colour updates strokes it already claimed, plus any stroke still showing X.
+ * Strokes that already match a Color slot are left alone.
+ */
+export function applyUnmarkedBrushStrokes<T extends StrokeLike>(
+  strokes: T[] | undefined,
+  slotHexes: string[],
+  toHex: string,
+  mode: 'assign' | 'recolor'
+): T[] | undefined {
+  if (!strokes?.length) return strokes
+  const to = solidColorKey(toHex)
+  if (!/^#[0-9a-f]{6}$/.test(to)) return strokes
+  let changed = false
+  const next = strokes.map((stroke) => {
+    if (stroke.tool === 'eraser' || !stroke.pts.length) return stroke
+    const alpha = stroke.color.trim().length >= 9 ? stroke.color.trim().slice(7, 9) : ''
+    const matched = brushStrokeMatchedSlot(stroke.color, slotHexes)
+    if (stroke.unmarkedInk && mode === 'recolor') {
+      if (solidColorKey(stroke.color) === to) return stroke
+      changed = true
+      return { ...stroke, color: to + alpha, unmarkedInk: true }
+    }
+    if (matched > 0) return stroke
+    changed = true
+    return { ...stroke, color: to + alpha, unmarkedInk: true }
+  })
+  return changed ? next : strokes
+}
+
+/** Image, its groups, and the free Brush layer — the strokes Match can label. */
+export function applyUnmarkedBrushOnVectors<T extends PaintVector>(
+  vectors: T[],
+  slot: number,
+  mode: 'assign' | 'recolor'
+): T[] {
+  if (slot < 1 || slot > 5) return vectors
+  const image = vectors.find((v) => isBaseImageVector(v))
+  if (!image) return vectors
+  const slotHexes = imageSlotHexes(image as LineObj)
+  const toHex = slotHexes[slot - 1] || ''
+  if (!toHex) return vectors
+  const hosts = new Set(baseBrushVectors({ vectors } as PaintSession).map((v) => v.id))
+  let changed = false
+  const next = vectors.map((v) => {
+    if (!hosts.has(v.id) || !v.paintStrokes?.length) return v
+    const paintStrokes = applyUnmarkedBrushStrokes(v.paintStrokes, slotHexes, toHex, mode)
+    if (paintStrokes === v.paintStrokes) return v
+    changed = true
+    return { ...v, paintStrokes }
+  })
+  return changed ? next : vectors
+}
+
+export function unmatchedBrushStrokeCount(vectors: PaintVector[]): number {
+  const image = vectors.find((v) => isBaseImageVector(v))
+  if (!image) return 0
+  const slotHexes = imageSlotHexes(image as LineObj)
+  const hosts = new Set(baseBrushVectors({ vectors } as PaintSession).map((v) => v.id))
+  let n = 0
+  for (const v of vectors) {
+    if (!hosts.has(v.id)) continue
+    for (const stroke of v.paintStrokes ?? []) {
+      if (stroke.tool === 'eraser' || !stroke.pts?.length) continue
+      if (stroke.unmarkedInk) continue
+      if (brushStrokeMatchedSlot(stroke.color, slotHexes) > 0) continue
+      n++
+    }
+  }
+  return n
 }
 
 /** Brush ink that already uses one of `fromColors` takes the paired colour. */

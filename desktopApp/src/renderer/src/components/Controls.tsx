@@ -11,6 +11,7 @@ import {
   assignUnmarkedInkToSlot,
   inspectUnmarkedInk,
   recolorUnmarkedGroup,
+  applyUnmarkedBrushOnVectors,
   rescanBaseLayerColors,
   retintBaseImageStrokes,
   recolorBaseBrushOverlays
@@ -2073,13 +2074,28 @@ export function ImageRecolorControls({
         imageColorRegionPng,
         slot
       })
-      if (!assigned) return
-      onChange({
-        imageUseOriginalColors: false,
-        imageColorMarkPng: assigned.imageColorMarkPng,
-        imageColorRegionPng: assigned.imageColorRegionPng,
-        imageUnmarkedColorSlot: assigned.imageUnmarkedColorSlot
-      })
+      const mode = unmarkedPick === 'recolor' ? 'recolor' : 'assign'
+      const brushed = paintSession
+        ? applyUnmarkedBrushOnVectors(paintSession.vectors, slot, mode)
+        : null
+      const strokesChanged = !!paintSession && brushed !== paintSession.vectors
+      if (!assigned && !strokesChanged) return
+      if (assigned) {
+        onChange({
+          imageUseOriginalColors: false,
+          imageColorMarkPng: assigned.imageColorMarkPng,
+          imageColorRegionPng: assigned.imageColorRegionPng,
+          imageUnmarkedColorSlot: assigned.imageUnmarkedColorSlot
+        })
+      } else if (strokesChanged) {
+        onChange({
+          imageUseOriginalColors: false,
+          imageUnmarkedColorSlot: slot
+        })
+      }
+      if (strokesChanged && paintSession && brushed && onPaintSession) {
+        onPaintSession({ ...paintSession, vectors: brushed })
+      }
       setRestSlot(slot)
       setUnmarkedPick(null)
       clearArmed()
@@ -2277,8 +2293,8 @@ export function ImageRecolorControls({
             <span className="text-xs text-muted shrink-0">Unmarked</span>
             <RowInfo label="Unmarked, marked, Clean AA, and Smooth AA">
               <p className="font-semibold">Unmarked / Marked</p>
-              <p className="mt-0.5">Unmarked paints leftover sections that have no Match number. It shows when Original colors is off. Turn it on, then click a Color 1–5 label. Those sections take that colour and stay unmarked.</p>
-              <p className="mt-1">The number beside Unmarked is the Color those leftovers use. Click the number, then another Color 1–5 label, to change only that set. Match-marked sections keep their own numbers.</p>
+              <p className="mt-0.5">Unmarked paints leftover sections that have no Match number, including a thin brush stroke marked X. It shows when Original colors is off. Turn it on, then click a Color 1–5 label. Those sections take that colour. A brush stroke then shows that Color number instead of X.</p>
+              <p className="mt-1">The number beside Unmarked is the Color those leftovers use. Click the number, then another Color 1–5 label, to change only that set, including brush strokes it claimed. Match-marked sections keep their own numbers.</p>
               <div className="mt-2 border-t border-border pt-2">
                 <p className="font-semibold">Clean AA</p>
                 <p className="mt-0.5">Strips the soft halo around the outline and hardens soft pixels inward. It does not thicken the rim. Match marks and the Unmarked set stay.</p>
