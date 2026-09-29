@@ -289,6 +289,13 @@ export function FaviconEditor({
   const [paintOutsideContent, setPaintOutsideContent] = useState<OutsideContentSettings | null>(null)
   const imageChangeGen = useRef(0)
 
+  // Editors stay mounted across version switches (no remount flash). Close paint
+  // so the previous version's session cannot linger on top of the new one.
+  useEffect(() => {
+    setShowPaint(false)
+    setPaintOutsideContent(null)
+  }, [versionId])
+
   const hasOuterShape = !!config && config.outerShape !== 'none'
 
   // Always rebake live bases; restore paint overlays from session.
@@ -1070,7 +1077,7 @@ export function FaviconEditor({
                 className="rounded-xl overflow-hidden shadow-2xl"
                 style={{ background: 'repeating-conic-gradient(#2d2d42 0% 25%, #1a1a24 0% 50%) 0 0 / 16px 16px' }}
               >
-                <canvas key={`${versionId}:${activeId}:${previewSize}`} ref={canvasRef} style={{ display: 'block', width: previewSize, height: previewSize }} />
+                <canvas ref={canvasRef} style={{ display: 'block', width: previewSize, height: previewSize }} />
               </div>
               <div className="flex items-end gap-4">
                 {[16, 32, 48, 64].map((s) => <SizeThumbnail key={s} config={config} size={s} />)}

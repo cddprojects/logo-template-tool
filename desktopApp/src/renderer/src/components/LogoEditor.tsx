@@ -410,6 +410,13 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
   const [paintPunchMasks, setPaintPunchMasks] = useState<{ layer: PaintLayerId; png: string }[]>([])
   const [paintOutsideContent, setPaintOutsideContent] = useState<OutsideContentSettings | null>(null)
 
+  // Editors stay mounted across version switches (no remount flash). Close paint
+  // so the previous version's session cannot linger on top of the new one.
+  useEffect(() => {
+    setShowPaint(false)
+    setPaintOutsideContent(null)
+  }, [versionId])
+
   // Match favicon: Outer shape is available when the icon has a real container
   // (enabled + shape ≠ none). When synced, faviconContentToIconConfig already
   // sets containerEnabled from favicon.outerShape !== 'none'.
@@ -1248,7 +1255,7 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
                 background: 'repeating-conic-gradient(#2d2d42 0% 25%, #1a1a24 0% 50%) 0 0 / 16px 16px'
               }}
             >
-              <canvas key={`${versionId}:${activeId}`} ref={canvasRef} style={{ display: 'block' }} />
+              <canvas ref={canvasRef} style={{ display: 'block' }} />
             </div>
           </PreviewStage>
 

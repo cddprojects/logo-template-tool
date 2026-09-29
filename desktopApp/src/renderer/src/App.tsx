@@ -585,7 +585,6 @@ export default function App(): JSX.Element {
                   <Suspense fallback={<div className="flex flex-1 items-center justify-center text-xs text-muted">Loading editor…</div>}>
                     <div style={{ display: activeTab === 'logo' ? 'contents' : 'none' }}>
                       <LogoEditor
-                        key={selected.id}
                         versionId={selected.id}
                         versionName={selected.name}
                         variants={selected.logos}
@@ -599,7 +598,6 @@ export default function App(): JSX.Element {
                     </div>
                     <div style={{ display: activeTab === 'favicon' ? 'contents' : 'none' }}>
                       <FaviconEditor
-                        key={selected.id}
                         versionId={selected.id}
                         versionName={selected.name}
                         variants={selected.favicons}
