@@ -54,13 +54,16 @@ export function resolveCanvasColor(
     const stops = parseColorStops(m[2])
     if (stops.length < 2) return color
 
-    // CSS: 0deg = bottom→top, 90deg = left→right.
-    const rad = (90 - parseFloat(m[1])) * Math.PI / 180
-    const cx = x + w / 2, cy = y + h / 2
-    const len = Math.sqrt(w * w + h * h) / 2
+    // CSS: 0deg points up, 90deg points right. 0% and 100% sit on this box's edges.
+    const angle = (parseFloat(m[1]) * Math.PI) / 180
+    const dx = Math.sin(angle)
+    const dy = -Math.cos(angle)
+    const half = (Math.abs(w * dx) + Math.abs(h * dy)) / 2
+    const cx = x + w / 2
+    const cy = y + h / 2
     const grad = ctx.createLinearGradient(
-      cx - Math.cos(rad) * len, cy + Math.sin(rad) * len,
-      cx + Math.cos(rad) * len, cy - Math.sin(rad) * len
+      cx - dx * half, cy - dy * half,
+      cx + dx * half, cy + dy * half
     )
     for (const s of stops) try { grad.addColorStop(s.pos, s.color) } catch { /* skip */ }
     return grad
@@ -75,8 +78,8 @@ export function resolveCanvasColor(
 
     const gcx = x + w * parseFloat(m[1]) / 100
     const gcy = y + h * parseFloat(m[2]) / 100
-    // Half-diagonal radius ensures the gradient reaches all corners.
-    const radius = Math.sqrt(w * w + h * h) / 2
+    // Farthest corner of this box, so the last stop lands on the object edge.
+    const radius = Math.hypot(Math.max(gcx - x, x + w - gcx), Math.max(gcy - y, y + h - gcy))
     const grad = ctx.createRadialGradient(gcx, gcy, 0, gcx, gcy, radius)
     for (const s of stops) try { grad.addColorStop(s.pos, s.color) } catch { /* skip */ }
     return grad

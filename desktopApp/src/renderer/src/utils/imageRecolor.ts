@@ -81,15 +81,17 @@ function gradientPixels(color: string, w: number, h: number): Uint8ClampedArray 
     if (!m) return null
     const stops = gradientStops(m[2])
     if (stops.length < 2) return null
-    const rad = ((90 - parseFloat(m[1])) * Math.PI) / 180
+    const angle = (parseFloat(m[1]) * Math.PI) / 180
+    const dx = Math.sin(angle)
+    const dy = -Math.cos(angle)
+    const half = (Math.abs(width * dx) + Math.abs(height * dy)) / 2
     const cx = width / 2
     const cy = height / 2
-    const len = Math.sqrt(width * width + height * height) / 2
     grad = ctx.createLinearGradient(
-      cx - Math.cos(rad) * len,
-      cy + Math.sin(rad) * len,
-      cx + Math.cos(rad) * len,
-      cy - Math.sin(rad) * len
+      cx - dx * half,
+      cy - dy * half,
+      cx + dx * half,
+      cy + dy * half
     )
     for (const s of stops) grad.addColorStop(Math.max(0, Math.min(1, s.pos)), s.color)
   } else if (color.startsWith('radial-gradient(')) {
@@ -99,7 +101,7 @@ function gradientPixels(color: string, w: number, h: number): Uint8ClampedArray 
     if (stops.length < 2) return null
     const gcx = (width * parseFloat(m[1])) / 100
     const gcy = (height * parseFloat(m[2])) / 100
-    const radius = Math.sqrt(width * width + height * height) / 2
+    const radius = Math.hypot(Math.max(gcx, width - gcx), Math.max(gcy, height - gcy))
     grad = ctx.createRadialGradient(gcx, gcy, 0, gcx, gcy, Math.max(1, radius))
     for (const s of stops) grad.addColorStop(Math.max(0, Math.min(1, s.pos)), s.color)
   }
@@ -114,44 +116,67 @@ export function bakeGradientPixels(color: string, w: number, h: number): Uint8Cl
   return gradientPixels(color, w, h)
 }
 
-type SlotFill = { solid: Rgba | null; grad: Uint8ClampedArray | null }
-
-function slotFill(color: string, w: number, h: number): SlotFill {
-  const v = color.trim()
-  if (isGradientValue(v)) return { solid: null, grad: gradientPixels(v, w, h) }
-  return { solid: parseHex(v), grad: null }
+function fillPunchesAt(solid: Rgba | null): boolean {
+  return !!solid && solid[3] === 0
 }
 
-function slotFills(colors: string[], w: number, h: number): SlotFill[] {
-  const fills: SlotFill[] = []
-  for (let s = 0; s < MAX_PALETTE; s++) fills.push(slotFill(colors[s] || '', w, h))
-  return fills
-}
-
-function paintFill(
-  data: Uint8ClampedArray,
-  i: number,
-  x: number,
-  y: number,
+/**
+ * Paint a gradient across each connected region separately, so 0% and 100%
+ * land on that region's edges instead of the whole bitmap.
+ */
+function eachConnectedGradient(
   w: number,
-  fill: SlotFill | undefined
+  h: number,
+  member: (x: number, y: number) => boolean,
+  color: string,
+  onPixel: (x: number, y: number, rgba: Rgba) => void
 ): void {
-  if (!fill) return
-  if (fill.grad) {
-    const si = (y * w + x) * 4
-    paintSlot(data, i, [fill.grad[si]!, fill.grad[si + 1]!, fill.grad[si + 2]!, fill.grad[si + 3]!])
-    return
+  const seen = new Uint8Array(w * h)
+  const stack: number[] = []
+  const pixels: number[] = []
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const start = y * w + x
+      if (seen[start] || !member(x, y)) continue
+      pixels.length = 0
+      let minX = x
+      let minY = y
+      let maxX = x
+      let maxY = y
+      seen[start] = 1
+      stack.push(start)
+      while (stack.length) {
+        const p = stack.pop()!
+        pixels.push(p)
+        const px = p % w
+        const py = (p / w) | 0
+        if (px < minX) minX = px
+        if (py < minY) minY = py
+        if (px > maxX) maxX = px
+        if (py > maxY) maxY = py
+        const tryPush = (nx: number, ny: number, n: number) => {
+          if (seen[n] || !member(nx, ny)) return
+          seen[n] = 1
+          stack.push(n)
+        }
+        if (px > 0) tryPush(px - 1, py, p - 1)
+        if (px + 1 < w) tryPush(px + 1, py, p + 1)
+        if (py > 0) tryPush(px, py - 1, p - w)
+        if (py + 1 < h) tryPush(px, py + 1, p + w)
+      }
+      const bw = maxX - minX + 1
+      const bh = maxY - minY + 1
+      const grad = gradientPixels(color, bw, bh)
+      if (!grad) continue
+      for (let k = 0; k < pixels.length; k++) {
+        const p = pixels[k]!
+        const px = p % w
+        const py = (p / w) | 0
+        const si = ((py - minY) * bw + (px - minX)) * 4
+        onPixel(px, py, [grad[si]!, grad[si + 1]!, grad[si + 2]!, grad[si + 3]!])
+      }
+    }
   }
-  if (fill.solid) paintSlot(data, i, fill.solid)
-}
-
-function fillPunchesAt(fill: SlotFill | undefined, x: number, y: number, w: number): boolean {
-  if (!fill) return false
-  if (fill.grad) {
-    const si = (y * w + x) * 4
-    return fill.grad[si + 3] === 0
-  }
-  return !!fill.solid && fill.solid[3] === 0
 }
 
 /** Quantize to reduce anti-alias / JPEG noise before clustering. */
@@ -674,11 +699,13 @@ export async function applyImagePaletteRecolor(
   ctx.drawImage(img, 0, 0)
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
   const data = imageData.data
-  const fills = toColor.map((color) => slotFill(color, canvas.width, canvas.height))
-
-  for (let y = 0; y < canvas.height; y++) {
-    for (let x = 0; x < canvas.width; x++) {
-      const i = (y * canvas.width + x) * 4
+  const width = canvas.width
+  const height = canvas.height
+  const slotOf = new Int16Array(width * height)
+  slotOf.fill(-1)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4
       if (data[i + 3] === 0) continue
       const pixel: [number, number, number] = [data[i], data[i + 1], data[i + 2]]
       let best = 0
@@ -690,9 +717,26 @@ export async function applyImagePaletteRecolor(
           best = s
         }
       }
-      if (bestDist > MAP_DIST) continue
-      paintFill(data, i, x, y, canvas.width, fills[best])
+      if (bestDist <= MAP_DIST) slotOf[y * width + x] = best
     }
+  }
+  for (let s = 0; s < toColor.length; s++) {
+    const color = toColor[s] || ''
+    if (!isGradientValue(color)) continue
+    eachConnectedGradient(
+      width,
+      height,
+      (x, y) => slotOf[y * width + x] === s,
+      color,
+      (x, y, rgba) => paintSlot(data, (y * width + x) * 4, rgba)
+    )
+  }
+  const solids = toColor.map((color) => (isGradientValue(color) ? null : parseHex(color)))
+  for (let p = 0; p < slotOf.length; p++) {
+    const slot = slotOf[p]
+    if (slot < 0) continue
+    const solid = solids[slot]
+    if (solid) paintSlot(data, p * 4, solid)
   }
 
   ctx.putImageData(imageData, 0, 0)
@@ -844,30 +888,30 @@ export async function imageZeroAlphaPunchMask(fields: ImageSlotFields): Promise<
   ctx.drawImage(img, 0, 0)
   const srcData = ctx.getImageData(0, 0, canvas.width, canvas.height).data
   const out = ctx.createImageData(canvas.width, canvas.height)
-  const fills = slotFills(colors, canvas.width, canvas.height)
-  let any = false
-
-  for (let y = 0; y < canvas.height; y++) {
-    for (let x = 0; x < canvas.width; x++) {
-      const i = (y * canvas.width + x) * 4
+  const width = canvas.width
+  const height = canvas.height
+  const slotOf = new Uint8Array(width * height)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4
       if (srcData[i + 3] === 0) continue
       let slot = 0
       if (region && unmarkedSlot) {
         let ri = i
-        if (rw !== canvas.width || rh !== canvas.height) {
-          const mx = Math.min(rw - 1, Math.floor((x / canvas.width) * rw))
-          const my = Math.min(rh - 1, Math.floor((y / canvas.height) * rh))
+        if (rw !== width || rh !== height) {
+          const mx = Math.min(rw - 1, Math.floor((x / width) * rw))
+          const my = Math.min(rh - 1, Math.floor((y / height) * rh))
           ri = (my * rw + mx) * 4
         }
         if (region[ri + 2]! > 0) slot = unmarkedSlot
       }
       if (!slot && marks) {
         let mark = 0
-        if (mw === canvas.width && mh === canvas.height) {
+        if (mw === width && mh === height) {
           mark = marks[y * mw + x] ?? 0
         } else {
-          const mx = Math.min(mw - 1, Math.floor((x / canvas.width) * mw))
-          const my = Math.min(mh - 1, Math.floor((y / canvas.height) * mh))
+          const mx = Math.min(mw - 1, Math.floor((x / width) * mw))
+          const my = Math.min(mh - 1, Math.floor((y / height) * mh))
           mark = marks[my * mw + mx] ?? 0
         }
         if (mark >= 1 && mark <= MAX_PALETTE) slot = mark
@@ -883,11 +927,32 @@ export async function imageZeroAlphaPunchMask(fields: ImageSlotFields): Promise<
         }
         if (bestDist <= MAP_DIST) slot = best + 1
       }
-      if (slot < 1 || !mayPunch[slot - 1]) continue
-      if (!fillPunchesAt(fills[slot - 1], x, y, canvas.width)) continue
-      out.data[i + 3] = 255
-      any = true
+      if (slot >= 1) slotOf[y * width + x] = slot
     }
+  }
+  const solids = colors.map((color) => (isGradientValue(color) ? null : parseHex(color)))
+  let any = false
+  for (let s = 0; s < colors.length; s++) {
+    const color = colors[s] || ''
+    if (!mayPunch[s] || !isGradientValue(color)) continue
+    eachConnectedGradient(
+      width,
+      height,
+      (x, y) => slotOf[y * width + x] === s + 1,
+      color,
+      (x, y, rgba) => {
+        if (rgba[3] !== 0) return
+        out.data[(y * width + x) * 4 + 3] = 255
+        any = true
+      }
+    )
+  }
+  for (let p = 0; p < slotOf.length; p++) {
+    const slot = slotOf[p]
+    if (slot < 1 || !mayPunch[slot - 1]) continue
+    if (!fillPunchesAt(solids[slot - 1] ?? null)) continue
+    out.data[p * 4 + 3] = 255
+    any = true
   }
   if (!any) return ''
   ctx.putImageData(out, 0, 0)
@@ -918,8 +983,8 @@ export async function applyUnmarkedRestRecolor(
   ctx.drawImage(img, 0, 0)
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
   const data = imageData.data
-  const fill = slotFill(color, canvas.width, canvas.height)
-  if (!fill.solid && !fill.grad) return dataUrl
+  const solid = isGradientValue(color) ? null : parseHex(color)
+  if (!solid && !isGradientValue(color)) return dataUrl
 
   const rc = document.createElement('canvas')
   rc.width = regionImg.width
@@ -944,8 +1009,27 @@ export async function applyUnmarkedRestRecolor(
       }
       // Blue channel flags Unmarked leftovers.
       if (rd[ri + 2]! <= 0) continue
-      paintFill(data, i, x, y, canvas.width, fill)
+      if (solid) paintSlot(data, i, solid)
     }
+  }
+  if (isGradientValue(color)) {
+    eachConnectedGradient(
+      canvas.width,
+      canvas.height,
+      (x, y) => {
+        const i = (y * canvas.width + x) * 4
+        if (data[i + 3] === 0) return false
+        let ri = i
+        if (!sameSize) {
+          const mx = Math.min(rc.width - 1, Math.floor((x / canvas.width) * rc.width))
+          const my = Math.min(rc.height - 1, Math.floor((y / canvas.height) * rc.height))
+          ri = (my * rc.width + mx) * 4
+        }
+        return rd[ri + 2]! > 0
+      },
+      color,
+      (x, y, rgba) => paintSlot(data, (y * canvas.width + x) * 4, rgba)
+    )
   }
   ctx.putImageData(imageData, 0, 0)
   return canvas.toDataURL('image/png')
@@ -1153,24 +1237,37 @@ export async function applyColorMarksRecolor(
   ctx.drawImage(img, 0, 0)
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
   const data = imageData.data
-  const fills = slotFills(colors, canvas.width, canvas.height)
+  const width = canvas.width
+  const height = canvas.height
   const mw = w
   const mh = h
-  const sameSize = mw === canvas.width && mh === canvas.height
-  for (let y = 0; y < canvas.height; y++) {
-    for (let x = 0; x < canvas.width; x++) {
-      const i = (y * canvas.width + x) * 4
+  const sameSize = mw === width && mh === height
+  const markAt = (x: number, y: number): number => {
+    if (sameSize) return marks[y * mw + x] ?? 0
+    const mx = Math.min(mw - 1, Math.floor((x / width) * mw))
+    const my = Math.min(mh - 1, Math.floor((y / height) * mh))
+    return marks[my * mw + mx] ?? 0
+  }
+  for (let slot = 1; slot <= MAX_PALETTE; slot++) {
+    const color = (colors[slot - 1] || '').trim()
+    if (!isGradientValue(color)) continue
+    eachConnectedGradient(
+      width,
+      height,
+      (x, y) => data[(y * width + x) * 4 + 3] !== 0 && markAt(x, y) === slot,
+      color,
+      (x, y, rgba) => paintSlot(data, (y * width + x) * 4, rgba)
+    )
+  }
+  const solids = colors.map((color) => (isGradientValue(color.trim()) ? null : parseHex(color)))
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = (y * width + x) * 4
       if (data[i + 3] === 0) continue
-      let mark = 0
-      if (sameSize) {
-        mark = marks[y * mw + x] ?? 0
-      } else {
-        const mx = Math.min(mw - 1, Math.floor((x / canvas.width) * mw))
-        const my = Math.min(mh - 1, Math.floor((y / canvas.height) * mh))
-        mark = marks[my * mw + mx] ?? 0
-      }
+      const mark = markAt(x, y)
       if (mark < 1 || mark > MAX_PALETTE) continue
-      paintFill(data, i, x, y, canvas.width, fills[mark - 1])
+      const solid = solids[mark - 1]
+      if (solid) paintSlot(data, i, solid)
     }
   }
   ctx.putImageData(imageData, 0, 0)
