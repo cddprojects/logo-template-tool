@@ -9,7 +9,7 @@ import {
   drawUniversalBrushLayers,
   sessionHasPunchMask,
   sessionUsesLayeredPaint,
-  resolveSkipLiveInnerForPaintSession,
+  shouldSkipLiveInnerForPaintSession,
   shouldSkipLiveLettersForPaintSession
 } from './paintDecorations'
 import { migratePaintSession } from './paintSessionMigrate'
@@ -892,11 +892,8 @@ export async function drawIcon(
   const localCx  = (cx - x) * SUPER   // content centre in supersampled space
   const localCy  = (cy - y) * SUPER
   const superArea = areaSize * SUPER   // effective draw area in supersampled space
-  const skipLiveInner = await resolveSkipLiveInnerForPaintSession(icon.paintSession)
-  const skipLiveLetters = shouldSkipLiveLettersForPaintSession(
-    icon.paintSession,
-    skipLiveInner
-  )
+  const skipLiveInner = shouldSkipLiveInnerForPaintSession(icon.paintSession)
+  const skipLiveLetters = shouldSkipLiveLettersForPaintSession(icon.paintSession)
 
   let iconShapeDrawSize = 0
   let iconOtherDrawSize = 0
@@ -1818,11 +1815,8 @@ async function renderFaviconInnerAt(
 ): Promise<void> {
   ctx.clearRect(0, 0, size, size)
   // Linked Paint text is composited via decorationsPng — skip live letters.
-  const skipLiveInner = await resolveSkipLiveInnerForPaintSession(config.paintSession)
-  const skipLiveLetters = shouldSkipLiveLettersForPaintSession(
-    config.paintSession,
-    skipLiveInner
-  )
+  const skipLiveInner = shouldSkipLiveInnerForPaintSession(config.paintSession)
+  const skipLiveLetters = shouldSkipLiveLettersForPaintSession(config.paintSession)
   const layeredPaint = sessionUsesLayeredPaint(config.paintSession)
   const innerPunchMode = sessionHasPunchMask(config.paintSession, 'content')
     ? undefined
