@@ -51,7 +51,7 @@ export function resolveCanvasColor(
   // Drop persisted @edge=section|object|canvas before CSS parse.
   const css = color.replace(/@edge=(section|object|canvas)\s*$/i, '').trimEnd()
   if (css.startsWith('linear-gradient(')) {
-    const m = css.match(/linear-gradient\((\d+(?:\.\d+)?)deg(,.+)\)/)
+    const m = css.match(/linear-gradient\((\d+(?:\.\d+)?)deg(,.+?)\)\s*$/)
     if (!m) return css
     const stops = parseColorStops(m[2])
     if (stops.length < 2) return css
@@ -73,7 +73,9 @@ export function resolveCanvasColor(
 
   if (css.startsWith('radial-gradient(')) {
     // Format: radial-gradient(circle at CX% CY%, #c1 p1%, #c2 p2%)
-    const m = css.match(/radial-gradient\(circle at (\d+(?:\.\d+)?)% (\d+(?:\.\d+)?)%(,.+)\)/)
+    const m = css.match(
+      /radial-gradient\(circle at (\d+(?:\.\d+)?)% (\d+(?:\.\d+)?)%(,.+?)\)\s*$/
+    )
     if (!m) return css
     const stops = parseColorStops(m[3])
     if (stops.length < 2) return css

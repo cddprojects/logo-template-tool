@@ -3007,23 +3007,37 @@ export function objTopCenter(l: LineObj): Pt {
 export function renderLineBase(
   ctx: CanvasRenderingContext2D,
   l: LineObj,
-  shared?: { color: string; frame: { x: number; y: number; w: number; h: number } }
+  shared?: { color: string; frame: { x: number; y: number; w: number; h: number } | null }
 ): void {
-  // Build the gradient in canvas space before this shape's own rotation, so
-  // every shape in a group samples one gradient across the group's area.
-  // Section edge skips the shared frame — each child uses its own box.
-  const sharedPaint =
-    shared &&
-    (l.type === 'shape' || l.type === 'poly') &&
-    isGradientColor(shared.color) &&
-    parseGradientEdge(shared.color) !== 'section'
-      ? resolveObjectPaint(ctx, shared.color, {
-          x: shared.frame.x,
-          y: shared.frame.y,
-          w: Math.max(1, shared.frame.w),
-          h: Math.max(1, shared.frame.h)
-        })
-      : undefined
+  // Build the gradient before this shape's own rotation.
+  // frame = null means Section edge: each child samples across its own local box.
+  let sharedPaint: string | CanvasGradient | undefined
+  if (shared && (l.type === 'shape' || l.type === 'poly') && isGradientColor(shared.color)) {
+    let frame = shared.frame
+    if (!frame) {
+      // Local (pre-rotation) box — matches renderLineBody shape/poly paint.
+      if (l.type === 'shape' && l.pts.length >= 2) {
+        const a = l.pts[0]
+        const b = l.pts[1]
+        frame = {
+          x: Math.min(a.x, b.x),
+          y: Math.min(a.y, b.y),
+          w: Math.max(1, Math.abs(b.x - a.x)),
+          h: Math.max(1, Math.abs(b.y - a.y))
+        }
+      } else if (l.type === 'poly' && l.pts.length >= 2) {
+        frame = ptsBounds(l.pts)
+      }
+    }
+    if (frame) {
+      sharedPaint = resolveObjectPaint(ctx, shared.color, {
+        x: frame.x,
+        y: frame.y,
+        w: Math.max(1, frame.w),
+        h: Math.max(1, frame.h)
+      })
+    }
+  }
   const c = objCenter(l)
   const rot = l.rot ?? 0
   const sx = l.scaleX ?? 1
@@ -3811,7 +3825,7 @@ export function renderLine(
   l: LineObj,
   opts?: {
     skipHole?: boolean
-    sharedGradient?: { color: string; frame: { x: number; y: number; w: number; h: number } }
+    sharedGradient?: { color: string; frame: { x: number; y: number; w: number; h: number } | null }
   }
 ): void {
   // Punch-mask stamps are hole operators, not visible pixels.
@@ -3964,22 +3978,35 @@ export function renderGroup(
   inheritedGradient?: {
     id: string
     color: string
-    frame: { x: number; y: number; w: number; h: number }
+    /** null frame = Section: sample each child across its own box. */
+    frame: { x: number; y: number; w: number; h: number } | null
   }
 ): void {
   if (group.pts.length < 2) return
-  const groupEdge = isGradientColor(group.color) ? parseGradientEdge(group.color) : 'object'
-  // Section: each child uses its own box. Canvas: one frame over the paint surface.
+  const groupHasGradient = isGradientColor(group.color)
+  const groupEdge = groupHasGradient ? parseGradientEdge(group.color) : 'object'
+  // Section: frame null → each child uses its own box. Canvas: paint surface.
   // Object: union of shapes that share this group fill.
-  const ownFrame =
-    !isGradientColor(group.color) || groupEdge === 'section'
-      ? null
-      : groupEdge === 'canvas'
-        ? { x: 0, y: 0, w: Math.max(1, ctx.canvas.width), h: Math.max(1, ctx.canvas.height) }
-        : groupShapeCoverage(group, all, group.id)
-  const ownGradient = ownFrame
-    ? { id: group.id, color: group.color, frame: ownFrame }
-    : null
+  const ownGradient = ((): {
+    id: string
+    color: string
+    frame: { x: number; y: number; w: number; h: number } | null
+  } | null => {
+    if (!groupHasGradient) return null
+    if (groupEdge === 'section') {
+      return { id: group.id, color: group.color, frame: null }
+    }
+    if (groupEdge === 'canvas') {
+      return {
+        id: group.id,
+        color: group.color,
+        frame: { x: 0, y: 0, w: Math.max(1, ctx.canvas.width), h: Math.max(1, ctx.canvas.height) }
+      }
+    }
+    const union = groupShapeCoverage(group, all, group.id)
+    if (!union) return null
+    return { id: group.id, color: group.color, frame: union }
+  })()
   // Render and erase in an isolated surface. destination-out therefore affects
   // only this group's composite and can never punch through unrelated layers.
   const canvas = takeCanvas(ctx.canvas.width, ctx.canvas.height)

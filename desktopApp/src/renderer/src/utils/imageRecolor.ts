@@ -79,7 +79,7 @@ function gradientPixels(color: string, w: number, h: number): Uint8ClampedArray 
   if (!ctx) return null
   let grad: CanvasGradient | null = null
   if (css.startsWith('linear-gradient(')) {
-    const m = css.match(/linear-gradient\((\d+(?:\.\d+)?)deg(,.+)\)/)
+    const m = css.match(/linear-gradient\((\d+(?:\.\d+)?)deg(,.+?)\)\s*$/)
     if (!m) return null
     const stops = gradientStops(m[2])
     if (stops.length < 2) return null
@@ -97,7 +97,9 @@ function gradientPixels(color: string, w: number, h: number): Uint8ClampedArray 
     )
     for (const s of stops) grad.addColorStop(Math.max(0, Math.min(1, s.pos)), s.color)
   } else if (css.startsWith('radial-gradient(')) {
-    const m = css.match(/radial-gradient\(circle at (\d+(?:\.\d+)?)% (\d+(?:\.\d+)?)%(,.+)\)/)
+    const m = css.match(
+      /radial-gradient\(circle at (\d+(?:\.\d+)?)% (\d+(?:\.\d+)?)%(,.+?)\)\s*$/
+    )
     if (!m) return null
     const stops = gradientStops(m[3])
     if (stops.length < 2) return null
