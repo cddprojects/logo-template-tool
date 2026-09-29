@@ -1,6 +1,16 @@
 import type { OutsideTextSettings, PaintLayerId, PaintSession, PaintVector } from '../types'
 import { loadCachedImage } from './iconUtils'
-import { outsideShadowToPaintVector, isContentProxyVector, outsideTextAnchorPt, linkedTextPtsPreservingInkCenter, persistContentProxyVectors } from './paintSettingsSync'
+import {
+  outsideShadowToPaintVector,
+  isContentProxyVector,
+  outsideTextAnchorPt,
+  linkedTextPtsPreservingInkCenter,
+  persistContentProxyVectors
+} from './paintSettingsSync'
+import {
+  migratePaintSession as migratePaintSessionCore,
+  paintSessionIsUsable
+} from './paintSessionMigrate'
 import {
   compositeInnerContentDecor,
   contentVectorsForLiveRender,
@@ -13,7 +23,20 @@ import { reshapeIsApplied } from './paintReshape'
 import { takeCanvas, releaseCanvas } from './canvasPool'
 import { drawPaintStrokesInBox, type BrushTip } from '../components/iconPaint/paintHelpers'
 
+export { paintSessionIsUsable }
 export type { InnerContentDecor }
+
+/** Re-export load-safe migrate; editors may still prefer sanitizePaintSessionProxies. */
+export function migratePaintSession(raw: unknown): PaintSession | null {
+  const migrated = migratePaintSessionCore(raw)
+  if (!migrated) return null
+  // Proxy rewrite needs paintSettingsSync — only here, not on App boot path.
+  if (!sessionHasContentProxy(migrated)) return migrated
+  return {
+    ...migrated,
+    vectors: persistContentProxyVectors(migrated.vectors)
+  }
+}
 
 function isTransparentPaintColor(color: string): boolean {
   if (!color || color === 'transparent' || color === 'none') return true
@@ -1078,119 +1101,6 @@ export async function applyPaintDecorations(
   await drawOverlayLayers(ctx, session, x, y, size, shapeFallback)
 }
 
-function looksLikePaintSession(raw: Record<string, unknown>): boolean {
-  return (
-    typeof raw.containerPng === 'string' ||
-    typeof raw.contentPng === 'string' ||
-    typeof raw.decorationsPng === 'string' ||
-    typeof raw.containerDecorationsPng === 'string' ||
-    typeof raw.contentDecorationsPng === 'string' ||
-    typeof raw.contentFrontPng === 'string' ||
-    (Array.isArray(raw.vectors) && raw.vectors.length > 0) ||
-    (Array.isArray(raw.punchMasks) && raw.punchMasks.length > 0) ||
-    typeof raw.resolution === 'number'
-  )
-}
-
-/**
- * Normalize a paint session from older templates / imports.
- * Stamps `version: 1`, fills missing PNG fields, clears stale bake flags, and
- * infers `paintOverlaysOnly` so layered preview/Paint restore can run.
- */
-export function migratePaintSession(raw: unknown): PaintSession | null {
-  if (raw == null || typeof raw !== 'object') return null
-  const s = raw as Record<string, unknown>
-  if (!looksLikePaintSession(s)) return null
-
-  const resolution = Math.max(1, Math.round(Number(s.resolution) || 512))
-  const layerOrder =
-    Array.isArray(s.layerOrder) && s.layerOrder.length === 2
-      ? (s.layerOrder as PaintSession['layerOrder'])
-      : (['content', 'container'] as PaintSession['layerOrder'])
-
-  let session: PaintSession = {
-    version: 1,
-    resolution,
-    containerPng: typeof s.containerPng === 'string' ? s.containerPng : '',
-    contentPng: typeof s.contentPng === 'string' ? s.contentPng : '',
-    vectors: Array.isArray(s.vectors) ? (s.vectors as PaintVector[]) : [],
-    hasContainer: !!s.hasContainer,
-    layerOrder,
-    paintOverlaysOnly: typeof s.paintOverlaysOnly === 'boolean' ? s.paintOverlaysOnly : undefined,
-    decorationsPng: typeof s.decorationsPng === 'string' ? s.decorationsPng : undefined,
-    containerDecorationsPng:
-      typeof s.containerDecorationsPng === 'string' ? s.containerDecorationsPng : undefined,
-    contentDecorationsPng:
-      typeof s.contentDecorationsPng === 'string' ? s.contentDecorationsPng : undefined,
-    contentAboveDecorationsPng:
-      typeof s.contentAboveDecorationsPng === 'string' ? s.contentAboveDecorationsPng : undefined,
-    contentBelowDecorationsPng:
-      typeof s.contentBelowDecorationsPng === 'string' ? s.contentBelowDecorationsPng : undefined,
-    contentFrontPng: typeof s.contentFrontPng === 'string' ? s.contentFrontPng : undefined,
-    linkedTextInDecorations:
-      typeof s.linkedTextInDecorations === 'boolean' ? s.linkedTextInDecorations : undefined,
-    contentBakedInDecorations:
-      typeof s.contentBakedInDecorations === 'boolean' ? s.contentBakedInDecorations : undefined,
-    paintShapeSize: typeof s.paintShapeSize === 'number' ? s.paintShapeSize : undefined,
-    paintContentDrawSize:
-      typeof s.paintContentDrawSize === 'number' ? s.paintContentDrawSize : undefined,
-    paintContentSizeRatio:
-      typeof s.paintContentSizeRatio === 'number' ? s.paintContentSizeRatio : undefined,
-    punchMasks: Array.isArray(s.punchMasks)
-      ? (s.punchMasks as PaintSession['punchMasks'])
-      : undefined,
-    contentSync:
-      s.contentSync && typeof s.contentSync === 'object'
-        ? (s.contentSync as PaintSession['contentSync'])
-        : undefined
-  }
-
-  // Overlay PNGs without a combined flatten → treat as overlay-only (layered path).
-  if (
-    session.paintOverlaysOnly === undefined &&
-    !!(session.containerPng || session.contentPng) &&
-    !session.decorationsPng &&
-    !sessionHasLayeredDecorations(session)
-  ) {
-    session = { ...session, paintOverlaysOnly: true }
-  }
-
-  // Infer hasContainer from Outer overlay / decorations when omitted.
-  if (
-    !session.hasContainer &&
-    !!(session.containerPng || session.containerDecorationsPng)
-  ) {
-    session = { ...session, hasContainer: true }
-  }
-
-  return finalizePaintSession(session)
-}
-
-function finalizePaintSession(session: PaintSession): PaintSession {
-  let next = session
-  // Stale bake flag after Inner type switch (decorations plane === overlay only),
-  // or bake flag with no plane at all (blank canvas on old templates).
-  if (
-    next.contentBakedInDecorations &&
-    (!next.contentDecorationsPng ||
-      (next.contentPng && next.contentDecorationsPng === next.contentPng))
-  ) {
-    next = {
-      ...next,
-      contentBakedInDecorations: false,
-      linkedTextInDecorations: false
-    }
-  }
-  if (next.linkedTextInDecorations && !next.decorationsPng && !next.contentDecorationsPng) {
-    next = { ...next, linkedTextInDecorations: false }
-  }
-  if (!sessionHasContentProxy(next)) return next
-  return {
-    ...next,
-    vectors: persistContentProxyVectors(next.vectors)
-  }
-}
-
 /** Convert contentBound rasters to hierarchy slots (safe on load/save). */
 export function sanitizePaintSessionProxies(
   session: PaintSession | null | undefined
@@ -1200,11 +1110,4 @@ export function sanitizePaintSessionProxies(
   const migrated = migratePaintSession(session)
   if (!migrated) return session
   return migrated
-}
-
-/** True when Paint open/restore should use overlays / vectors from this session. */
-export function paintSessionIsUsable(
-  session: PaintSession | null | undefined
-): session is PaintSession {
-  return !!migratePaintSession(session)
 }

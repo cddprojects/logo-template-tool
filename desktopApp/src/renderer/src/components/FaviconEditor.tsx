@@ -40,10 +40,10 @@ import {
 import { faviconContentToIconConfig } from './LogoEditor'
 import { contentTypeFromIconForFavicon, FAVICON_CONTENT_TYPE_OPTIONS, unwrapSvgPath } from '../utils/contentTypeSync'
 import {
-  paintSessionIsUsable,
   sanitizePaintSessionProxies,
   syncOutsideLettersIntoPaintSession
 } from '../utils/paintDecorations'
+import { paintSessionIsUsable } from '../utils/paintSessionMigrate'
 import { CanvaPromptPanel } from './CanvaPromptPanel'
 import { resolveCanvaAppName } from '../utils/canvaPrompt'
 import { ApplyToAllBar, type ApplyToAllFlash } from './ApplyToAllBar'

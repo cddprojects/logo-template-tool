@@ -21,7 +21,8 @@ import {
   DEFAULT_FAVICON_CONFIG
 } from '../types'
 import { versionFromIgTemplate } from '../utils/templateFile'
-import { migratePaintSession } from '../utils/paintDecorations'
+// Lightweight migrate only — must NOT import paintDecorations (circular boot crash).
+import { migratePaintSession } from '../utils/paintSessionMigrate'
 
 /** A single point on the undo/redo timeline. */
 interface Snap { state: Version[]; label: string; time: number }

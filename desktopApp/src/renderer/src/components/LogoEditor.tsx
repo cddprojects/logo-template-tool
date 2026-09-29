@@ -5,10 +5,10 @@ import { FONT_FAMILIES } from '../types'
 import { renderLogo, drawIcon } from '../utils/renderer'
 import { blitPreviewCanvas } from '../utils/canvasPool'
 import {
-  paintSessionIsUsable,
   sanitizePaintSessionProxies,
   syncOutsideLettersIntoPaintSession
 } from '../utils/paintDecorations'
+import { paintSessionIsUsable } from '../utils/paintSessionMigrate'
 import { exportLogoPng, exportLogoSvg, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
 import { hasMultipleColors } from '../utils/iconUtils'

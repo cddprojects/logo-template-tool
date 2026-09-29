@@ -7,12 +7,12 @@ import {
   applyPaintLayerDecorationsHiRes,
   applyPaintPunchMask,
   drawUniversalBrushLayers,
-  migratePaintSession,
   sessionHasPunchMask,
   sessionUsesLayeredPaint,
   shouldSkipLiveInnerForPaintSession,
   shouldSkipLiveLettersForPaintSession
 } from './paintDecorations'
+import { migratePaintSession } from './paintSessionMigrate'
 import { innerContentDecorFromFavicon, innerContentDecorFromIcon, logoPaintOuterLayout } from './paintSettingsSync'
 import { resolveFaviconDrawType } from './contentTypeSync'
 import { takeCanvas, releaseCanvas, fitCanvas, reset2dState } from './canvasPool'
