@@ -48,11 +48,13 @@ export function resolveCanvasColor(
   w: number,
   h: number
 ): string | CanvasGradient {
-  if (color.startsWith('linear-gradient(')) {
-    const m = color.match(/linear-gradient\((\d+(?:\.\d+)?)deg(,.+)\)/)
-    if (!m) return color
+  // Drop persisted @edge=section|object|canvas before CSS parse.
+  const css = color.replace(/@edge=(section|object|canvas)\s*$/i, '').trimEnd()
+  if (css.startsWith('linear-gradient(')) {
+    const m = css.match(/linear-gradient\((\d+(?:\.\d+)?)deg(,.+)\)/)
+    if (!m) return css
     const stops = parseColorStops(m[2])
-    if (stops.length < 2) return color
+    if (stops.length < 2) return css
 
     // CSS: 0deg points up, 90deg points right. 0% and 100% sit on this box's edges.
     const angle = (parseFloat(m[1]) * Math.PI) / 180
@@ -69,12 +71,12 @@ export function resolveCanvasColor(
     return grad
   }
 
-  if (color.startsWith('radial-gradient(')) {
+  if (css.startsWith('radial-gradient(')) {
     // Format: radial-gradient(circle at CX% CY%, #c1 p1%, #c2 p2%)
-    const m = color.match(/radial-gradient\(circle at (\d+(?:\.\d+)?)% (\d+(?:\.\d+)?)%(,.+)\)/)
-    if (!m) return color
+    const m = css.match(/radial-gradient\(circle at (\d+(?:\.\d+)?)% (\d+(?:\.\d+)?)%(,.+)\)/)
+    if (!m) return css
     const stops = parseColorStops(m[3])
-    if (stops.length < 2) return color
+    if (stops.length < 2) return css
 
     const gcx = x + w * parseFloat(m[1]) / 100
     const gcy = y + h * parseFloat(m[2]) / 100
@@ -85,7 +87,7 @@ export function resolveCanvasColor(
     return grad
   }
 
-  return color
+  return css
 }
 
 /**
@@ -951,9 +953,18 @@ export async function drawIcon(
     case 'image': {
       iconOtherDrawSize = superArea * (icon.imageSizeRatio ?? 0.8)
       if (icon.imageDataUrl) {
-        const url = await resolveImageDataUrl(icon)
+        const destX = localCx - iconOtherDrawSize / 2
+        const destY = localCy - iconOtherDrawSize / 2
+        const url = await resolveImageDataUrl(icon, {
+          canvasW: superArea,
+          canvasH: superArea,
+          destX,
+          destY,
+          destW: iconOtherDrawSize,
+          destH: iconOtherDrawSize
+        })
         const img = await loadCachedImage(url)
-        if (img) cCtx.drawImage(img, localCx - iconOtherDrawSize / 2, localCy - iconOtherDrawSize / 2, iconOtherDrawSize, iconOtherDrawSize)
+        if (img) cCtx.drawImage(img, destX, destY, iconOtherDrawSize, iconOtherDrawSize)
       }
       break
     }
@@ -2472,9 +2483,18 @@ async function drawFaviconContent(
     case 'image': {
       iconDrawSize = areaSize * (content.imageSizeRatio ?? 0.8)
       if (content.imageDataUrl) {
-        const url = await resolveImageDataUrl(content)
+        const destX = localCx - iconDrawSize / 2
+        const destY = localCy - iconDrawSize / 2
+        const url = await resolveImageDataUrl(content, {
+          canvasW: areaSize,
+          canvasH: areaSize,
+          destX,
+          destY,
+          destW: iconDrawSize,
+          destH: iconDrawSize
+        })
         const img = await loadCachedImage(url)
-        if (img) offCtx.drawImage(img, localCx - iconDrawSize / 2, localCy - iconDrawSize / 2, iconDrawSize, iconDrawSize)
+        if (img) offCtx.drawImage(img, destX, destY, iconDrawSize, iconDrawSize)
       }
       break
     }

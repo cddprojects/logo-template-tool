@@ -26,6 +26,12 @@ import { FONT_FAMILIES, FONT_FAMILY_GROUPS, FONT_WEIGHTS, SHAPES, OUTER_SHAPE_CA
 import type { ShapeType, OuterShapeCategory, PaintSession } from '../types'
 import type { ExportNameStyle } from '../utils/exporter'
 import { loadFont } from '../utils/fontLoader'
+import {
+  stripGradientEdge,
+  parseGradientEdge,
+  withGradientEdge,
+  type GradientEdge
+} from '../utils/gradientEdge'
 
 // ── Primitives ─────────────────────────────────────────────────────────────────
 
@@ -123,6 +129,9 @@ export function Section({ title, children, defaultOpen = true }: SectionProps): 
 export interface GradientStop { color: string; pos: number }
 export interface LinearGradientData { deg: number; stops: [GradientStop, GradientStop] }
 
+export type { GradientEdge }
+export { stripGradientEdge, parseGradientEdge, withGradientEdge }
+
 export function isGradientColor(v: string): boolean {
   return typeof v === 'string' && (v.startsWith('linear-gradient(') || v.startsWith('radial-gradient('))
 }
@@ -130,7 +139,7 @@ export function isGradientColor(v: string): boolean {
 // ── Linear gradient ────────────────────────────────────────────────────────────
 
 export function parseGradientData(value: string): LinearGradientData | null {
-  const m = value.match(
+  const m = stripGradientEdge(value).match(
     /linear-gradient\((\d+(?:\.\d+)?)deg,\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\))\s+(\d+(?:\.\d+)?)%,\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\))\s+(\d+(?:\.\d+)?)%\)/
   )
   if (!m) return null
@@ -143,9 +152,12 @@ export function parseGradientData(value: string): LinearGradientData | null {
   }
 }
 
-export function buildGradientValue(data: LinearGradientData): string {
+export function buildGradientValue(data: LinearGradientData, edge: GradientEdge = 'object'): string {
   const [s1, s2] = data.stops
-  return `linear-gradient(${Math.round(data.deg)}deg, ${s1.color} ${s1.pos}%, ${s2.color} ${s2.pos}%)`
+  return withGradientEdge(
+    `linear-gradient(${Math.round(data.deg)}deg, ${s1.color} ${s1.pos}%, ${s2.color} ${s2.pos}%)`,
+    edge
+  )
 }
 
 // ── Radial gradient ────────────────────────────────────────────────────────────
@@ -158,7 +170,7 @@ export interface RadialGradientData {
 
 export function parseRadialGradientData(value: string): RadialGradientData | null {
   // Matches: radial-gradient(circle at 50% 50%, #rrggbb 0%, #rrggbb 100%)
-  const m = value.match(
+  const m = stripGradientEdge(value).match(
     /radial-gradient\(circle at (\d+(?:\.\d+)?)% (\d+(?:\.\d+)?)%,\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\))\s+(\d+(?:\.\d+)?)%,\s*(#[0-9a-fA-F]{3,8}|rgba?\([^)]+\))\s+(\d+(?:\.\d+)?)%\)/
   )
   if (!m) return null
@@ -172,8 +184,19 @@ export function parseRadialGradientData(value: string): RadialGradientData | nul
   }
 }
 
-export function buildRadialGradientValue(cx: number, cy: number, c1: string, p1: number, c2: string, p2: number): string {
-  return `radial-gradient(circle at ${cx}% ${cy}%, ${c1} ${p1}%, ${c2} ${p2}%)`
+export function buildRadialGradientValue(
+  cx: number,
+  cy: number,
+  c1: string,
+  p1: number,
+  c2: string,
+  p2: number,
+  edge: GradientEdge = 'object'
+): string {
+  return withGradientEdge(
+    `radial-gradient(circle at ${cx}% ${cy}%, ${c1} ${p1}%, ${c2} ${p2}%)`,
+    edge
+  )
 }
 
 const byteHex = (n: number): string =>
@@ -407,13 +430,36 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
     }
   }, [value])
 
+  const gradientEdge = parseGradientEdge(value)
+
   const emitLinear = React.useCallback((d: number, c1: string, p1: number, c2: string, p2: number) => {
-    onChange(buildGradientValue({ deg: d, stops: [{ color: c1, pos: p1 }, { color: c2, pos: p2 }] }))
-  }, [onChange])
+    onChange(
+      buildGradientValue(
+        { deg: d, stops: [{ color: c1, pos: p1 }, { color: c2, pos: p2 }] },
+        parseGradientEdge(value)
+      )
+    )
+  }, [onChange, value])
 
   const emitRadial = React.useCallback((cx: number, cy: number, c1: string, p1: number, c2: string, p2: number) => {
-    onChange(buildRadialGradientValue(cx, cy, c1, p1, c2, p2))
-  }, [onChange])
+    onChange(buildRadialGradientValue(cx, cy, c1, p1, c2, p2, parseGradientEdge(value)))
+  }, [onChange, value])
+
+  const setGradientEdge = React.useCallback(
+    (edge: GradientEdge) => {
+      if (tab === 'linear') {
+        onChange(
+          buildGradientValue(
+            { deg, stops: [{ color: linC1, pos: linP1 }, { color: linC2, pos: linP2 }] },
+            edge
+          )
+        )
+      } else if (tab === 'radial') {
+        onChange(buildRadialGradientValue(radCX, radCY, radC1, radP1, radC2, radP2, edge))
+      }
+    },
+    [tab, onChange, deg, linC1, linP1, linC2, linP2, radCX, radCY, radC1, radP1, radC2, radP2]
+  )
 
   /** Solid color + Stop 1 stay linked so a pick updates both. */
   const applyPrimaryColor = React.useCallback((next: string, opts?: { emitSolid?: boolean }) => {
@@ -441,13 +487,25 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
   const activeTab = solidOnly ? 'solid' : tab
   const punchCtx = React.useContext(TransparentFillModeContext)
   const showPunchToggle = !!punchCtx && activeTab === 'solid' && isZeroAlphaHex(solidHex)
-  const POPUP_H = (activeTab === 'solid' ? (solidOnly ? 72 : 132) + (showPunchToggle ? 36 : 0) : activeTab === 'linear' ? 248 : 272)
+  const POPUP_H =
+    activeTab === 'solid'
+      ? (solidOnly ? 72 : 132) + (showPunchToggle ? 36 : 0)
+      : (activeTab === 'linear' ? 248 : 272) + 36
   const left = Math.min(rect.left, window.innerWidth - POPUP_W - 8)
   const topBelow = rect.bottom + 6
   const top = topBelow + POPUP_H > window.innerHeight - 8 ? rect.top - POPUP_H - 6 : topBelow
 
-  const linPreview = buildGradientValue({ deg, stops: [{ color: linC1, pos: linP1 }, { color: linC2, pos: linP2 }] })
-  const radPreview = buildRadialGradientValue(radCX, radCY, radC1, radP1, radC2, radP2)
+  const linPreview = stripGradientEdge(
+    buildGradientValue({ deg, stops: [{ color: linC1, pos: linP1 }, { color: linC2, pos: linP2 }] })
+  )
+  const radPreview = stripGradientEdge(
+    buildRadialGradientValue(radCX, radCY, radC1, radP1, radC2, radP2)
+  )
+  const EDGE_TABS: { key: GradientEdge; label: string }[] = [
+    { key: 'section', label: 'Section' },
+    { key: 'object', label: 'Object' },
+    { key: 'canvas', label: 'Canvas' }
+  ]
 
   const TABS: { key: 'solid' | 'linear' | 'radial'; label: string }[] = [
     { key: 'solid',  label: 'Solid'   },
@@ -585,6 +643,27 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
               emitLinear(deg, c1, p1, c2, p2)
             }}
           />
+          <div className="flex gap-1">
+            {EDGE_TABS.map(({ key, label }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setGradientEdge(key)}
+                title={
+                  key === 'section'
+                    ? 'Gradient edges follow the filled section'
+                    : key === 'object'
+                      ? 'Gradient edges follow the whole object'
+                      : 'Gradient edges follow the canvas'
+                }
+                className={`flex-1 py-1 text-[11px] rounded-md font-medium transition-colors ${
+                  gradientEdge === key ? 'bg-accent text-white' : 'bg-surface2 text-muted hover:text-text'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -631,6 +710,27 @@ export function ColorPickerPopup({ value, onChange, onClose, rect, solidOnly = f
               emitRadial(radCX, radCY, c1, p1, c2, p2)
             }}
           />
+          <div className="flex gap-1">
+            {EDGE_TABS.map(({ key, label }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setGradientEdge(key)}
+                title={
+                  key === 'section'
+                    ? 'Gradient edges follow the filled section'
+                    : key === 'object'
+                      ? 'Gradient edges follow the whole object'
+                      : 'Gradient edges follow the canvas'
+                }
+                className={`flex-1 py-1 text-[11px] rounded-md font-medium transition-colors ${
+                  gradientEdge === key ? 'bg-accent text-white' : 'bg-surface2 text-muted hover:text-text'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -810,7 +910,7 @@ export function ColorRow({
             ref={swatchRef}
             onClick={onLabelClick ?? openPopup}
             className="w-7 h-7 shrink-0 rounded cursor-pointer border border-border/60 overflow-hidden"
-            style={{ background: effectiveValue }}
+            style={{ background: isGrad ? stripGradientEdge(effectiveValue) : effectiveValue }}
             title={onLabelClick ? `Use ${label}` : 'Click to edit color'}
           />
 

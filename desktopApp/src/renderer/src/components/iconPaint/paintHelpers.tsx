@@ -9,6 +9,7 @@ import type {
   OutsideContentSettings
 } from '../../types'
 import { isGradientColor, firstSolidColor } from '../Controls'
+import { parseGradientEdge } from '../../utils/gradientEdge'
 import {
   resolveCanvasColor,
   roundedRect,
@@ -63,6 +64,27 @@ export const BRUSH_TIPS: { value: BrushTip; label: string }[] = [
   { value: 'spray', label: 'Spray' }
 ]
 
+/** Gradient sample box: canvas edge uses the full surface; otherwise the object box. */
+function gradientPaintBox(
+  ctx: CanvasRenderingContext2D,
+  color: string,
+  objectBox: { x: number; y: number; w: number; h: number }
+): { x: number; y: number; w: number; h: number } {
+  if (isGradientColor(color) && parseGradientEdge(color) === 'canvas') {
+    return { x: 0, y: 0, w: Math.max(1, ctx.canvas.width), h: Math.max(1, ctx.canvas.height) }
+  }
+  return objectBox
+}
+
+function resolveObjectPaint(
+  ctx: CanvasRenderingContext2D,
+  color: string,
+  objectBox: { x: number; y: number; w: number; h: number }
+): string | CanvasGradient {
+  const box = gradientPaintBox(ctx, color, objectBox)
+  return resolveCanvasColor(ctx, color, box.x, box.y, Math.max(1, box.w), Math.max(1, box.h))
+}
+
 function brushInk(
   ctx: CanvasRenderingContext2D,
   color: string,
@@ -71,7 +93,7 @@ function brushInk(
 ): string | CanvasGradient {
   if (erase) return '#000'
   if (box && isGradientColor(color)) {
-    return resolveCanvasColor(ctx, color, box.x, box.y, Math.max(1, box.w), Math.max(1, box.h))
+    return resolveObjectPaint(ctx, color, box)
   }
   return color
 }
@@ -2595,7 +2617,7 @@ export function renderText(ctx: CanvasRenderingContext2D, l: LineObj): void {
   const hideFill = isTransparentPaintColor(l.color)
   if (!shouldDrawObjectShadow(l)) {
     if (!hideFill) {
-      drawGlyphs(ctx, 0, 0, resolveCanvasColor(ctx, l.color, b.x, b.y, Math.max(1, b.w), Math.max(1, b.h)))
+      drawGlyphs(ctx, 0, 0, resolveObjectPaint(ctx, l.color, { x: b.x, y: b.y, w: Math.max(1, b.w), h: Math.max(1, b.h) }))
     }
     return
   }
@@ -2617,7 +2639,7 @@ export function renderText(ctx: CanvasRenderingContext2D, l: LineObj): void {
     -b.y + pad,
     hideFill
       ? '#000000'
-      : resolveCanvasColor(o, l.color, pad, pad, Math.max(1, b.w), Math.max(1, b.h))
+      : resolveObjectPaint(o, l.color, { x: pad, y: pad, w: Math.max(1, b.w), h: Math.max(1, b.h) })
   )
   const baked = bakeCanvasDropShadow(off, {
     blur,
@@ -2989,18 +3011,18 @@ export function renderLineBase(
 ): void {
   // Build the gradient in canvas space before this shape's own rotation, so
   // every shape in a group samples one gradient across the group's area.
+  // Section edge skips the shared frame — each child uses its own box.
   const sharedPaint =
     shared &&
     (l.type === 'shape' || l.type === 'poly') &&
-    isGradientColor(shared.color)
-      ? resolveCanvasColor(
-          ctx,
-          shared.color,
-          shared.frame.x,
-          shared.frame.y,
-          Math.max(1, shared.frame.w),
-          Math.max(1, shared.frame.h)
-        )
+    isGradientColor(shared.color) &&
+    parseGradientEdge(shared.color) !== 'section'
+      ? resolveObjectPaint(ctx, shared.color, {
+          x: shared.frame.x,
+          y: shared.frame.y,
+          w: Math.max(1, shared.frame.w),
+          h: Math.max(1, shared.frame.h)
+        })
       : undefined
   const c = objCenter(l)
   const rot = l.rot ?? 0
@@ -3946,7 +3968,15 @@ export function renderGroup(
   }
 ): void {
   if (group.pts.length < 2) return
-  const ownFrame = isGradientColor(group.color) ? groupShapeCoverage(group, all, group.id) : null
+  const groupEdge = isGradientColor(group.color) ? parseGradientEdge(group.color) : 'object'
+  // Section: each child uses its own box. Canvas: one frame over the paint surface.
+  // Object: union of shapes that share this group fill.
+  const ownFrame =
+    !isGradientColor(group.color) || groupEdge === 'section'
+      ? null
+      : groupEdge === 'canvas'
+        ? { x: 0, y: 0, w: Math.max(1, ctx.canvas.width), h: Math.max(1, ctx.canvas.height) }
+        : groupShapeCoverage(group, all, group.id)
   const ownGradient = ownFrame
     ? { id: group.id, color: group.color, frame: ownFrame }
     : null
@@ -4256,8 +4286,11 @@ export function renderLineBody(
     const a = l.pts[0], b = l.pts[1]
     const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y)
     const w = Math.abs(b.x - a.x), h = Math.abs(b.y - a.y)
-    const shapePaint = sharedPaint ?? resolveCanvasColor(ctx, l.color, x, y, Math.max(1, w), Math.max(1, h))
-    const shapeBorder = sharedPaint ?? resolveCanvasColor(ctx, lineBorderColor(l), x, y, Math.max(1, w), Math.max(1, h))
+    const shapePaint =
+      sharedPaint ?? resolveObjectPaint(ctx, l.color, { x, y, w: Math.max(1, w), h: Math.max(1, h) })
+    const shapeBorder =
+      sharedPaint ??
+      resolveObjectPaint(ctx, lineBorderColor(l), { x, y, w: Math.max(1, w), h: Math.max(1, h) })
     ctx.save()
     ctx.beginPath()
     traceShape(ctx, l.shape, x, y, w, h, shapeSupportsRadius(l.shape) ? br : 0)
@@ -5476,7 +5509,7 @@ export function ptsBounds(pts: Pt[]): { x: number; y: number; w: number; h: numb
 }
 export function styleForColor(ctx: CanvasRenderingContext2D, color: string, pts: Pt[]): string | CanvasGradient {
   const b = ptsBounds(pts)
-  return resolveCanvasColor(ctx, color, b.x, b.y, b.w, b.h)
+  return resolveObjectPaint(ctx, color, b)
 }
 
 export function LineSelect<T extends string>({

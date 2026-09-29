@@ -58,6 +58,8 @@ import { loadFont } from '../utils/fontLoader'
 import {
   ColorPickerPopup,
   isGradientColor,
+  parseGradientEdge,
+  stripGradientEdge,
   firstSolidColor,
   TransparentFillModeContext,
   TransparentFillToggle
@@ -5048,6 +5050,7 @@ export function IconPaintEditor({
     const fb = parseInt(fill.slice(5, 7), 16)
     const fa = parseInt(fill.slice(7, 9) || 'ff', 16)
     const wantGradient = !imageHoleTarget(item) && isGradientColor(color)
+    const gradientEdge = wantGradient ? parseGradientEdge(color) : 'object'
     let changed = false
 
     if (ta > 8) {
@@ -5060,7 +5063,7 @@ export function IconPaintEditor({
       let minY = height
       let maxX = 0
       let maxY = 0
-      if (wantGradient) {
+      if (wantGradient && gradientEdge === 'section') {
         for (let p = 0; p < region.length; p++) {
           if (!region[p]) continue
           const rx = p % width
@@ -5071,9 +5074,28 @@ export function IconPaintEditor({
           if (ry > maxY) maxY = ry
         }
       }
-      const gradW = Math.max(1, maxX - minX + 1)
-      const gradH = Math.max(1, maxY - minY + 1)
-      const gradientPaint = wantGradient ? bakeGradientPixels(color, gradW, gradH) : null
+      let gradientPaint: Uint8ClampedArray | null = null
+      let gradW = 1
+      let gradH = 1
+      let sampleMode: 'section' | 'object' | 'canvas' = 'object'
+      if (wantGradient) {
+        if (gradientEdge === 'section') {
+          gradW = Math.max(1, maxX - minX + 1)
+          gradH = Math.max(1, maxY - minY + 1)
+          gradientPaint = bakeGradientPixels(color, gradW, gradH)
+          sampleMode = 'section'
+        } else if (gradientEdge === 'canvas') {
+          gradW = W
+          gradH = H
+          gradientPaint = bakeGradientPixels(color, gradW, gradH)
+          sampleMode = 'canvas'
+        } else {
+          gradW = width
+          gradH = height
+          gradientPaint = bakeGradientPixels(color, gradW, gradH)
+          sampleMode = 'object'
+        }
+      }
       let opaqueN = 0
       let filledN = 0
       for (let p = 0; p < width * height; p++) {
@@ -5084,9 +5106,24 @@ export function IconPaintEditor({
         filledN++
         const srcA = data[i + 3]
         if (gradientPaint) {
-          const lx = (p % width) - minX
-          const ly = ((p / width) | 0) - minY
-          const si = (ly * gradW + lx) * 4
+          const ix = p % width
+          const iy = (p / width) | 0
+          let si = 0
+          if (sampleMode === 'section') {
+            si = ((iy - minY) * gradW + (ix - minX)) * 4
+          } else if (sampleMode === 'canvas') {
+            const cx = Math.max(
+              0,
+              Math.min(W - 1, Math.floor(x + ((ix + 0.5) / width) * displayW))
+            )
+            const cy = Math.max(
+              0,
+              Math.min(H - 1, Math.floor(y + ((iy + 0.5) / height) * displayH))
+            )
+            si = (cy * W + cx) * 4
+          } else {
+            si = (iy * width + ix) * 4
+          }
           const ga = gradientPaint[si + 3] ?? 255
           data[i] = gradientPaint[si] ?? 0
           data[i + 1] = gradientPaint[si + 1] ?? 0
@@ -9909,7 +9946,7 @@ export function IconPaintEditor({
           )
         if (sel && !isTransparentPaintColor(color)) {
           const local = unmapObjDisplayPt(pt, sel)
-          const marked = await fillMarkedSectionsOnImageProxy(sel, local, color)
+          const marked = await fillMarkedSectionsOnImageProxy(sel, local, color, { w: W, h: H })
           if (marked) {
             commitLines(
               linesRef.current.map((l) => (l.id === marked.item.id ? marked.item : l))
@@ -11420,7 +11457,7 @@ export function IconPaintEditor({
     void (async () => {
       const sel = findImageMatchProxy()
       if (!sel) return
-      const next = await refreshStampFromMarks(sel)
+      const next = await refreshStampFromMarks(sel, { w: W, h: H })
       commitLines(linesRef.current.map((l) => (l.id === next.id ? next : l)))
       if (next.imageDataUrl) {
         ensureStampImage(next.imageDataUrl, () => {
@@ -11446,7 +11483,7 @@ export function IconPaintEditor({
       const claimed = await claimVisibleRegions(target)
       let next = target
       if (claimed) {
-        const refreshed = await refreshStampFromMarks(claimed)
+        const refreshed = await refreshStampFromMarks(claimed, { w: W, h: H })
         next = refreshed ?? claimed
         if (cancelled) return
         commitLines(linesRef.current.map((l) => (l.id === next.id ? next : l)))
@@ -11683,7 +11720,7 @@ export function IconPaintEditor({
           | 'imageColor4'
           | 'imageColor5'
         const previous = (live[slotKey] || live.imagePalette?.[job.slot - 1] || '').trim()
-        const next = await setImageProxySlotColor(live, job.slot, job.v)
+        const next = await setImageProxySlotColor(live, job.slot, job.v, { w: W, h: H })
         if (!next || job.gen !== imageSlotApplyGen.current || imageSlotApplyPending.current) continue
         const current = linesRef.current.find((l) => l.id === job.proxyId)
         const stored = {
@@ -11964,7 +12001,7 @@ export function IconPaintEditor({
               }
             }}
             className="w-8 h-8 shrink-0 rounded cursor-pointer border border-border/50 overflow-hidden"
-            style={{ background: color }}
+            style={{ background: isGradientColor(color) ? stripGradientEdge(color) : color }}
             title="Colour — click for solid / gradient"
           />
           {isGradientColor(color) ? (
@@ -12542,14 +12579,17 @@ export function IconPaintEditor({
                             : null
                           let nextLines = linesRef.current
                           if (assigned && source) {
-                            const stamped = await refreshStampFromMarks({
-                              ...live,
-                              imageUseOriginalColors: false,
-                              imageSourceDataUrl: source,
-                              colorMarkPng: assigned.imageColorMarkPng,
-                              colorRegionPng: assigned.imageColorRegionPng,
-                              unmarkedColorSlot: assigned.imageUnmarkedColorSlot
-                            })
+                            const stamped = await refreshStampFromMarks(
+                              {
+                                ...live,
+                                imageUseOriginalColors: false,
+                                imageSourceDataUrl: source,
+                                colorMarkPng: assigned.imageColorMarkPng,
+                                colorRegionPng: assigned.imageColorRegionPng,
+                                unmarkedColorSlot: assigned.imageUnmarkedColorSlot
+                              },
+                              { w: W, h: H }
+                            )
                             nextLines = nextLines.map((l) => (l.id === stamped.id ? stamped : l))
                           }
                           const mode = unmarkedPick === 'recolor' ? 'recolor' : 'assign'

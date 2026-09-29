@@ -5,6 +5,7 @@
 
 import { loadCachedImage } from './iconUtils'
 import { fitRasterDataUrl } from './imageFit'
+import { parseGradientEdge, stripGradientEdge, type GradientEdge } from './gradientEdge'
 
 const MAX_PALETTE = 5
 const SCAN_MAX_DIM = 96
@@ -50,7 +51,7 @@ function paintSlot(data: Uint8ClampedArray, i: number, rgba: Rgba): void {
 }
 
 function isGradientValue(value: string): boolean {
-  const v = value.trim()
+  const v = stripGradientEdge(value.trim())
   return v.startsWith('linear-gradient(') || v.startsWith('radial-gradient(')
 }
 
@@ -68,6 +69,7 @@ function gradientStops(body: string): { color: string; pos: number }[] {
 
 /** Same angle and stops as a shape fill, mapped across the image rectangle. */
 function gradientPixels(color: string, w: number, h: number): Uint8ClampedArray | null {
+  const css = stripGradientEdge(color)
   const width = Math.max(1, w)
   const height = Math.max(1, h)
   const canvas = document.createElement('canvas')
@@ -76,8 +78,8 @@ function gradientPixels(color: string, w: number, h: number): Uint8ClampedArray 
   const ctx = canvas.getContext('2d', { willReadFrequently: true })
   if (!ctx) return null
   let grad: CanvasGradient | null = null
-  if (color.startsWith('linear-gradient(')) {
-    const m = color.match(/linear-gradient\((\d+(?:\.\d+)?)deg(,.+)\)/)
+  if (css.startsWith('linear-gradient(')) {
+    const m = css.match(/linear-gradient\((\d+(?:\.\d+)?)deg(,.+)\)/)
     if (!m) return null
     const stops = gradientStops(m[2])
     if (stops.length < 2) return null
@@ -94,8 +96,8 @@ function gradientPixels(color: string, w: number, h: number): Uint8ClampedArray 
       cy + dy * half
     )
     for (const s of stops) grad.addColorStop(Math.max(0, Math.min(1, s.pos)), s.color)
-  } else if (color.startsWith('radial-gradient(')) {
-    const m = color.match(/radial-gradient\(circle at (\d+(?:\.\d+)?)% (\d+(?:\.\d+)?)%(,.+)\)/)
+  } else if (css.startsWith('radial-gradient(')) {
+    const m = css.match(/radial-gradient\(circle at (\d+(?:\.\d+)?)% (\d+(?:\.\d+)?)%(,.+)\)/)
     if (!m) return null
     const stops = gradientStops(m[3])
     if (stops.length < 2) return null
@@ -109,6 +111,83 @@ function gradientPixels(color: string, w: number, h: number): Uint8ClampedArray 
   ctx.fillStyle = grad
   ctx.fillRect(0, 0, width, height)
   return ctx.getImageData(0, 0, width, height).data
+}
+
+/** Optional canvas frame so @edge=canvas can sample across the paint surface. */
+export type GradientCanvasFrame = {
+  canvasW: number
+  canvasH: number
+  /** Image stamp rect on that canvas. */
+  destX: number
+  destY: number
+  destW: number
+  destH: number
+}
+
+/**
+ * Sample a gradient for one image pixel. Object = image box; canvas = frame bake;
+ * section callers use eachConnectedGradient instead.
+ */
+function sampleGradientAtImagePixel(
+  color: string,
+  edge: GradientEdge,
+  ix: number,
+  iy: number,
+  imageW: number,
+  imageH: number,
+  objectGrad: Uint8ClampedArray | null,
+  canvasGrad: Uint8ClampedArray | null,
+  frame: GradientCanvasFrame | null
+): Rgba | null {
+  if (edge === 'canvas' && canvasGrad && frame) {
+    const cx = Math.max(
+      0,
+      Math.min(frame.canvasW - 1, Math.floor(frame.destX + ((ix + 0.5) / imageW) * frame.destW))
+    )
+    const cy = Math.max(
+      0,
+      Math.min(frame.canvasH - 1, Math.floor(frame.destY + ((iy + 0.5) / imageH) * frame.destH))
+    )
+    const si = (cy * frame.canvasW + cx) * 4
+    return [canvasGrad[si]!, canvasGrad[si + 1]!, canvasGrad[si + 2]!, canvasGrad[si + 3]!]
+  }
+  if (objectGrad) {
+    const si = (iy * imageW + ix) * 4
+    return [objectGrad[si]!, objectGrad[si + 1]!, objectGrad[si + 2]!, objectGrad[si + 3]!]
+  }
+  return null
+}
+
+function prepareSlotGradient(
+  color: string,
+  imageW: number,
+  imageH: number,
+  frame: GradientCanvasFrame | null | undefined
+): {
+  edge: GradientEdge
+  objectGrad: Uint8ClampedArray | null
+  canvasGrad: Uint8ClampedArray | null
+  frame: GradientCanvasFrame | null
+} {
+  const edge = parseGradientEdge(color)
+  if (edge === 'section') {
+    return { edge, objectGrad: null, canvasGrad: null, frame: null }
+  }
+  if (edge === 'canvas' && frame && frame.canvasW > 0 && frame.canvasH > 0) {
+    return {
+      edge,
+      objectGrad: null,
+      canvasGrad: gradientPixels(color, frame.canvasW, frame.canvasH),
+      frame
+    }
+  }
+  // Object (default), or canvas without a frame → whole image.
+  return {
+    edge: edge === 'canvas' ? 'object' : edge,
+    objectGrad: gradientPixels(color, imageW, imageH),
+    canvasGrad: null,
+    frame: null
+  }
 }
 
 /** Gradient sampled across a rectangle, for painting into image pixels. */
@@ -662,7 +741,8 @@ export async function smoothAaEdgesOnBitmap(dataUrl: string): Promise<string> {
 export async function applyImagePaletteRecolor(
   dataUrl: string,
   palette: string[],
-  replacements: string[]
+  replacements: string[],
+  frame?: GradientCanvasFrame | null
 ): Promise<string> {
   if (!dataUrl || !palette.length) return dataUrl
 
@@ -684,7 +764,11 @@ export async function applyImagePaletteRecolor(
   }
   if (!fromRgb.length || !changed) return dataUrl
 
-  const key = recolorCacheKey(dataUrl, palette, replacements)
+  const key =
+    recolorCacheKey(dataUrl, palette, replacements) +
+    (frame
+      ? `|f:${frame.canvasW}x${frame.canvasH}@${Math.round(frame.destX)},${Math.round(frame.destY)},${Math.round(frame.destW)}x${Math.round(frame.destH)}`
+      : '')
   const cached = recolorCache.get(key)
   if (cached) return cached
 
@@ -723,13 +807,35 @@ export async function applyImagePaletteRecolor(
   for (let s = 0; s < toColor.length; s++) {
     const color = toColor[s] || ''
     if (!isGradientValue(color)) continue
-    eachConnectedGradient(
-      width,
-      height,
-      (x, y) => slotOf[y * width + x] === s,
-      color,
-      (x, y, rgba) => paintSlot(data, (y * width + x) * 4, rgba)
-    )
+    const edge = parseGradientEdge(color)
+    if (edge === 'section') {
+      eachConnectedGradient(
+        width,
+        height,
+        (x, y) => slotOf[y * width + x] === s,
+        color,
+        (x, y, rgba) => paintSlot(data, (y * width + x) * 4, rgba)
+      )
+      continue
+    }
+    const prep = prepareSlotGradient(color, width, height, frame)
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (slotOf[y * width + x] !== s) continue
+        const rgba = sampleGradientAtImagePixel(
+          color,
+          prep.edge,
+          x,
+          y,
+          width,
+          height,
+          prep.objectGrad,
+          prep.canvasGrad,
+          prep.frame
+        )
+        if (rgba) paintSlot(data, (y * width + x) * 4, rgba)
+      }
+    }
   }
   const solids = toColor.map((color) => (isGradientValue(color) ? null : parseHex(color)))
   for (let p = 0; p < slotOf.length; p++) {
@@ -749,19 +855,22 @@ export async function applyImagePaletteRecolor(
 }
 
 /** Resolve the data URL that should be drawn for an image icon/content. */
-export async function resolveImageDataUrl(fields: {
-  imageDataUrl?: string
-  imageUseOriginalColors?: boolean
-  imagePalette?: string[]
-  imageColor1?: string
-  imageColor2?: string
-  imageColor3?: string
-  imageColor4?: string
-  imageColor5?: string
-  imageColorMarkPng?: string
-  imageColorRegionPng?: string
-  imageUnmarkedColorSlot?: number
-}): Promise<string> {
+export async function resolveImageDataUrl(
+  fields: {
+    imageDataUrl?: string
+    imageUseOriginalColors?: boolean
+    imagePalette?: string[]
+    imageColor1?: string
+    imageColor2?: string
+    imageColor3?: string
+    imageColor4?: string
+    imageColor5?: string
+    imageColorMarkPng?: string
+    imageColorRegionPng?: string
+    imageUnmarkedColorSlot?: number
+  },
+  frame?: GradientCanvasFrame | null
+): Promise<string> {
   const raw = fields.imageDataUrl ?? ''
   if (!raw) return ''
   if (fields.imageUseOriginalColors !== false) return raw
@@ -772,7 +881,7 @@ export async function resolveImageDataUrl(fields: {
   const palette = fields.imagePalette ?? []
   const recolorByPalette = async (base: string): Promise<string> => {
     if (!palette.length) return base
-    return applyImagePaletteRecolor(base, palette, imageReplacementColors(fields))
+    return applyImagePaletteRecolor(base, palette, imageReplacementColors(fields), frame)
   }
   let out = src
   if (fields.imageColorMarkPng) {
@@ -780,7 +889,7 @@ export async function resolveImageDataUrl(fields: {
     const mark = await decodeColorMarkPng(markPng)
     const hasMarks = !!mark && mark.marks.some((v) => v > 0)
     if (mark && hasMarks) {
-      out = await applyColorMarksRecolor(src, mark.marks, mark.w, mark.h, colors)
+      out = await applyColorMarksRecolor(src, mark.marks, mark.w, mark.h, colors, frame)
     } else {
       out = await recolorByPalette(src)
     }
@@ -795,7 +904,7 @@ export async function resolveImageDataUrl(fields: {
     unmarkedSlot <= MAX_PALETTE
   ) {
     const regionPng = await fitRasterDataUrl(fields.imageColorRegionPng, 1024, { indexMap: true })
-    out = await applyUnmarkedRestRecolor(out, regionPng, unmarkedSlot, colors)
+    out = await applyUnmarkedRestRecolor(out, regionPng, unmarkedSlot, colors, frame)
   }
   return out
 }
@@ -935,17 +1044,45 @@ export async function imageZeroAlphaPunchMask(fields: ImageSlotFields): Promise<
   for (let s = 0; s < colors.length; s++) {
     const color = colors[s] || ''
     if (!mayPunch[s] || !isGradientValue(color)) continue
-    eachConnectedGradient(
-      width,
-      height,
-      (x, y) => slotOf[y * width + x] === s + 1,
-      color,
-      (x, y, rgba) => {
-        if (rgba[3] !== 0) return
+    const edge = parseGradientEdge(color)
+    const punchFrom = (rgba: Rgba) => {
+      if (rgba[3] !== 0) return
+      any = true
+    }
+    if (edge === 'section') {
+      eachConnectedGradient(
+        width,
+        height,
+        (x, y) => slotOf[y * width + x] === s + 1,
+        color,
+        (x, y, rgba) => {
+          if (rgba[3] !== 0) return
+          out.data[(y * width + x) * 4 + 3] = 255
+          punchFrom(rgba)
+        }
+      )
+      continue
+    }
+    const prep = prepareSlotGradient(color, width, height, null)
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (slotOf[y * width + x] !== s + 1) continue
+        const rgba = sampleGradientAtImagePixel(
+          color,
+          prep.edge,
+          x,
+          y,
+          width,
+          height,
+          prep.objectGrad,
+          prep.canvasGrad,
+          prep.frame
+        )
+        if (!rgba || rgba[3] !== 0) continue
         out.data[(y * width + x) * 4 + 3] = 255
         any = true
       }
-    )
+    }
   }
   for (let p = 0; p < slotOf.length; p++) {
     const slot = slotOf[p]
@@ -967,7 +1104,8 @@ export async function applyUnmarkedRestRecolor(
   dataUrl: string,
   regionPng: string,
   unmarkedSlot: number,
-  colors: string[]
+  colors: string[],
+  frame?: GradientCanvasFrame | null
 ): Promise<string> {
   if (!dataUrl || !regionPng || unmarkedSlot < 1 || unmarkedSlot > MAX_PALETTE) return dataUrl
   const color = (colors[unmarkedSlot - 1] || '').trim()
@@ -1013,23 +1151,46 @@ export async function applyUnmarkedRestRecolor(
     }
   }
   if (isGradientValue(color)) {
-    eachConnectedGradient(
-      canvas.width,
-      canvas.height,
-      (x, y) => {
-        const i = (y * canvas.width + x) * 4
-        if (data[i + 3] === 0) return false
-        let ri = i
-        if (!sameSize) {
-          const mx = Math.min(rc.width - 1, Math.floor((x / canvas.width) * rc.width))
-          const my = Math.min(rc.height - 1, Math.floor((y / canvas.height) * rc.height))
-          ri = (my * rc.width + mx) * 4
+    const member = (x: number, y: number) => {
+      const i = (y * canvas.width + x) * 4
+      if (data[i + 3] === 0) return false
+      let ri = i
+      if (!sameSize) {
+        const mx = Math.min(rc.width - 1, Math.floor((x / canvas.width) * rc.width))
+        const my = Math.min(rc.height - 1, Math.floor((y / canvas.height) * rc.height))
+        ri = (my * rc.width + mx) * 4
+      }
+      return rd[ri + 2]! > 0
+    }
+    const edge = parseGradientEdge(color)
+    if (edge === 'section') {
+      eachConnectedGradient(
+        canvas.width,
+        canvas.height,
+        member,
+        color,
+        (x, y, rgba) => paintSlot(data, (y * canvas.width + x) * 4, rgba)
+      )
+    } else {
+      const prep = prepareSlotGradient(color, canvas.width, canvas.height, frame)
+      for (let y = 0; y < canvas.height; y++) {
+        for (let x = 0; x < canvas.width; x++) {
+          if (!member(x, y)) continue
+          const rgba = sampleGradientAtImagePixel(
+            color,
+            prep.edge,
+            x,
+            y,
+            canvas.width,
+            canvas.height,
+            prep.objectGrad,
+            prep.canvasGrad,
+            prep.frame
+          )
+          if (rgba) paintSlot(data, (y * canvas.width + x) * 4, rgba)
         }
-        return rd[ri + 2]! > 0
-      },
-      color,
-      (x, y, rgba) => paintSlot(data, (y * canvas.width + x) * 4, rgba)
-    )
+      }
+    }
   }
   ctx.putImageData(imageData, 0, 0)
   return canvas.toDataURL('image/png')
@@ -1224,7 +1385,8 @@ export async function applyColorMarksRecolor(
   marks: Uint8Array,
   w: number,
   h: number,
-  colors: string[]
+  colors: string[],
+  frame?: GradientCanvasFrame | null
 ): Promise<string> {
   if (!dataUrl || !marks.length) return dataUrl
   const img = await loadCachedImage(dataUrl)
@@ -1251,13 +1413,35 @@ export async function applyColorMarksRecolor(
   for (let slot = 1; slot <= MAX_PALETTE; slot++) {
     const color = (colors[slot - 1] || '').trim()
     if (!isGradientValue(color)) continue
-    eachConnectedGradient(
-      width,
-      height,
-      (x, y) => data[(y * width + x) * 4 + 3] !== 0 && markAt(x, y) === slot,
-      color,
-      (x, y, rgba) => paintSlot(data, (y * width + x) * 4, rgba)
-    )
+    const edge = parseGradientEdge(color)
+    if (edge === 'section') {
+      eachConnectedGradient(
+        width,
+        height,
+        (x, y) => data[(y * width + x) * 4 + 3] !== 0 && markAt(x, y) === slot,
+        color,
+        (x, y, rgba) => paintSlot(data, (y * width + x) * 4, rgba)
+      )
+      continue
+    }
+    const prep = prepareSlotGradient(color, width, height, frame)
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        if (data[(y * width + x) * 4 + 3] === 0 || markAt(x, y) !== slot) continue
+        const rgba = sampleGradientAtImagePixel(
+          color,
+          prep.edge,
+          x,
+          y,
+          width,
+          height,
+          prep.objectGrad,
+          prep.canvasGrad,
+          prep.frame
+        )
+        if (rgba) paintSlot(data, (y * width + x) * 4, rgba)
+      }
+    }
   }
   const solids = colors.map((color) => (isGradientValue(color.trim()) ? null : parseHex(color)))
   for (let y = 0; y < height; y++) {

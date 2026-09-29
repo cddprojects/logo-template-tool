@@ -17,7 +17,8 @@ import {
   paletteFromPixels,
   resolveImageDataUrl,
   scanImagePalette,
-  type ColorMarkMap
+  type ColorMarkMap,
+  type GradientCanvasFrame
 } from './imageRecolor'
 import { loadCachedImage } from './iconUtils'
 import { fitRasterDataUrl } from './imageFit'
@@ -522,22 +523,41 @@ function regionSlotsFromMarks(
   return regionSlot
 }
 
-export async function refreshStampFromMarks(item: LineObj): Promise<LineObj> {
+export async function refreshStampFromMarks(
+  item: LineObj,
+  canvasSize?: { w: number; h: number } | null
+): Promise<LineObj> {
   const source = item.imageSourceDataUrl || item.imageDataUrl
   if (!source) return item
-  const display = await resolveImageDataUrl({
-    imageDataUrl: source,
-    imageUseOriginalColors: item.imageUseOriginalColors,
-    imagePalette: item.imagePalette,
-    imageColor1: item.imageColor1,
-    imageColor2: item.imageColor2,
-    imageColor3: item.imageColor3,
-    imageColor4: item.imageColor4,
-    imageColor5: item.imageColor5,
-    imageColorMarkPng: item.colorMarkPng,
-    imageColorRegionPng: item.colorRegionPng,
-    imageUnmarkedColorSlot: item.unmarkedColorSlot
-  })
+  let frame: GradientCanvasFrame | null = null
+  if (canvasSize && canvasSize.w > 0 && canvasSize.h > 0 && item.pts.length >= 2) {
+    const a = item.pts[0]
+    const b = item.pts[1]
+    frame = {
+      canvasW: canvasSize.w,
+      canvasH: canvasSize.h,
+      destX: Math.min(a.x, b.x),
+      destY: Math.min(a.y, b.y),
+      destW: Math.max(1, Math.abs(b.x - a.x)),
+      destH: Math.max(1, Math.abs(b.y - a.y))
+    }
+  }
+  const display = await resolveImageDataUrl(
+    {
+      imageDataUrl: source,
+      imageUseOriginalColors: item.imageUseOriginalColors,
+      imagePalette: item.imagePalette,
+      imageColor1: item.imageColor1,
+      imageColor2: item.imageColor2,
+      imageColor3: item.imageColor3,
+      imageColor4: item.imageColor4,
+      imageColor5: item.imageColor5,
+      imageColorMarkPng: item.colorMarkPng,
+      imageColorRegionPng: item.colorRegionPng,
+      imageUnmarkedColorSlot: item.unmarkedColorSlot
+    },
+    frame
+  )
   return { ...item, imageDataUrl: display || source }
 }
 
@@ -1541,7 +1561,8 @@ async function recolorSameColor(
 export async function fillMarkedSectionsOnImageProxy(
   item: LineObj,
   localCanvasPt: { x: number; y: number },
-  fillCss: string
+  fillCss: string,
+  canvasSize?: { w: number; h: number } | null
 ): Promise<{ item: LineObj; mark: number } | null> {
   const innerImage = !!(
     item.type === 'stamp' &&
@@ -1612,7 +1633,7 @@ export async function fillMarkedSectionsOnImageProxy(
   }
   if (!item.colorMarkPng) {
     if (gradient) {
-      return { item: await refreshStampFromMarks(next), mark }
+      return { item: await refreshStampFromMarks(next, canvasSize), mark }
     }
     return {
       item: { ...next, imageDataUrl: await recolorSameColor(displayUrl, clicked, hex) },
@@ -1620,13 +1641,13 @@ export async function fillMarkedSectionsOnImageProxy(
     }
   }
   return {
-    item: await refreshStampFromMarks(next),
+    item: await refreshStampFromMarks(next, canvasSize),
     mark
   }
 }
 
 export function solidColorKey(hex: string): string {
-  const raw = hex.trim()
+  const raw = hex.trim().replace(/@edge=(section|object|canvas)\s*$/i, '').trimEnd()
   const source =
     raw.startsWith('linear-gradient(') || raw.startsWith('radial-gradient(')
       ? raw.match(/#[0-9a-fA-F]{6,8}/)?.[0] ?? ''
@@ -2521,7 +2542,8 @@ export async function rescanBaseLayerColors(
 export async function setImageProxySlotColor(
   item: LineObj,
   slot: number,
-  hex: string
+  hex: string,
+  canvasSize?: { w: number; h: number } | null
 ): Promise<LineObj | null> {
   if (!isInnerUploadedImageProxy(item) || slot < 1 || slot > 5) return null
   const key = `imageColor${slot}` as
@@ -2531,10 +2553,13 @@ export async function setImageProxySlotColor(
     | 'imageColor4'
     | 'imageColor5'
   const previous = (item[key] || item.imagePalette?.[slot - 1] || '').trim()
-  return refreshStampFromMarks({
-    ...item,
-    [key]: hex,
-    imageUseOriginalColors: false,
-    paintStrokes: retintMatchingStrokes(item.paintStrokes, [previous], [hex], slot)
-  })
+  return refreshStampFromMarks(
+    {
+      ...item,
+      [key]: hex,
+      imageUseOriginalColors: false,
+      paintStrokes: retintMatchingStrokes(item.paintStrokes, [previous], [hex], slot)
+    },
+    canvasSize
+  )
 }
