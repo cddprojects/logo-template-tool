@@ -1575,70 +1575,71 @@ export function FontSelect({ label, value, onChange }: FontSelectProps): JSX.Ele
   const statusColor = status === 'loaded' ? 'text-green-400' : status === 'error' ? 'text-red-400' : 'text-textMuted'
 
   if (showCustom) {
+    // Narrow label column (not the default 9rem Row) so the name field stays readable.
     return (
-      <Row label={label}>
-        <div className="flex flex-col gap-1.5 w-full">
-          {/* Font name + load button */}
-          <div className="flex gap-1 items-center">
-            <button
-              title="Back to preset fonts"
-              onClick={() => { setShowCustom(false); setStatus('idle'); onChange(FONT_FAMILIES[0]) }}
-              className="shrink-0 px-1.5 py-1 rounded bg-surface3 border border-border text-xs text-muted hover:text-text"
-            >←</button>
+      <div className="py-1.5 min-w-0 space-y-1.5">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <label className="text-xs text-muted shrink-0 w-9">{label}</label>
+          <button
+            type="button"
+            title="Back to preset fonts"
+            onClick={() => { setShowCustom(false); setStatus('idle'); onChange(FONT_FAMILIES[0]) }}
+            className="shrink-0 px-1.5 py-1 rounded bg-surface3 border border-border text-xs text-muted hover:text-text"
+          >←</button>
+          <input
+            type="text"
+            value={fontName}
+            onChange={(e) => { setFontName(e.target.value); setStatus('idle') }}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleLoad() }}
+            placeholder="Font family name…"
+            className="flex-1 min-w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs text-text focus:outline-none focus:border-accent"
+          />
+          <button
+            type="button"
+            onClick={handleLoad}
+            disabled={status === 'loading' || !fontName.trim()}
+            className="shrink-0 px-2 py-1 rounded bg-accent text-white text-xs font-medium disabled:opacity-50"
+          >Load</button>
+          {statusIcon && <span className={`text-xs ${statusColor} shrink-0`}>{statusIcon}</span>}
+        </div>
+
+        {status === 'loaded' && (
+          <p className="text-[10px] text-green-400 pl-10">Font loaded — using "{fontName}"</p>
+        )}
+        {status === 'error' && (
+          <p className="text-[10px] text-red-400 break-all pl-10">
+            {errorMsg || 'Not found on Google Fonts. Try advanced mode.'}
+          </p>
+        )}
+        {status === 'idle' && !showAdvanced && (
+          <p className="text-[10px] text-textMuted pl-10">Google Fonts — Load or Enter.</p>
+        )}
+
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((v) => !v)}
+          className="text-[10px] text-textMuted hover:text-text text-left pl-10"
+        >{showAdvanced ? '▲ Hide advanced' : '▼ Advanced URL'}</button>
+
+        {showAdvanced && (
+          <div className="flex gap-1 items-center min-w-0 pl-10">
             <input
               type="text"
-              value={fontName}
-              onChange={(e) => { setFontName(e.target.value); setStatus('idle') }}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleLoad() }}
-              placeholder="Font family name…"
-              className="flex-1 min-w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs text-text focus:outline-none focus:border-accent"
+              value={customUrl}
+              onChange={(e) => setCustomUrl(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleLoadFromUrl() }}
+              placeholder="https://fonts.googleapis.com/css2?family=..."
+              className="flex-1 min-w-0 px-2 py-1 rounded bg-surface3 border border-border text-[10px] text-text font-mono focus:outline-none focus:border-accent"
             />
             <button
-              onClick={handleLoad}
-              disabled={status === 'loading' || !fontName.trim()}
-              className="shrink-0 px-2 py-1 rounded bg-accent text-white text-xs font-medium disabled:opacity-50"
-            >Load</button>
-            {statusIcon && <span className={`text-xs ${statusColor} shrink-0`}>{statusIcon}</span>}
+              type="button"
+              onClick={handleLoadFromUrl}
+              disabled={status === 'loading' || !customUrl.trim()}
+              className="shrink-0 px-2 py-1 rounded bg-accent text-white text-[10px] font-medium disabled:opacity-50"
+            >Apply</button>
           </div>
-
-          {/* Status hint */}
-          {status === 'loaded' && (
-            <p className="text-[10px] text-green-400">Font loaded — using "{fontName}"</p>
-          )}
-          {status === 'error' && (
-            <p className="text-[10px] text-red-400 break-all">
-              {errorMsg || 'Not found on Google Fonts. Try advanced mode.'}
-            </p>
-          )}
-          {status === 'idle' && !showAdvanced && (
-            <p className="text-[10px] text-textMuted">Loads from Google Fonts automatically. Press Load or Enter.</p>
-          )}
-
-          {/* Advanced toggle */}
-          <button
-            onClick={() => setShowAdvanced((v) => !v)}
-            className="text-[10px] text-textMuted hover:text-text text-left"
-          >{showAdvanced ? '▲ Hide advanced' : '▼ Advanced: paste custom URL'}</button>
-
-          {showAdvanced && (
-            <div className="flex gap-1 items-center">
-              <input
-                type="text"
-                value={customUrl}
-                onChange={(e) => setCustomUrl(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') handleLoadFromUrl() }}
-                placeholder="https://fonts.googleapis.com/css2?family=..."
-                className="flex-1 min-w-0 px-2 py-1 rounded bg-surface3 border border-border text-[10px] text-text font-mono focus:outline-none focus:border-accent"
-              />
-              <button
-                onClick={handleLoadFromUrl}
-                disabled={status === 'loading' || !customUrl.trim()}
-                className="shrink-0 px-2 py-1 rounded bg-accent text-white text-[10px] font-medium disabled:opacity-50"
-              >Apply</button>
-            </div>
-          )}
-        </div>
-      </Row>
+        )}
+      </div>
     )
   }
 

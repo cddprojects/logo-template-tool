@@ -2,6 +2,27 @@
 const pool: HTMLCanvasElement[] = []
 const MAX_POOL = 24
 
+/**
+ * Copy an offscreen render onto the live preview canvas.
+ * Always reassigns width/height (even when unchanged) so Chromium drops any
+ * compositor snapshot of the previous bitmap — canvases under CSS transform /
+ * overflow+radius (PreviewStage) otherwise often keep showing the old frame.
+ */
+export function blitPreviewCanvas(dest: HTMLCanvasElement, source: HTMLCanvasElement): void {
+  dest.width = Math.max(1, source.width)
+  dest.height = Math.max(1, source.height)
+  const ctx = dest.getContext('2d')
+  if (!ctx) return
+  reset2dState(ctx)
+  ctx.drawImage(source, 0, 0)
+  // Extra nudge: toggle a compositor-affecting style for one frame.
+  const prev = dest.style.transform
+  dest.style.transform = prev ? `${prev} translateZ(0)` : 'translateZ(0)'
+  requestAnimationFrame(() => {
+    if (dest.style.transform.endsWith('translateZ(0)')) dest.style.transform = prev
+  })
+}
+
 /** Resize only when needed. Setting width/height to the same values still reallocates. */
 export function fitCanvas(c: HTMLCanvasElement, w: number, h: number): boolean {
   const width = Math.max(1, Math.ceil(w))

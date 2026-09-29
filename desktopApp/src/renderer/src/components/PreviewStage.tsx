@@ -12,6 +12,11 @@ interface PreviewStageProps {
   onStageMouseDown?: (e: React.MouseEvent<HTMLDivElement>) => void
   /** Leftmost controls on the zoom toolbar (e.g. Edit paint). */
   leadingControls?: React.ReactNode
+  /**
+   * Bump when the child canvas identity changes (version / variant).
+   * Forces Chromium to drop a composited snapshot of the previous bitmap.
+   */
+  surfaceKey?: string | number
 }
 
 const ZOOM_MIN = 0.1
@@ -37,7 +42,8 @@ export function PreviewStage({
   background = DEFAULT_STAGE_BG,
   className,
   onStageMouseDown,
-  leadingControls
+  leadingControls,
+  surfaceKey
 }: PreviewStageProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -102,6 +108,20 @@ export function PreviewStage({
     fit()
     return () => ro.disconnect()
   }, [fit])
+
+  // Version/variant changes replace child canvas pixels under a CSS transform.
+  // Chromium often keeps the old layer texture — briefly drop promotion + re-fit.
+  useEffect(() => {
+    if (surfaceKey === undefined) return
+    setTransformHot(false)
+    const el = contentRef.current
+    if (!el) return
+    const prev = el.style.willChange
+    el.style.willChange = 'auto'
+    void el.offsetWidth
+    el.style.willChange = prev
+    if (autoFitRef.current) fit()
+  }, [surfaceKey, fit])
 
   // Native non-passive wheel: Ctrl+wheel or right-button+wheel zooms.
   useEffect(() => {

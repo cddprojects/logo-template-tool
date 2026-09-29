@@ -3,6 +3,7 @@ import { Download, FileImage, FileCode2, RefreshCw, CheckCircle2, Plus, X, Penci
 import type { FaviconConfig, AssetVariant, PaintSaveResult, PaintVector, PaintLayerId, PaintSession, FaviconOuterShape, OuterShapeCategory, PaintSaveTargets, LogoConfig, IconConfig, OutsideContentSettings } from '../types'
 import { FAVICON_SHAPE_OPTIONS, faviconOuterCategory, DEFAULT_ICON_CONFIG } from '../types'
 import { bakeFaviconPaintContentLayer, renderFavicon, faviconInnerDrawSize } from '../utils/renderer'
+import { blitPreviewCanvas } from '../utils/canvasPool'
 import { exportFaviconPng, exportFaviconSvg, exportFaviconIco, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
 import { Section, ColorRow, SwappableColorRows, TransparentFillModeContext, SliderRow, ToggleRow, SelectRow, FontSelect, WeightSelect, FontStyleRow, TextRow, TextareaRow, ShapeGrid, NumberInputRow, AiImageGenPanel, RemoveBgButton, OuterCategoryTabs, ExportNameStyleToggle, ImageRecolorControls, useResolvedImageSrc, type ImagePreviewRecolor } from './Controls'
@@ -161,7 +162,8 @@ export function FaviconEditor({
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const renderIdRef = useRef(0)
-  const faviconPreviewBusy = useRef(false)
+  /** renderId that currently holds the busy lock (0 = free). */
+  const faviconPreviewBusyId = useRef(0)
   const faviconPreviewPending = useRef(false)
   const faviconPreviewKick = useRef<() => void>(() => {})
   const [exporting, setExporting] = useState<string | null>(null)
@@ -549,28 +551,21 @@ export function FaviconEditor({
 
     const doRender = () => {
       if (renderId !== renderIdRef.current || !canvasRef.current) return
-      if (faviconPreviewBusy.current) {
+      if (faviconPreviewBusyId.current !== 0) {
         faviconPreviewPending.current = true
         return
       }
-      faviconPreviewBusy.current = true
+      faviconPreviewBusyId.current = renderId
       faviconPreviewPending.current = false
       const off = document.createElement('canvas')
       renderFavicon(off, { ...config, size: previewSize })
         .then(() => {
           if (renderId !== renderIdRef.current || !canvasRef.current) return
-          const dest = canvasRef.current
-          const ctx = dest.getContext('2d')
-          if (!ctx) return
-          if (dest.width !== off.width || dest.height !== off.height) {
-            dest.width = off.width
-            dest.height = off.height
-          }
-          ctx.drawImage(off, 0, 0)
+          blitPreviewCanvas(canvasRef.current, off)
         })
         .catch(() => {})
         .finally(() => {
-          faviconPreviewBusy.current = false
+          if (faviconPreviewBusyId.current === renderId) faviconPreviewBusyId.current = 0
           if (faviconPreviewPending.current || renderId !== renderIdRef.current) {
             faviconPreviewPending.current = false
             faviconPreviewKick.current()
@@ -581,8 +576,6 @@ export function FaviconEditor({
 
     const rafId = requestAnimationFrame(doRender)
 
-    // Re-render when a new font finishes loading. Debounced: loadingdone fires
-    // once per face, so a single font can fire 4-8 events in quick succession.
     let fontsTimer: ReturnType<typeof setTimeout> | null = null
     const onFontsLoaded = () => {
       if (fontsTimer) clearTimeout(fontsTimer)
@@ -595,7 +588,7 @@ export function FaviconEditor({
       if (fontsTimer) clearTimeout(fontsTimer)
       document.fonts.removeEventListener('loadingdone', onFontsLoaded)
     }
-  }, [versionId, config, previewSize, isActive])
+  }, [versionId, activeId, config, previewSize, isActive])
 
   const addVariant = () => {
     // 2nd variant → "Light" based on 1st; 3rd+ → "Variant N" based on Light (2nd) variant
@@ -1034,6 +1027,7 @@ export function FaviconEditor({
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
           <PreviewStage
             className="flex-1"
+            surfaceKey={`${versionId}:${activeId}:${previewSize}`}
             leadingControls={
               !isCanvaContent ? (
               <button
@@ -1052,7 +1046,7 @@ export function FaviconEditor({
                 className="rounded-xl overflow-hidden shadow-2xl"
                 style={{ background: 'repeating-conic-gradient(#2d2d42 0% 25%, #1a1a24 0% 50%) 0 0 / 16px 16px' }}
               >
-                <canvas ref={canvasRef} style={{ display: 'block', width: previewSize, height: previewSize }} />
+                <canvas key={`${versionId}:${activeId}:${previewSize}`} ref={canvasRef} style={{ display: 'block', width: previewSize, height: previewSize }} />
               </div>
               <div className="flex items-end gap-4">
                 {[16, 32, 48, 64].map((s) => <SizeThumbnail key={s} config={config} size={s} />)}

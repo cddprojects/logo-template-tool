@@ -3,6 +3,7 @@ import { Download, FileImage, FileCode2, RefreshCw, CheckCircle2, Plus, X, Penci
 import type { LogoConfig, LogoLayout, AssetVariant, FaviconConfig, FaviconContent, IconConfig, ShapeType, PaintSaveResult, PaintSession, PaintVector, PaintLayerId, OuterShapeCategory, PaintSaveTargets, OutsideContentSettings, ContentType } from '../types'
 import { FONT_FAMILIES } from '../types'
 import { renderLogo, drawIcon } from '../utils/renderer'
+import { blitPreviewCanvas } from '../utils/canvasPool'
 import { sanitizePaintSessionProxies, syncOutsideLettersIntoPaintSession } from '../utils/paintDecorations'
 import { exportLogoPng, exportLogoSvg, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
@@ -129,7 +130,8 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
   const [dragOverId, setDragOverId] = useState<string | null>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const renderIdRef = useRef(0)
-  const logoPreviewBusy = useRef(false)
+  /** renderId that currently holds the busy lock (0 = free). */
+  const logoPreviewBusyId = useRef(0)
   const logoPreviewPending = useRef(false)
   const logoPreviewKick = useRef<() => void>(() => {})
   const imageChangeGen = useRef(0)
@@ -694,12 +696,10 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
     [updateAllVariants, safeConfig?.secondaryText]
   )
 
-  // Redraw canvas when active config changes.
+  // Redraw canvas when active config / version changes.
   // Gated on isActive: when the user is on the Favicon tab, logo renders are
   // skipped entirely. The moment the user switches to the Logo tab (isActive
   // flips to true) a fresh render fires with the latest state.
-  // Uses requestAnimationFrame so rapid state changes only trigger one render
-  // per display frame (~16 ms) with no perceptible delay.
   useEffect(() => {
     // Invalidate in-flight blits while hidden so a slow prior version cannot
     // paint after the sidebar selection already moved on.
@@ -711,36 +711,30 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
     if (!canvasRef.current || !safeConfig || !effectiveIcon) return
     const renderId = ++renderIdRef.current
     const renderConfig = { ...safeConfig, icon: effectiveIcon }
-
     const faviconForIconRender = isSyncedWithFavicon ? faviconCfg : undefined
 
     const doRender = () => {
       if (renderId !== renderIdRef.current || !canvasRef.current) return
-      if (logoPreviewBusy.current) {
+      if (logoPreviewBusyId.current !== 0) {
         logoPreviewPending.current = true
         return
       }
-      logoPreviewBusy.current = true
+      logoPreviewBusyId.current = renderId
       logoPreviewPending.current = false
       const live = canvasRef.current
       const off = document.createElement('canvas')
-      off.width = live.width
-      off.height = live.height
+      off.width = live.width || 1
+      off.height = live.height || 1
       renderLogo(off, renderConfig, 4, true, faviconForIconRender)
         .then(() => {
           if (renderId !== renderIdRef.current || !canvasRef.current) return
-          const dest = canvasRef.current
-          const ctx = dest.getContext('2d')
-          if (!ctx) return
-          if (dest.width !== off.width || dest.height !== off.height) {
-            dest.width = off.width
-            dest.height = off.height
-          }
-          ctx.drawImage(off, 0, 0)
+          blitPreviewCanvas(canvasRef.current, off)
         })
         .catch(() => {})
         .finally(() => {
-          logoPreviewBusy.current = false
+          // Only the owner may release the lock — a superseded render must not
+          // clear busy while a newer paint is still running.
+          if (logoPreviewBusyId.current === renderId) logoPreviewBusyId.current = 0
           if (logoPreviewPending.current || renderId !== renderIdRef.current) {
             logoPreviewPending.current = false
             logoPreviewKick.current()
@@ -751,8 +745,6 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
 
     const rafId = requestAnimationFrame(doRender)
 
-    // Re-render when a new font finishes loading. Debounced: loadingdone fires
-    // once per face, so a single font can fire 4-8 events in quick succession.
     let fontsTimer: ReturnType<typeof setTimeout> | null = null
     const onFontsLoaded = () => {
       if (fontsTimer) clearTimeout(fontsTimer)
@@ -765,7 +757,7 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
       if (fontsTimer) clearTimeout(fontsTimer)
       document.fonts.removeEventListener('loadingdone', onFontsLoaded)
     }
-  }, [versionId, safeConfig, effectiveIcon, isActive, isSyncedWithFavicon, faviconCfg])
+  }, [versionId, activeId, safeConfig, effectiveIcon, isActive, isSyncedWithFavicon, faviconCfg])
 
   const addVariant = () => {
     const isLight = variants.length === 1
@@ -1212,6 +1204,7 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
           <PreviewStage
             className="flex-1"
+            surfaceKey={`${versionId}:${activeId}`}
             leadingControls={
               safeConfig.icon.visible ? (
                 <button
@@ -1231,7 +1224,7 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
                 background: 'repeating-conic-gradient(#2d2d42 0% 25%, #1a1a24 0% 50%) 0 0 / 16px 16px'
               }}
             >
-              <canvas ref={canvasRef} style={{ display: 'block' }} />
+              <canvas key={`${versionId}:${activeId}`} ref={canvasRef} style={{ display: 'block' }} />
             </div>
           </PreviewStage>
 
@@ -1311,7 +1304,7 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
         >
           <Section title="Text">
             <TextRow label="Site title" value={safeConfig.text} placeholder="MyApp" onChange={(v) => setTitleText(v)} />
-            <ToggleRow label="Same text on all variants" value={safeConfig.textShared ?? false} onChange={toggleTitleShared} />
+            <ToggleRow label="Share text" value={safeConfig.textShared ?? false} onChange={toggleTitleShared} />
             <FontSelect label="Font" value={safeConfig.fontFamily} onChange={(v) => updateConfig({ fontFamily: v })} />
             <WeightSelect label="Weight" value={safeConfig.fontWeight} onChange={(v) => updateConfig({ fontWeight: v })} />
             <FontStyleRow
@@ -1337,7 +1330,7 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
 
           <Section title="Subtitle" defaultOpen={false}>
             <TextRow label="Text" value={safeConfig.secondaryText} placeholder="v1.0" onChange={(v) => setSubtitleText(v)} />
-            <ToggleRow label="Same subtitle on all variants" value={safeConfig.secondaryTextShared ?? false} onChange={toggleSubtitleShared} />
+            <ToggleRow label="Share text" value={safeConfig.secondaryTextShared ?? false} onChange={toggleSubtitleShared} />
             <FontSelect label="Font" value={safeConfig.secondaryFontFamily} onChange={(v) => updateConfig({ secondaryFontFamily: v })} />
             <WeightSelect label="Weight" value={safeConfig.secondaryFontWeight} onChange={(v) => updateConfig({ secondaryFontWeight: v })} />
             <FontStyleRow
