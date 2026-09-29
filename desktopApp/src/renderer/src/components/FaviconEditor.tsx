@@ -3,7 +3,7 @@ import { Download, FileImage, FileCode2, RefreshCw, CheckCircle2, Plus, X, Penci
 import type { FaviconConfig, AssetVariant, PaintSaveResult, PaintVector, PaintLayerId, PaintSession, FaviconOuterShape, OuterShapeCategory, PaintSaveTargets, LogoConfig, IconConfig, OutsideContentSettings } from '../types'
 import { FAVICON_SHAPE_OPTIONS, faviconOuterCategory, DEFAULT_ICON_CONFIG } from '../types'
 import { bakeFaviconPaintContentLayer, renderFavicon, faviconInnerDrawSize } from '../utils/renderer'
-import { blitPreviewCanvas } from '../utils/canvasPool'
+import { presentPreviewCanvas } from '../utils/canvasPool'
 import { exportFaviconPng, exportFaviconSvg, exportFaviconIco, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
 import { Section, ColorRow, SwappableColorRows, TransparentFillModeContext, SliderRow, ToggleRow, SelectRow, FontSelect, WeightSelect, FontStyleRow, TextRow, TextareaRow, ShapeGrid, NumberInputRow, AiImageGenPanel, RemoveBgButton, OuterCategoryTabs, ExportNameStyleToggle, ImageRecolorControls, useResolvedImageSrc, type ImagePreviewRecolor } from './Controls'
@@ -164,7 +164,11 @@ export function FaviconEditor({
   variantsRef.current = variants
   logoVariantsRef.current = logoVariants
   const [dragOverId, setDragOverId] = useState<string | null>(null)
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const canvasARef = useRef<HTMLCanvasElement>(null)
+  const canvasBRef = useRef<HTMLCanvasElement>(null)
+  const previewShowingA = useRef(true)
+  /** Currently visible preview canvas. */
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const renderIdRef = useRef(0)
   /** renderId that currently holds the busy lock (0 = free). */
   const faviconPreviewBusyId = useRef(0)
@@ -559,14 +563,14 @@ export function FaviconEditor({
       faviconPreviewBusyId.current = 0
       return
     }
-    if (!canvasRef.current || !config) return
+    if (!canvasARef.current || !canvasBRef.current || !config) return
     // Drop a stuck busy lock from a hung prior render (heavy/legacy paint PNGs).
     faviconPreviewBusyId.current = 0
     faviconPreviewPending.current = false
     const renderId = ++renderIdRef.current
 
     const doRender = () => {
-      if (renderId !== renderIdRef.current || !canvasRef.current) return
+      if (renderId !== renderIdRef.current || !canvasARef.current || !canvasBRef.current) return
       if (faviconPreviewBusyId.current !== 0) {
         faviconPreviewPending.current = true
         return
@@ -578,10 +582,14 @@ export function FaviconEditor({
       const finish = (blit: boolean) => {
         if (settled) return
         settled = true
-        // Only blit a finished render — never a sized-but-empty mid-await frame.
-        if (blit && renderId === renderIdRef.current && canvasRef.current) {
+        // Only present a finished render — never a sized-but-empty mid-await frame.
+        if (blit && renderId === renderIdRef.current && canvasARef.current && canvasBRef.current) {
           try {
-            blitPreviewCanvas(canvasRef.current, off)
+            canvasRef.current = presentPreviewCanvas(
+              { a: canvasARef.current, b: canvasBRef.current },
+              previewShowingA,
+              off
+            )
           } catch {
             /* ignore */
           }
@@ -1074,10 +1082,26 @@ export function FaviconEditor({
           >
             <div className="flex flex-col items-center gap-8">
               <div
-                className="rounded-xl overflow-hidden shadow-2xl"
+                className="relative rounded-xl overflow-hidden shadow-2xl"
                 style={{ background: 'repeating-conic-gradient(#2d2d42 0% 25%, #1a1a24 0% 50%) 0 0 / 16px 16px' }}
               >
-                <canvas ref={canvasRef} style={{ display: 'block', width: previewSize, height: previewSize }} />
+                <canvas
+                  ref={canvasARef}
+                  style={{ display: 'block', width: previewSize, height: previewSize }}
+                />
+                <canvas
+                  ref={canvasBRef}
+                  aria-hidden
+                  style={{
+                    display: 'block',
+                    position: 'absolute',
+                    left: 0,
+                    top: 0,
+                    visibility: 'hidden',
+                    width: previewSize,
+                    height: previewSize
+                  }}
+                />
               </div>
               <div className="flex items-end gap-4">
                 {[16, 32, 48, 64].map((s) => <SizeThumbnail key={s} config={config} size={s} />)}

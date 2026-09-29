@@ -3,24 +3,67 @@ const pool: HTMLCanvasElement[] = []
 const MAX_POOL = 24
 
 /**
- * Copy an offscreen render onto the live preview canvas.
- * Always reassigns width/height (even when unchanged) so Chromium drops any
- * compositor snapshot of the previous bitmap — canvases under CSS transform /
- * overflow+radius (PreviewStage) otherwise often keep showing the old frame.
+ * Present an offscreen render onto a dual-canvas preview without a blank frame.
+ *
+ * Always paints onto the hidden buffer, then swaps visibility in the same turn.
+ * Never reallocates / clears the currently visible canvas (that was the version-
+ * switch flash: width/height assign wiped pixels for a frame).
+ */
+export function presentPreviewCanvas(
+  buffers: { a: HTMLCanvasElement; b: HTMLCanvasElement },
+  showingA: { current: boolean },
+  source: HTMLCanvasElement
+): HTMLCanvasElement {
+  const w = Math.max(1, source.width)
+  const h = Math.max(1, source.height)
+  const back = showingA.current ? buffers.b : buffers.a
+  const front = showingA.current ? buffers.a : buffers.b
+
+  back.width = w
+  back.height = h
+  const ctx = back.getContext('2d')
+  if (ctx) {
+    reset2dState(ctx)
+    ctx.drawImage(source, 0, 0)
+  }
+
+  // Visible buffer stays in normal flow so the parent keeps the new intrinsic size.
+  back.style.display = 'block'
+  back.style.position = 'static'
+  back.style.visibility = 'visible'
+  front.style.display = 'block'
+  front.style.position = 'absolute'
+  front.style.left = '0'
+  front.style.top = '0'
+  front.style.visibility = 'hidden'
+  front.setAttribute('aria-hidden', 'true')
+  back.removeAttribute('aria-hidden')
+
+  showingA.current = !showingA.current
+  return back
+}
+
+/**
+ * Copy an offscreen render onto a single live canvas.
+ * Same-size path uses 'copy' (no realloc). Prefer presentPreviewCanvas for
+ * version/variant previews to avoid size-change flashes.
  */
 export function blitPreviewCanvas(dest: HTMLCanvasElement, source: HTMLCanvasElement): void {
-  dest.width = Math.max(1, source.width)
-  dest.height = Math.max(1, source.height)
+  const w = Math.max(1, source.width)
+  const h = Math.max(1, source.height)
   const ctx = dest.getContext('2d')
   if (!ctx) return
+  if (dest.width === w && dest.height === h) {
+    reset2dState(ctx)
+    ctx.globalCompositeOperation = 'copy'
+    ctx.drawImage(source, 0, 0)
+    ctx.globalCompositeOperation = 'source-over'
+    return
+  }
+  dest.width = w
+  dest.height = h
   reset2dState(ctx)
   ctx.drawImage(source, 0, 0)
-  // Extra nudge: toggle a compositor-affecting style for one frame.
-  const prev = dest.style.transform
-  dest.style.transform = prev ? `${prev} translateZ(0)` : 'translateZ(0)'
-  requestAnimationFrame(() => {
-    if (dest.style.transform.endsWith('translateZ(0)')) dest.style.transform = prev
-  })
 }
 
 /** Resize only when needed. Setting width/height to the same values still reallocates. */

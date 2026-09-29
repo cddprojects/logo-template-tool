@@ -110,7 +110,9 @@ export function PreviewStage({
   }, [fit])
 
   // Version/variant changes replace child canvas pixels under a CSS transform.
-  // Chromium often keeps the old layer texture — briefly drop promotion + re-fit.
+  // Drop layer promotion so Chromium picks up the new bitmap; ResizeObserver
+  // already re-fits when the visible canvas intrinsic size changes — do not
+  // fit() here (that scaled the still-old frame and looked like a flash).
   useEffect(() => {
     if (surfaceKey === undefined) return
     setTransformHot(false)
@@ -120,8 +122,7 @@ export function PreviewStage({
     el.style.willChange = 'auto'
     void el.offsetWidth
     el.style.willChange = prev
-    if (autoFitRef.current) fit()
-  }, [surfaceKey, fit])
+  }, [surfaceKey])
 
   // Native non-passive wheel: Ctrl+wheel or right-button+wheel zooms.
   useEffect(() => {

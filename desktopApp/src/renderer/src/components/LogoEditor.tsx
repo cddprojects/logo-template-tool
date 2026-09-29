@@ -3,7 +3,7 @@ import { Download, FileImage, FileCode2, RefreshCw, CheckCircle2, Plus, X, Penci
 import type { LogoConfig, LogoLayout, AssetVariant, FaviconConfig, FaviconContent, IconConfig, ShapeType, PaintSaveResult, PaintSession, PaintVector, PaintLayerId, OuterShapeCategory, PaintSaveTargets, OutsideContentSettings, ContentType } from '../types'
 import { FONT_FAMILIES } from '../types'
 import { renderLogo, drawIcon } from '../utils/renderer'
-import { blitPreviewCanvas } from '../utils/canvasPool'
+import { presentPreviewCanvas } from '../utils/canvasPool'
 import {
   sanitizePaintSessionProxies,
   syncOutsideLettersIntoPaintSession
@@ -132,7 +132,11 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
   variantsRef.current = variants
   faviconVariantsRef.current = faviconVariants
   const [dragOverId, setDragOverId] = useState<string | null>(null)
-  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const canvasARef = useRef<HTMLCanvasElement>(null)
+  const canvasBRef = useRef<HTMLCanvasElement>(null)
+  const previewShowingA = useRef(true)
+  /** Currently visible preview canvas (for size seeding / export paths). */
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const renderIdRef = useRef(0)
   /** renderId that currently holds the busy lock (0 = free). */
   const logoPreviewBusyId = useRef(0)
@@ -721,7 +725,7 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
       logoPreviewBusyId.current = 0
       return
     }
-    if (!canvasRef.current || !safeConfig || !effectiveIcon) return
+    if (!canvasARef.current || !canvasBRef.current || !safeConfig || !effectiveIcon) return
     // Drop a stuck busy lock from a hung prior render (heavy/legacy paint PNGs).
     logoPreviewBusyId.current = 0
     logoPreviewPending.current = false
@@ -730,14 +734,16 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
     const faviconForIconRender = isSyncedWithFavicon ? faviconCfg : undefined
 
     const doRender = () => {
-      if (renderId !== renderIdRef.current || !canvasRef.current) return
+      if (renderId !== renderIdRef.current || !canvasARef.current || !canvasBRef.current) return
       if (logoPreviewBusyId.current !== 0) {
         logoPreviewPending.current = true
         return
       }
       logoPreviewBusyId.current = renderId
       logoPreviewPending.current = false
-      const live = canvasRef.current
+      const live =
+        canvasRef.current ??
+        (previewShowingA.current ? canvasARef.current : canvasBRef.current)
       const off = document.createElement('canvas')
       off.width = live.width || 1
       off.height = live.height || 1
@@ -745,11 +751,14 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
       const finish = (blit: boolean) => {
         if (settled) return
         settled = true
-        // Only blit a finished render — never a sized-but-empty frame from a
-        // timeout mid-await (that hid title text drawn after drawIcon).
-        if (blit && renderId === renderIdRef.current && canvasRef.current) {
+        // Only present a finished render — never a sized-but-empty mid-await frame.
+        if (blit && renderId === renderIdRef.current && canvasARef.current && canvasBRef.current) {
           try {
-            blitPreviewCanvas(canvasRef.current, off)
+            canvasRef.current = presentPreviewCanvas(
+              { a: canvasARef.current, b: canvasBRef.current },
+              previewShowingA,
+              off
+            )
           } catch {
             /* ignore */
           }
@@ -1250,12 +1259,17 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
             }
           >
             <div
-              className="rounded-xl shadow-2xl overflow-hidden"
+              className="relative rounded-xl shadow-2xl overflow-hidden"
               style={{
                 background: 'repeating-conic-gradient(#2d2d42 0% 25%, #1a1a24 0% 50%) 0 0 / 16px 16px'
               }}
             >
-              <canvas ref={canvasRef} style={{ display: 'block' }} />
+              <canvas ref={canvasARef} style={{ display: 'block' }} />
+              <canvas
+                ref={canvasBRef}
+                aria-hidden
+                style={{ display: 'block', position: 'absolute', left: 0, top: 0, visibility: 'hidden' }}
+              />
             </div>
           </PreviewStage>
 
