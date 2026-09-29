@@ -571,6 +571,7 @@ export function FaviconEditor({
       const finish = (blit: boolean) => {
         if (settled) return
         settled = true
+        // Only blit a finished render — never a sized-but-empty mid-await frame.
         if (blit && renderId === renderIdRef.current && canvasRef.current) {
           try {
             blitPreviewCanvas(canvasRef.current, off)
@@ -584,7 +585,7 @@ export function FaviconEditor({
           faviconPreviewKick.current()
         }
       }
-      const timeoutId = window.setTimeout(() => finish(off.width > 1 && off.height > 1), 12000)
+      const timeoutId = window.setTimeout(() => finish(false), 12000)
       renderFavicon(off, { ...config, size: previewSize })
         .then(() => {
           window.clearTimeout(timeoutId)
@@ -592,7 +593,7 @@ export function FaviconEditor({
         })
         .catch(() => {
           window.clearTimeout(timeoutId)
-          finish(off.width > 1 && off.height > 1)
+          finish(false)
         })
     }
     faviconPreviewKick.current = doRender

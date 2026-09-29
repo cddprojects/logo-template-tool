@@ -1583,22 +1583,30 @@ export async function renderLogo(
   const textCenterY = marginT + textInY + textBlockH / 2
 
   fitCanvas(canvas, totalW, totalH)
-  reset2dState(ctx)
+  // Re-acquire after resize (same pattern as renderFavicon) — setting width/height
+  // resets the drawing buffer; keep drawing on a fresh context state.
+  const drawCtx = canvas.getContext('2d')!
+  reset2dState(drawCtx)
 
   if (config.transparentBg) {
-    ctx.clearRect(0, 0, totalW, totalH)
+    drawCtx.clearRect(0, 0, totalW, totalH)
   } else {
-    ctx.fillStyle = resolveCanvasColor(ctx, config.backgroundColor, 0, 0, totalW, totalH)
-    ctx.fillRect(0, 0, totalW, totalH)
+    drawCtx.fillStyle = resolveCanvasColor(drawCtx, config.backgroundColor, 0, 0, totalW, totalH)
+    drawCtx.fillRect(0, 0, totalW, totalH)
   }
 
   // Inner geo shape "None" only blanks the Inner fill — Outer / letters / lucide
   // must still draw. Visibility is controlled by icon.visible alone.
+  // Never let a hung/failed icon bake block title/subtitle drawing below.
   if (icon.visible) {
-    if (faviconIconSource) {
-      await drawSyncedFaviconIcon(ctx, faviconIconSource, iconX, iconY, iconSize)
-    } else {
-      await drawIcon(ctx, icon, iconX, iconY, iconSize, highQuality ? 2 : 1)
+    try {
+      if (faviconIconSource) {
+        await drawSyncedFaviconIcon(drawCtx, faviconIconSource, iconX, iconY, iconSize)
+      } else {
+        await drawIcon(drawCtx, icon, iconX, iconY, iconSize, highQuality ? 2 : 1)
+      }
+    } catch {
+      /* legacy paint/image failures must not wipe the rest of the logo */
     }
   }
 
@@ -1607,8 +1615,8 @@ export async function renderLogo(
   // Positions are derived from actualBoundingBox ink extents so that at
   // titleSubtitleGap=0 the bottom ink of the title exactly meets the top
   // ink of the subtitle — no hidden em-box leading is added.
-  ctx.textAlign    = textAlign
-  ctx.textBaseline = 'alphabetic'
+  drawCtx.textAlign    = textAlign
+  drawCtx.textBaseline = 'alphabetic'
 
   // Resolve each text line (baseline + ink extents) once, so the shadow pass and
   // the fill pass share identical positions.
@@ -1658,38 +1666,38 @@ export async function renderLogo(
       fillSpacedText(sc, ln.text, textX, ln.baseline, ln.letterSpacing)
       if (ln.underline) drawTextUnderline(sc, ln.text, textX, ln.baseline, ln.sizePx, '#000', textAlign === 'center' ? 'center' : 'left', 'alphabetic', ln.letterSpacing)
     }
-    ctx.save()
-    ctx.filter = `drop-shadow(${tOx + HUGE}px ${tOy + HUGE}px ${tBlur}px ${tColor})`
-    ctx.drawImage(shadowCanvas, -HUGE, -HUGE)
-    ctx.restore()
+    drawCtx.save()
+    drawCtx.filter = `drop-shadow(${tOx + HUGE}px ${tOy + HUGE}px ${tBlur}px ${tColor})`
+    drawCtx.drawImage(shadowCanvas, -HUGE, -HUGE)
+    drawCtx.restore()
     } finally {
       releaseCanvas(shadowCanvas)
     }
   } else if (tShadow) {
-    ctx.shadowColor   = tColor
-    ctx.shadowBlur    = tBlur
-    ctx.shadowOffsetX = tOx
-    ctx.shadowOffsetY = tOy
+    drawCtx.shadowColor   = tColor
+    drawCtx.shadowBlur    = tBlur
+    drawCtx.shadowOffsetX = tOx
+    drawCtx.shadowOffsetY = tOy
   }
 
   // Fill pass — draws the real (coloured) text.
   for (const ln of lines) {
-    ctx.font      = ln.font
-    ctx.fillStyle = resolveCanvasColor(ctx, ln.color, textX - ln.w / 2, ln.baseline - ln.inkA, ln.w, ln.inkA + ln.inkD)
-    fillSpacedText(ctx, ln.text, textX, ln.baseline, ln.letterSpacing)
+    drawCtx.font      = ln.font
+    drawCtx.fillStyle = resolveCanvasColor(drawCtx, ln.color, textX - ln.w / 2, ln.baseline - ln.inkA, ln.w, ln.inkA + ln.inkD)
+    fillSpacedText(drawCtx, ln.text, textX, ln.baseline, ln.letterSpacing)
     if (ln.underline) {
-      drawTextUnderline(ctx, ln.text, textX, ln.baseline, ln.sizePx, ln.color, textAlign === 'center' ? 'center' : 'left', 'alphabetic', ln.letterSpacing)
+      drawTextUnderline(drawCtx, ln.text, textX, ln.baseline, ln.sizePx, ln.color, textAlign === 'center' ? 'center' : 'left', 'alphabetic', ln.letterSpacing)
     }
   }
 
   // Reset shadow so it doesn't leak into anything drawn afterwards.
-  ctx.shadowColor = 'transparent'
-  ctx.shadowBlur = 0
-  ctx.shadowOffsetX = 0
-  ctx.shadowOffsetY = 0
+  drawCtx.shadowColor = 'transparent'
+  drawCtx.shadowBlur = 0
+  drawCtx.shadowOffsetX = 0
+  drawCtx.shadowOffsetY = 0
 
   if (config.transparentFillMode === 'punch') {
-    destOutSilhouette(ctx, (c) => {
+    destOutSilhouette(drawCtx, (c) => {
       c.textAlign = textAlign
       c.textBaseline = 'alphabetic'
       c.fillStyle = '#000000'

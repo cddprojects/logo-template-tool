@@ -738,6 +738,8 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
       const finish = (blit: boolean) => {
         if (settled) return
         settled = true
+        // Only blit a finished render — never a sized-but-empty frame from a
+        // timeout mid-await (that hid title text drawn after drawIcon).
         if (blit && renderId === renderIdRef.current && canvasRef.current) {
           try {
             blitPreviewCanvas(canvasRef.current, off)
@@ -751,7 +753,8 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
           logoPreviewKick.current()
         }
       }
-      const timeoutId = window.setTimeout(() => finish(off.width > 1 && off.height > 1), 12000)
+      // Release the busy lock if render hangs; do not blit an incomplete frame.
+      const timeoutId = window.setTimeout(() => finish(false), 12000)
       renderLogo(off, renderConfig, 4, true, faviconForIconRender)
         .then(() => {
           window.clearTimeout(timeoutId)
@@ -759,7 +762,7 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
         })
         .catch(() => {
           window.clearTimeout(timeoutId)
-          finish(off.width > 1 && off.height > 1)
+          finish(false)
         })
     }
     logoPreviewKick.current = doRender

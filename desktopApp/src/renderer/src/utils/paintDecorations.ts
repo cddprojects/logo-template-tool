@@ -598,16 +598,20 @@ function isRasterEditedInner(v: PaintVector): boolean {
   )
 }
 
-/** True when paint overlays / decorations / vectors can actually paint Inner. */
+/**
+ * True when paint can replace live Inner (bake planes / raster-edited stamps).
+ * Brush overlay PNGs alone must NOT count — those draw on top of live content;
+ * treating them as “drawable” skipped live Inner and left icons empty.
+ */
 function paintSessionHasDrawableInner(
   session: PaintSession | null | undefined
 ): boolean {
   if (!session) return false
-  if ((session.vectors?.length ?? 0) > 0) return true
   if (session.contentDecorationsPng) return true
   if (session.contentAboveDecorationsPng) return true
   if (session.decorationsPng) return true
-  if (session.contentPng) return true
+  // Raster-edited Inner bitmaps live on the vector.
+  if ((session.vectors ?? []).some(isRasterEditedInner)) return true
   return false
 }
 
