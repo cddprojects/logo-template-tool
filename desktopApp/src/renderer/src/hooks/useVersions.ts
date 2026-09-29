@@ -848,10 +848,25 @@ export function useVersions(options?: {
         source.name || 'Untitled',
         current.map((v) => v.name)
       )
+      const stamp = Date.now()
+      // Deep-clone assets + mint new variant ids so the copy does not share
+      // arrays/configs with the source (shallow spread left canvas stuck).
+      const logos = source.logos.map((v, i) => ({
+        ...v,
+        id: `logo_${stamp}_${i}_${Math.random().toString(36).slice(2, 7)}`,
+        config: structuredClone(v.config)
+      }))
+      const favicons = source.favicons.map((v, i) => ({
+        ...v,
+        id: `fav_${stamp}_${i}_${Math.random().toString(36).slice(2, 7)}`,
+        config: structuredClone(v.config)
+      }))
       const copy: Version = {
         ...source,
-        id: `v_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        id: `v_${stamp}_${Math.random().toString(36).slice(2, 7)}`,
         name: uniqueName,
+        logos,
+        favicons,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString()
       }

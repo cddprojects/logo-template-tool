@@ -125,6 +125,7 @@ const DEFAULT_FAVICON_CONTENT = {
 }
 
 interface FaviconEditorProps {
+  versionId: string
   versionName: string
   variants: AssetVariant<FaviconConfig>[]
   logoVariants?: AssetVariant<LogoConfig>[]
@@ -136,6 +137,7 @@ interface FaviconEditorProps {
 }
 
 export function FaviconEditor({
+  versionId,
   versionName,
   variants,
   logoVariants = [],
@@ -160,6 +162,7 @@ export function FaviconEditor({
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const renderIdRef = useRef(0)
   const faviconPreviewBusy = useRef(false)
+  const faviconPreviewPending = useRef(false)
   const faviconPreviewKick = useRef<() => void>(() => {})
   const [exporting, setExporting] = useState<string | null>(null)
   const [exportNameStyle, setExportNameStyle] = useState<ExportNameStyle>(() => getStoredExportNameStyle())
@@ -170,6 +173,11 @@ export function FaviconEditor({
   useEffect(() => {
     if (isActive) setExportNameStyle(getStoredExportNameStyle())
   }, [isActive])
+
+  // New version selected — pick its first variant (ids can collide across shallow copies).
+  useEffect(() => {
+    setActiveId(variants[0]?.id ?? '')
+  }, [versionId]) // eslint-disable-line react-hooks/exhaustive-deps -- only reset on version change
 
   useEffect(() => {
     if (!variants.find((v) => v.id === activeId) && variants.length > 0) setActiveId(variants[0].id)
@@ -529,13 +537,24 @@ export function FaviconEditor({
   // RAF-gated canvas render. Skipped entirely when the Favicon tab is hidden
   // (isActive=false) to avoid CPU work while the user is on the Logo tab.
   useEffect(() => {
-    if (!canvasRef.current || !config || !isActive) return
+    // Invalidate in-flight blits while hidden so a slow prior version cannot
+    // paint after the sidebar selection already moved on.
+    if (!isActive) {
+      renderIdRef.current++
+      faviconPreviewPending.current = false
+      return
+    }
+    if (!canvasRef.current || !config) return
     const renderId = ++renderIdRef.current
 
     const doRender = () => {
       if (renderId !== renderIdRef.current || !canvasRef.current) return
-      if (faviconPreviewBusy.current) return
+      if (faviconPreviewBusy.current) {
+        faviconPreviewPending.current = true
+        return
+      }
       faviconPreviewBusy.current = true
+      faviconPreviewPending.current = false
       const off = document.createElement('canvas')
       renderFavicon(off, { ...config, size: previewSize })
         .then(() => {
@@ -552,7 +571,10 @@ export function FaviconEditor({
         .catch(() => {})
         .finally(() => {
           faviconPreviewBusy.current = false
-          if (renderId !== renderIdRef.current) faviconPreviewKick.current()
+          if (faviconPreviewPending.current || renderId !== renderIdRef.current) {
+            faviconPreviewPending.current = false
+            faviconPreviewKick.current()
+          }
         })
     }
     faviconPreviewKick.current = doRender
@@ -573,7 +595,7 @@ export function FaviconEditor({
       if (fontsTimer) clearTimeout(fontsTimer)
       document.fonts.removeEventListener('loadingdone', onFontsLoaded)
     }
-  }, [config, previewSize, isActive])
+  }, [versionId, config, previewSize, isActive])
 
   const addVariant = () => {
     // 2nd variant → "Light" based on 1st; 3rd+ → "Variant N" based on Light (2nd) variant

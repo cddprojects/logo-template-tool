@@ -102,6 +102,7 @@ function syncedIconNeedsUpdate(
 }
 
 interface LogoEditorProps {
+  versionId: string
   versionName: string
   variants: AssetVariant<LogoConfig>[]
   faviconVariants: AssetVariant<FaviconConfig>[]
@@ -113,7 +114,7 @@ interface LogoEditorProps {
   onNotify?: (msg: string, type?: 'error' | 'success' | 'info') => void
 }
 
-export function LogoEditor({ versionName, variants, faviconVariants, onChange, onFaviconChange, onOpenSettings, isActive = true, onNotify }: LogoEditorProps): JSX.Element {
+export function LogoEditor({ versionId, versionName, variants, faviconVariants, onChange, onFaviconChange, onOpenSettings, isActive = true, onNotify }: LogoEditorProps): JSX.Element {
   const [activeId, setActiveId] = useState(variants[0]?.id ?? '')
   const [editingLabel, setEditingLabel] = useState<string | null>(null)
   const [labelInput, setLabelInput] = useState('')
@@ -129,6 +130,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const renderIdRef = useRef(0)
   const logoPreviewBusy = useRef(false)
+  const logoPreviewPending = useRef(false)
   const logoPreviewKick = useRef<() => void>(() => {})
   const imageChangeGen = useRef(0)
   const [exporting, setExporting] = useState<string | null>(null)
@@ -142,6 +144,11 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   useEffect(() => {
     if (isActive) setExportNameStyle(getStoredExportNameStyle())
   }, [isActive])
+
+  // New version selected — pick its first variant (ids can collide across shallow copies).
+  useEffect(() => {
+    setActiveId(variants[0]?.id ?? '')
+  }, [versionId]) // eslint-disable-line react-hooks/exhaustive-deps -- only reset on version change
 
   // Keep activeId in sync when variants change
   useEffect(() => {
@@ -694,7 +701,14 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
   // Uses requestAnimationFrame so rapid state changes only trigger one render
   // per display frame (~16 ms) with no perceptible delay.
   useEffect(() => {
-    if (!canvasRef.current || !safeConfig || !effectiveIcon || !isActive) return
+    // Invalidate in-flight blits while hidden so a slow prior version cannot
+    // paint after the sidebar selection already moved on.
+    if (!isActive) {
+      renderIdRef.current++
+      logoPreviewPending.current = false
+      return
+    }
+    if (!canvasRef.current || !safeConfig || !effectiveIcon) return
     const renderId = ++renderIdRef.current
     const renderConfig = { ...safeConfig, icon: effectiveIcon }
 
@@ -702,8 +716,12 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
 
     const doRender = () => {
       if (renderId !== renderIdRef.current || !canvasRef.current) return
-      if (logoPreviewBusy.current) return
+      if (logoPreviewBusy.current) {
+        logoPreviewPending.current = true
+        return
+      }
       logoPreviewBusy.current = true
+      logoPreviewPending.current = false
       const live = canvasRef.current
       const off = document.createElement('canvas')
       off.width = live.width
@@ -723,7 +741,10 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
         .catch(() => {})
         .finally(() => {
           logoPreviewBusy.current = false
-          if (renderId !== renderIdRef.current) logoPreviewKick.current()
+          if (logoPreviewPending.current || renderId !== renderIdRef.current) {
+            logoPreviewPending.current = false
+            logoPreviewKick.current()
+          }
         })
     }
     logoPreviewKick.current = doRender
@@ -744,7 +765,7 @@ export function LogoEditor({ versionName, variants, faviconVariants, onChange, o
       if (fontsTimer) clearTimeout(fontsTimer)
       document.fonts.removeEventListener('loadingdone', onFontsLoaded)
     }
-  }, [safeConfig, effectiveIcon, isActive, isSyncedWithFavicon, faviconCfg])
+  }, [versionId, safeConfig, effectiveIcon, isActive, isSyncedWithFavicon, faviconCfg])
 
   const addVariant = () => {
     const isLight = variants.length === 1
