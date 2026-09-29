@@ -711,9 +711,13 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
     if (!isActive) {
       renderIdRef.current++
       logoPreviewPending.current = false
+      logoPreviewBusyId.current = 0
       return
     }
     if (!canvasRef.current || !safeConfig || !effectiveIcon) return
+    // Drop a stuck busy lock from a hung prior render (heavy/legacy paint PNGs).
+    logoPreviewBusyId.current = 0
+    logoPreviewPending.current = false
     const renderId = ++renderIdRef.current
     const renderConfig = { ...safeConfig, icon: effectiveIcon }
     const faviconForIconRender = isSyncedWithFavicon ? faviconCfg : undefined
@@ -730,20 +734,32 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
       const off = document.createElement('canvas')
       off.width = live.width || 1
       off.height = live.height || 1
+      let settled = false
+      const finish = (blit: boolean) => {
+        if (settled) return
+        settled = true
+        if (blit && renderId === renderIdRef.current && canvasRef.current) {
+          try {
+            blitPreviewCanvas(canvasRef.current, off)
+          } catch {
+            /* ignore */
+          }
+        }
+        if (logoPreviewBusyId.current === renderId) logoPreviewBusyId.current = 0
+        if (logoPreviewPending.current || renderId !== renderIdRef.current) {
+          logoPreviewPending.current = false
+          logoPreviewKick.current()
+        }
+      }
+      const timeoutId = window.setTimeout(() => finish(off.width > 1 && off.height > 1), 12000)
       renderLogo(off, renderConfig, 4, true, faviconForIconRender)
         .then(() => {
-          if (renderId !== renderIdRef.current || !canvasRef.current) return
-          blitPreviewCanvas(canvasRef.current, off)
+          window.clearTimeout(timeoutId)
+          finish(true)
         })
-        .catch(() => {})
-        .finally(() => {
-          // Only the owner may release the lock — a superseded render must not
-          // clear busy while a newer paint is still running.
-          if (logoPreviewBusyId.current === renderId) logoPreviewBusyId.current = 0
-          if (logoPreviewPending.current || renderId !== renderIdRef.current) {
-            logoPreviewPending.current = false
-            logoPreviewKick.current()
-          }
+        .catch(() => {
+          window.clearTimeout(timeoutId)
+          finish(off.width > 1 && off.height > 1)
         })
     }
     logoPreviewKick.current = doRender

@@ -577,7 +577,10 @@ export function shouldSkipLiveLettersForPaintSession(
 ): boolean {
   if (shouldSkipLiveInnerForPaintSession(session)) return true
   if (!session || !sessionHasLinkedOutsideText(session)) return false
-  if (session.linkedTextInDecorations) return true
+  if (session.linkedTextInDecorations) {
+    // Only skip live glyphs when decorations can actually draw them.
+    return !!(session.decorationsPng || session.contentDecorationsPng)
+  }
   return (session.vectors ?? []).some(linkedTextHasPaintTransform)
 }
 
@@ -595,13 +598,30 @@ function isRasterEditedInner(v: PaintVector): boolean {
   )
 }
 
+/** True when paint overlays / decorations / vectors can actually paint Inner. */
+function paintSessionHasDrawableInner(
+  session: PaintSession | null | undefined
+): boolean {
+  if (!session) return false
+  if ((session.vectors?.length ?? 0) > 0) return true
+  if (session.contentDecorationsPng) return true
+  if (session.contentAboveDecorationsPng) return true
+  if (session.decorationsPng) return true
+  if (session.contentPng) return true
+  return false
+}
+
 /** True when Paint baked a warped Inner proxy into decorations — skip live Inner. */
 export function shouldSkipLiveInnerForPaintSession(
   session: PaintSession | null | undefined
 ): boolean {
+  if (!session) return false
+  const canDrawPaint = paintSessionHasDrawableInner(session)
   // A filled Inner image is drawn from its saved bitmap. The live photo would cover that fill.
-  if ((session?.vectors ?? []).some(isRasterEditedInner)) return true
-  if (!session?.contentBakedInDecorations) return false
+  // Only skip live when paint can actually show that bitmap — otherwise old
+  // sessions blank the canvas.
+  if ((session.vectors ?? []).some(isRasterEditedInner)) return canDrawPaint
+  if (!session.contentBakedInDecorations) return false
   // No real bake plane → keep live Inner (older templates often set the flag
   // with nothing to draw, which produced a blank canvas).
   if (!session.contentDecorationsPng && !session.decorationsPng) return false
@@ -615,7 +635,8 @@ export function shouldSkipLiveInnerForPaintSession(
   ) {
     return false
   }
-  return true
+  // Bake flag without drawable paint → show live Inner instead of a blank hole.
+  return canDrawPaint
 }
 
 function shouldRenderContentVectorsLive(session: PaintSession): boolean {

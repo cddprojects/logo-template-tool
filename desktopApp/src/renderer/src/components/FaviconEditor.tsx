@@ -549,9 +549,13 @@ export function FaviconEditor({
     if (!isActive) {
       renderIdRef.current++
       faviconPreviewPending.current = false
+      faviconPreviewBusyId.current = 0
       return
     }
     if (!canvasRef.current || !config) return
+    // Drop a stuck busy lock from a hung prior render (heavy/legacy paint PNGs).
+    faviconPreviewBusyId.current = 0
+    faviconPreviewPending.current = false
     const renderId = ++renderIdRef.current
 
     const doRender = () => {
@@ -563,18 +567,32 @@ export function FaviconEditor({
       faviconPreviewBusyId.current = renderId
       faviconPreviewPending.current = false
       const off = document.createElement('canvas')
+      let settled = false
+      const finish = (blit: boolean) => {
+        if (settled) return
+        settled = true
+        if (blit && renderId === renderIdRef.current && canvasRef.current) {
+          try {
+            blitPreviewCanvas(canvasRef.current, off)
+          } catch {
+            /* ignore */
+          }
+        }
+        if (faviconPreviewBusyId.current === renderId) faviconPreviewBusyId.current = 0
+        if (faviconPreviewPending.current || renderId !== renderIdRef.current) {
+          faviconPreviewPending.current = false
+          faviconPreviewKick.current()
+        }
+      }
+      const timeoutId = window.setTimeout(() => finish(off.width > 1 && off.height > 1), 12000)
       renderFavicon(off, { ...config, size: previewSize })
         .then(() => {
-          if (renderId !== renderIdRef.current || !canvasRef.current) return
-          blitPreviewCanvas(canvasRef.current, off)
+          window.clearTimeout(timeoutId)
+          finish(true)
         })
-        .catch(() => {})
-        .finally(() => {
-          if (faviconPreviewBusyId.current === renderId) faviconPreviewBusyId.current = 0
-          if (faviconPreviewPending.current || renderId !== renderIdRef.current) {
-            faviconPreviewPending.current = false
-            faviconPreviewKick.current()
-          }
+        .catch(() => {
+          window.clearTimeout(timeoutId)
+          finish(off.width > 1 && off.height > 1)
         })
     }
     faviconPreviewKick.current = doRender

@@ -7,6 +7,7 @@ import {
   applyPaintLayerDecorationsHiRes,
   applyPaintPunchMask,
   drawUniversalBrushLayers,
+  migratePaintSession,
   sessionHasPunchMask,
   sessionUsesLayeredPaint,
   shouldSkipLiveInnerForPaintSession,
@@ -655,6 +656,17 @@ async function drawIconContentSilhouette(
   }
 }
 
+/** Normalize paint sessions from older templates before skip-live / layered draw. */
+function withMigratedIconPaint(icon: IconConfig): IconConfig {
+  if (!icon.paintSession) return icon
+  return { ...icon, paintSession: migratePaintSession(icon.paintSession) }
+}
+
+function withMigratedFaviconPaint(config: FaviconConfig): FaviconConfig {
+  if (!config.paintSession) return config
+  return { ...config, paintSession: migratePaintSession(config.paintSession) }
+}
+
 export async function drawIcon(
   ctx: CanvasRenderingContext2D,
   icon: IconConfig,
@@ -665,6 +677,7 @@ export async function drawIcon(
 ): Promise<void> {
   // Paint Fill overlays are authored at session.resolution. Overlays scale via
   // drawScaledPng in applyPaintLayerDecorations — render live Inner at `size`.
+  icon = withMigratedIconPaint(icon)
 
   // Outer container shadow — always via an isolated padded canvas so hexagon /
   // star / etc. shadows are never clipped by the icon rect or a paint offscreen.
@@ -1403,11 +1416,19 @@ export async function renderLogo(
   highQuality = false,
   faviconIconSource?: FaviconConfig | null
 ): Promise<LogoRenderResult> {
+  // Older workspace/templates may still carry unmigrated paint sessions in
+  // memory — normalize before any draw so skip-live flags cannot blank the icon.
+  const icon = withMigratedIconPaint(config.icon)
+  config = { ...config, icon }
+  if (faviconIconSource?.paintSession) {
+    faviconIconSource = withMigratedFaviconPaint(faviconIconSource)
+  }
+
   const ctx = canvas.getContext('2d')!
   ctx.imageSmoothingEnabled = true
   ctx.imageSmoothingQuality = 'high'
   const dpr = scale
-  const { padding, gap, icon, text, secondaryText } = config
+  const { padding, gap, text, secondaryText } = config
   const titleSubtitleGapPx = (config.titleSubtitleGap ?? 4) * dpr
 
   ctx.save()
@@ -2188,6 +2209,7 @@ export async function bakeFaviconPaintContentLayer(
 }
 
 export async function renderFavicon(canvas: HTMLCanvasElement, config: FaviconConfig): Promise<void> {
+  config = withMigratedFaviconPaint(config)
   const size = config.size           // canvas is ALWAYS this exact size
   const shadowInset = config.shadowInset ?? false
   const hasShadow = config.shadowEnabled && config.outerShape !== 'none'
