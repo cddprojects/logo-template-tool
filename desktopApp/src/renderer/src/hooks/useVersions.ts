@@ -278,12 +278,14 @@ function makeFaviconVariant(name: string): AssetVariant<FaviconConfig> {
   }
 }
 
-/** Stamp version:1 / clear stale bake flags on any nested paint session. */
+/** Stamp version:1 / fill missing paint fields on any nested paint session (additive). */
 function migrateIconPaintSessions(icon: IconConfig | null | undefined): IconConfig | null | undefined {
   if (!icon) return icon
   if (!icon.paintSession) return icon
   const paintSession = migratePaintSession(icon.paintSession)
-  return { ...icon, paintSession: paintSession ?? null }
+  // Keep the original session if it did not look like paint data — never null out
+  // a paintSession that failed an overly strict check.
+  return { ...icon, paintSession: paintSession ?? icon.paintSession }
 }
 
 /**
@@ -320,14 +322,16 @@ function migrateFaviconVariant(v: AssetVariant<FaviconConfig>): AssetVariant<Fav
     ...DEFAULT_FAVICON_CONFIG.content,
     ...cfg.content
   }
-  const paintSession = cfg.paintSession ? migratePaintSession(cfg.paintSession) : null
+  const paintSession = cfg.paintSession
+    ? migratePaintSession(cfg.paintSession) ?? cfg.paintSession
+    : null
   return {
     ...v,
     config: {
       ...DEFAULT_FAVICON_CONFIG,
       ...cfg,
       content,
-      paintSession: paintSession ?? null
+      paintSession
     }
   }
 }

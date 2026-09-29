@@ -1,15 +1,14 @@
 /**
- * Lightweight paint-session migration for workspace load / import.
+ * Lightweight paint-session normalization for workspace load / import.
  *
  * Kept free of paintSettingsSync / renderer / paintHelpers so App boot
  * (useVersions) cannot hit a circular-import black screen.
  *
- * Rule of thumb: prefer live Inner (pre-migration behavior). Only keep
- * contentBakedInDecorations when a concrete bake reason still exists on
- * the session — stale flags are what blanked logo/favicon icons.
+ * ADDITIVE ONLY. Never clear save-time flags such as contentBakedInDecorations
+ * or linkedTextInDecorations — clearing them re-enables live destination-out
+ * punch on the main canvas and erases Outer + Inner together.
  */
 import type { PaintSession, PaintVector } from '../types'
-import { reshapeIsApplied } from './paintReshape'
 
 function looksLikePaintSession(raw: Record<string, unknown>): boolean {
   return (
@@ -25,128 +24,9 @@ function looksLikePaintSession(raw: Record<string, unknown>): boolean {
   )
 }
 
-function sessionHasLayeredDecorations(session: PaintSession): boolean {
-  return !!(
-    session.containerDecorationsPng ||
-    session.contentDecorationsPng ||
-    session.contentAboveDecorationsPng ||
-    session.contentBelowDecorationsPng
-  )
-}
-
-function isTransparentPaintColor(color: string): boolean {
-  if (!color || color === 'transparent' || color === 'none') return true
-  if (color.startsWith('linear-gradient') || color.startsWith('radial-gradient')) return false
-  if (/^#[0-9a-fA-F]{8}$/.test(color) && color.slice(7, 9).toLowerCase() === '00') return true
-  return false
-}
-
-function isContentLayerVisible(v: PaintVector): boolean {
-  return (v.layer ?? 'content') === 'content' && (v.visible ?? v.editable ?? true) !== false
-}
-
-/** Raster-edited Inner photo/stamp that replaces live pixels. */
-export function sessionHasRasterEditedInner(session: PaintSession): boolean {
-  return (session.vectors ?? []).some(
-    (v) =>
-      !!v.rasterEdited &&
-      !!v.imageDataUrl &&
-      !v.brushLayer &&
-      !!(
-        v.contentBound ||
-        v.contentProxySlot ||
-        v.imageSourceDataUrl ||
-        (v.type === 'stamp' && v.name === 'Inner content')
-      ) &&
-      !!v.pts &&
-      v.pts.length >= 2
-  )
-}
-
-/** See-through / hole bake that must hide live Inner or Outer shows solid again. */
-export function sessionHasSeeThroughBakeReason(session: PaintSession): boolean {
-  return (session.vectors ?? []).some((v) => {
-    if (!isContentLayerVisible(v)) return false
-    if (v.punchThrough) return false
-    return (
-      !!v.punchEnclosedHole ||
-      !!v.punchMask ||
-      !!v.seeThroughHoleMaskPng ||
-      v.holeMaskMode === 'see-through' ||
-      isTransparentPaintColor(v.color ?? '')
-    )
-  })
-}
-
-/** Warped Inner proxy bake — live unwarped content would cover it. */
-export function sessionHasReshapeBakeReason(session: PaintSession): boolean {
-  return (session.vectors ?? []).some(
-    (v) =>
-      isContentLayerVisible(v) &&
-      !!(v.contentBound || v.contentProxySlot) &&
-      reshapeIsApplied(v.reshapeQuad, v.reshapeSrc)
-  )
-}
-
 /**
- * Library stamp/shape replaced live Inner (no content proxy / linked letters).
- * Matches IconPaintEditor bakeContentProxy “replacement” branch.
- */
-export function sessionHasReplacementInnerBakeReason(session: PaintSession): boolean {
-  const vectors = session.vectors ?? []
-  const hasLiveStandIn = vectors.some(
-    (v) =>
-      !!v.contentBound ||
-      !!v.contentProxySlot ||
-      (v.type === 'text' && !!v.linkedOutsideText)
-  )
-  if (hasLiveStandIn) return false
-  return vectors.some((v) => {
-    if (!isContentLayerVisible(v)) return false
-    if (v.contentProxySlot || v.contentBound || v.brushLayer) return false
-    if (v.imageSourceDataUrl || (v.type === 'stamp' && v.name === 'Inner content')) return false
-    return (
-      v.type === 'stamp' ||
-      v.type === 'shape' ||
-      v.type === 'poly' ||
-      v.type === 'drawn' ||
-      v.type === 'text'
-    )
-  })
-}
-
-/** True when skipping live Inner is required for a real Paint bake. */
-export function sessionHasProvenInnerBakeReason(session: PaintSession): boolean {
-  if (sessionHasRasterEditedInner(session)) return true
-  if (!session.contentBakedInDecorations) return false
-  if (session.paintOverlaysOnly) return false
-  if (
-    !session.contentDecorationsPng &&
-    !session.contentAboveDecorationsPng
-  ) {
-    return false
-  }
-  if (
-    session.contentDecorationsPng &&
-    session.contentPng &&
-    session.contentDecorationsPng === session.contentPng
-  ) {
-    return false
-  }
-  return (
-    sessionHasSeeThroughBakeReason(session) ||
-    sessionHasReshapeBakeReason(session) ||
-    sessionHasReplacementInnerBakeReason(session)
-  )
-}
-
-/**
- * Normalize a paint session from older templates / imports.
- * Stamps `version: 1`, fills missing PNG fields, clears stale bake flags, and
- * infers `paintOverlaysOnly` so layered preview/Paint restore can run.
- *
- * Does not rewrite contentBound proxies (that needs paintSettingsSync) — editors
- * still run sanitizePaintSessionProxies on open/save.
+ * Fill missing fields / stamp version:1 so older templates load.
+ * Does not rewrite bake flags, overlays-only, or vectors.
  */
 export function migratePaintSession(raw: unknown): PaintSession | null {
   if (raw == null || typeof raw !== 'object') return null
@@ -196,15 +76,7 @@ export function migratePaintSession(raw: unknown): PaintSession | null {
         : undefined
   }
 
-  if (
-    session.paintOverlaysOnly === undefined &&
-    !!(session.containerPng || session.contentPng) &&
-    !session.decorationsPng &&
-    !sessionHasLayeredDecorations(session)
-  ) {
-    session = { ...session, paintOverlaysOnly: true }
-  }
-
+  // Infer hasContainer when Outer overlay / decorations exist but flag was omitted.
   if (
     !session.hasContainer &&
     !!(session.containerPng || session.containerDecorationsPng)
@@ -212,20 +84,20 @@ export function migratePaintSession(raw: unknown): PaintSession | null {
     session = { ...session, hasContainer: true }
   }
 
-  // Drop stale bake flags — live Inner must win unless a real bake reason remains.
-  if (session.contentBakedInDecorations && !sessionHasProvenInnerBakeReason(session)) {
-    session = {
-      ...session,
-      contentBakedInDecorations: false
+  // One-time repair for workspaces damaged by destructive migrate (8de6359–883b7d5):
+  // those builds cleared contentBakedInDecorations, which re-enabled live
+  // destination-out punch and erased Outer+Inner. Restore the flag only when
+  // see-through hole payload still on the session proves Save had baked Inner.
+  if (!session.contentBakedInDecorations) {
+    const hasSeeThroughPayload = (session.vectors ?? []).some(
+      (v) =>
+        (v.layer ?? 'content') === 'content' &&
+        (v.visible ?? v.editable ?? true) !== false &&
+        (!!v.seeThroughHoleMaskPng || v.holeMaskMode === 'see-through')
+    )
+    if (hasSeeThroughPayload) {
+      session = { ...session, contentBakedInDecorations: true }
     }
-  }
-
-  if (
-    session.linkedTextInDecorations &&
-    !session.decorationsPng &&
-    !session.contentDecorationsPng
-  ) {
-    session = { ...session, linkedTextInDecorations: false }
   }
 
   return session

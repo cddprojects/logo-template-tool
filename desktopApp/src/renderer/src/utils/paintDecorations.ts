@@ -9,9 +9,7 @@ import {
 } from './paintSettingsSync'
 import {
   migratePaintSession as migratePaintSessionCore,
-  paintSessionIsUsable,
-  sessionHasProvenInnerBakeReason,
-  sessionHasRasterEditedInner
+  paintSessionIsUsable
 } from './paintSessionMigrate'
 import {
   compositeInnerContentDecor,
@@ -602,10 +600,7 @@ export function shouldSkipLiveLettersForPaintSession(
 ): boolean {
   if (shouldSkipLiveInnerForPaintSession(session)) return true
   if (!session || !sessionHasLinkedOutsideText(session)) return false
-  if (session.linkedTextInDecorations) {
-    // Only skip live glyphs when decorations can actually draw them.
-    return !!(session.decorationsPng || session.contentDecorationsPng)
-  }
+  if (session.linkedTextInDecorations) return true
   return (session.vectors ?? []).some(linkedTextHasPaintTransform)
 }
 
@@ -624,16 +619,27 @@ function isRasterEditedInner(v: PaintVector): boolean {
 }
 
 /**
- * Skip live Inner only for a proven Paint bake (see-through, reshape, replacement,
- * or raster-edited photo). Stale contentBakedInDecorations alone must not hide
- * lucide/shape/image — that is what blanked older logo/favicon versions.
+ * Trust save-time contentBakedInDecorations / raster-edited fills.
+ * Do not re-derive or clear that flag at render — clearing it re-enables live
+ * destination-out punch on the main canvas and erases Outer + Inner together.
  */
 export function shouldSkipLiveInnerForPaintSession(
   session: PaintSession | null | undefined
 ): boolean {
-  if (!session) return false
-  if (sessionHasRasterEditedInner(session)) return true
-  return sessionHasProvenInnerBakeReason(session)
+  // A filled Inner image is drawn from its saved bitmap. The live photo would cover that fill.
+  if ((session?.vectors ?? []).some(isRasterEditedInner)) return true
+  if (!session?.contentBakedInDecorations) return false
+  // After an Inner type switch, contentDecorationsPng was wrongly set to the
+  // overlay PNG while contentBakedInDecorations stayed true — live geo/lucide
+  // Inner was skipped and disappeared (especially under an Outer shape).
+  if (
+    session.contentDecorationsPng &&
+    session.contentPng &&
+    session.contentDecorationsPng === session.contentPng
+  ) {
+    return false
+  }
+  return true
 }
 
 function shouldRenderContentVectorsLive(session: PaintSession): boolean {
