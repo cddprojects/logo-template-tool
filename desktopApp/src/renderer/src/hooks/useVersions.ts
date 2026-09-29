@@ -16,13 +16,12 @@ import {
   AssetVariant,
   LogoConfig,
   FaviconConfig,
-  IconConfig,
   DEFAULT_LOGO_CONFIG,
   DEFAULT_FAVICON_CONFIG
 } from '../types'
 import { versionFromIgTemplate } from '../utils/templateFile'
 // Lightweight migrate only — must NOT import paintDecorations (circular boot crash).
-import { migratePaintSession } from '../utils/paintSessionMigrate'
+import { migrateVersion } from '../utils/versionMigrate'
 
 /** A single point on the undo/redo timeline. */
 interface Snap { state: Version[]; label: string; time: number }
@@ -275,90 +274,6 @@ function makeFaviconVariant(name: string): AssetVariant<FaviconConfig> {
         text: name.slice(0, 2).toUpperCase()
       }
     }
-  }
-}
-
-/** Stamp version:1 / fill missing paint fields on any nested paint session (additive). */
-function migrateIconPaintSessions(icon: IconConfig | null | undefined): IconConfig | null | undefined {
-  if (!icon) return icon
-  if (!icon.paintSession) return icon
-  const paintSession = migratePaintSession(icon.paintSession)
-  // Keep the original session if it did not look like paint data — never null out
-  // a paintSession that failed an overly strict check.
-  return { ...icon, paintSession: paintSession ?? icon.paintSession }
-}
-
-/**
- * Deep-merge a logo variant's config with the current defaults.
- * Any field added to LogoConfig/IconConfig after the template was saved will
- * receive its default value, keeping old templates forward-compatible.
- */
-function migrateLogoVariant(v: AssetVariant<LogoConfig>): AssetVariant<LogoConfig> {
-  const cfg = (v.config ?? {}) as Partial<LogoConfig>
-  const icon = migrateIconPaintSessions({
-    ...DEFAULT_LOGO_CONFIG.icon,
-    ...cfg.icon
-  })!
-  const syncedIcon = migrateIconPaintSessions(cfg.syncedIcon ?? null) ?? null
-  const syncedIconSnapshot = migrateIconPaintSessions(cfg.syncedIconSnapshot ?? null) ?? null
-  return {
-    ...v,
-    config: {
-      ...DEFAULT_LOGO_CONFIG,
-      ...cfg,
-      icon,
-      syncedIcon,
-      syncedIconSnapshot
-    }
-  }
-}
-
-/**
- * Deep-merge a favicon variant's config with the current defaults.
- */
-function migrateFaviconVariant(v: AssetVariant<FaviconConfig>): AssetVariant<FaviconConfig> {
-  const cfg = (v.config ?? {}) as Partial<FaviconConfig>
-  const content = {
-    ...DEFAULT_FAVICON_CONFIG.content,
-    ...cfg.content
-  }
-  const paintSession = cfg.paintSession
-    ? migratePaintSession(cfg.paintSession) ?? cfg.paintSession
-    : null
-  return {
-    ...v,
-    config: {
-      ...DEFAULT_FAVICON_CONFIG,
-      ...cfg,
-      content,
-      paintSession
-    }
-  }
-}
-
-/** Migrate from old single-logo format to variants array format, and fill in any
- *  missing fields from current defaults (forward-compatibility for old templates). */
-function migrateVersion(raw: Record<string, unknown>): Version {
-  const v = raw as Version & { logo?: LogoConfig; favicon?: FaviconConfig }
-
-  const rawLogos: AssetVariant<LogoConfig>[] =
-    Array.isArray(v.logos) && v.logos.length > 0
-      ? v.logos
-      : [{ id: 'logo_legacy', label: 'Dark', config: v.logo ?? { ...DEFAULT_LOGO_CONFIG } }]
-
-  const rawFavicons: AssetVariant<FaviconConfig>[] =
-    Array.isArray(v.favicons) && v.favicons.length > 0
-      ? v.favicons
-      : [{ id: 'fav_legacy', label: 'Dark', config: v.favicon ?? { ...DEFAULT_FAVICON_CONFIG } }]
-
-  return {
-    id: v.id,
-    name: v.name,
-    description: v.description,
-    createdAt: v.createdAt,
-    updatedAt: v.updatedAt,
-    logos: rawLogos.map(migrateLogoVariant),
-    favicons: rawFavicons.map(migrateFaviconVariant)
   }
 }
 
@@ -779,6 +694,30 @@ export function useVersions(options?: {
     [commit]
   )
 
+  /**
+   * Re-run current-schema migration on every open version and persist.
+   * Used by “Update all .igtemplate” so workspace state matches rewritten templates.
+   */
+  const upgradeVersionsToCurrentSchema = useCallback((): Version[] => {
+    const current = versionsRef.current
+    const upgraded = current.map((v) =>
+      migrateVersion(v as unknown as Record<string, unknown>)
+    )
+    let changed = upgraded.length !== current.length
+    if (!changed) {
+      for (let i = 0; i < upgraded.length; i++) {
+        if (!sameJson(upgraded[i], current[i])) {
+          changed = true
+          break
+        }
+      }
+    }
+    if (changed) {
+      commit(upgraded, 'Upgrade versions to current schema')
+    }
+    return upgraded
+  }, [commit])
+
   const updateVersion = useCallback(
     (id: string, updates: Partial<Version>, actionLabel?: string) => {
       const current = versionsRef.current
@@ -976,6 +915,7 @@ export function useVersions(options?: {
     createVersion,
     importImageVersion,
     importTemplateVersion,
+    upgradeVersionsToCurrentSchema,
     updateVersion,
     deleteVersion,
     deleteVersions,

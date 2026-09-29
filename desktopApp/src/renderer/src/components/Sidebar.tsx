@@ -35,6 +35,8 @@ interface SidebarProps {
   onDelete: (ids: string | string[]) => void
   onDuplicate: (id: string) => void
   onReorder: (fromId: string, toId: string) => void
+  /** Re-migrate open versions to current schema; returns upgraded list for template rewrite. */
+  onUpgradeVersions?: () => Version[]
   templateDropActive?: boolean
 }
 
@@ -47,6 +49,7 @@ export function Sidebar({
   onDelete,
   onDuplicate,
   onReorder,
+  onUpgradeVersions,
   templateDropActive = false
 }: SidebarProps): JSX.Element {
   const isWebApp =
@@ -138,7 +141,9 @@ export function Sidebar({
     setExportingId(v.id)
     setUpdateTemplatesNote(null)
     try {
-      const result = await window.api.updateAllTemplates([v])
+      const upgradedList = onUpgradeVersions?.() ?? versions
+      const upgraded = upgradedList.find((item) => item.id === v.id) ?? v
+      const result = await window.api.updateAllTemplates([upgraded])
       if (!result?.success) {
         setUpdateTemplatesNote(result?.error || `Failed to update “${v.name}”`)
         return
@@ -213,12 +218,15 @@ export function Sidebar({
   }
 
   const runUpdateAllTemplates = async () => {
-    if (!versions.length || updateTemplatesBusy) return
+    if (updateTemplatesBusy) return
+    if (!versions.length && !isWebApp) return
     setPendingUpdateTemplates(false)
     setUpdateTemplatesBusy(true)
     setUpdateTemplatesNote(null)
     try {
-      const result = await window.api.updateAllTemplates(versions)
+      // Persist current-schema migration on open versions first, then rewrite library files.
+      const upgraded = onUpgradeVersions?.() ?? versions
+      const result = await window.api.updateAllTemplates(upgraded)
       if (!result?.success) {
         setUpdateTemplatesNote(result?.error || 'Failed to update templates')
         return
@@ -226,7 +234,7 @@ export function Sidebar({
       const written = result.written ?? ((result.updated ?? 0) + (result.created ?? 0))
       const orphanBits =
         result.migratedOrphans && result.migratedOrphans > 0
-          ? ` · upgraded ${result.migratedOrphans} other file${result.migratedOrphans === 1 ? '' : 's'}`
+          ? ` · upgraded ${result.migratedOrphans} other library file${result.migratedOrphans === 1 ? '' : 's'}`
           : ''
       const webBits =
         isWebApp && (result.updated != null || result.created != null)
@@ -267,11 +275,11 @@ export function Sidebar({
             </button>
             <button
               onClick={() => setPendingUpdateTemplates(true)}
-              disabled={!versions.length || updateTemplatesBusy}
+              disabled={updateTemplatesBusy || (!versions.length && !isWebApp)}
               title={
                 isWebApp
-                  ? 'Update all .igtemplate entries in your library from the versions list (current schema)'
-                  : 'Rewrite all .igtemplate files from the versions list (and upgrade leftover template files)'
+                  ? 'Upgrade open versions + rewrite all own library templates to the current schema'
+                  : 'Upgrade open versions + rewrite all .igtemplate files (versions list and leftover library files)'
               }
               className="w-6 h-6 rounded flex items-center justify-center text-muted hover:text-white hover:bg-accent transition-colors disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-muted"
             >
@@ -552,8 +560,10 @@ export function Sidebar({
           title="Update all templates?"
           message={
             isWebApp
-              ? `Rewrite your library templates from all ${versions.length} version${versions.length === 1 ? '' : 's'} in the list (current schema). Matching names are updated; missing ones are created.`
-              : `Rewrite .igtemplate files from all ${versions.length} version${versions.length === 1 ? '' : 's'} in the list, and upgrade any other old template files in the templates folder.`
+              ? versions.length
+                ? `Upgrade all ${versions.length} open version${versions.length === 1 ? '' : 's'} to the current schema, rewrite matching library templates, create any missing ones, and upgrade other own library templates that are not in the list.`
+                : 'Upgrade every own template in your library to the current schema (fill missing fields and paint-session stamps).'
+              : `Upgrade all ${versions.length} open version${versions.length === 1 ? '' : 's'} to the current schema, rewrite their .igtemplate files, and deep-upgrade any other .igtemplate files in the templates folder.`
           }
           confirmLabel="Update templates"
           onConfirm={() => { void runUpdateAllTemplates() }}

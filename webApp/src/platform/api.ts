@@ -14,6 +14,7 @@ import {
   createTemplate,
   updateTemplate,
   listTemplates,
+  getTemplate,
   getAuthUser,
   loadWorkspace,
   logout,
@@ -21,6 +22,7 @@ import {
   subscribeAuth,
   WEB_OPEN_TEMPLATES
 } from './auth'
+import { migrateIgTemplatePayload } from '@renderer/utils/versionMigrate'
 
 const LEGACY_VERSIONS_KEY = 'imggen:versions'
 
@@ -404,6 +406,8 @@ export function installWebApi(): void {
         )
         let updated = 0
         let created = 0
+        const touchedIds = new Set<string>()
+
         for (const item of versions) {
           if (!item || typeof item !== 'object') continue
           const v = item as {
@@ -411,27 +415,84 @@ export function installWebApi(): void {
             description?: string
             logos?: unknown
             favicons?: unknown
+            logo?: unknown
+            favicon?: unknown
           }
-          const name = (v.name ?? 'Untitled').trim() || 'Untitled'
+          const migrated = migrateIgTemplatePayload({
+            name: (v.name ?? 'Untitled').trim() || 'Untitled',
+            description: v.description ?? '',
+            logos: v.logos,
+            favicons: v.favicons,
+            logo: v.logo,
+            favicon: v.favicon
+          })
+          const name = String(migrated.name ?? 'Untitled').trim() || 'Untitled'
           const payload = {
             name,
-            description: v.description ?? '',
-            logos: v.logos ?? [],
-            favicons: v.favicons ?? []
+            description: String(migrated.description ?? ''),
+            logos: migrated.logos,
+            favicons: migrated.favicons
           }
           const existing = ownByName.get(name.toLowerCase())
           if (existing) {
             const result = await updateTemplate(existing.id, payload)
             if (!result.ok) return { success: false, error: result.error }
+            touchedIds.add(existing.id)
             updated++
           } else {
             const result = await createTemplate(payload)
             if (!result.ok) return { success: false, error: result.error }
             ownByName.set(name.toLowerCase(), result.template)
+            touchedIds.add(result.template.id)
             created++
           }
         }
-        return { success: true, written: updated + created, updated, created, migratedOrphans: 0 }
+
+        // Upgrade other own library entries that are not in the versions list.
+        let migratedOrphans = 0
+        for (const meta of listed.templates) {
+          if (!meta.isOwn || touchedIds.has(meta.id)) continue
+          const full = await getTemplate(meta.id)
+          if (!full.ok) return { success: false, error: full.error }
+          const raw = full.data
+          const migrated = migrateIgTemplatePayload({
+            name: meta.name,
+            description: (raw.description as string) ?? '',
+            logos: raw.logos,
+            favicons: raw.favicons,
+            logo: raw.logo,
+            favicon: raw.favicon
+          })
+          const before = JSON.stringify({
+            name: meta.name,
+            description: raw.description ?? '',
+            logos: raw.logos ?? [],
+            favicons: raw.favicons ?? []
+          })
+          const after = JSON.stringify({
+            name: migrated.name,
+            description: migrated.description ?? '',
+            logos: migrated.logos,
+            favicons: migrated.favicons
+          })
+          if (before === after) continue
+          const result = await updateTemplate(meta.id, {
+            name: String(migrated.name ?? meta.name),
+            description: String(migrated.description ?? ''),
+            logos: migrated.logos,
+            favicons: migrated.favicons
+          })
+          if (!result.ok) return { success: false, error: result.error }
+          migratedOrphans++
+        }
+
+        return {
+          success: true,
+          written: updated + created,
+          updated,
+          created,
+          migratedOrphans
+        }
       } catch (e) {
         return { success: false, error: String(e) }
       }

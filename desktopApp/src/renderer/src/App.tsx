@@ -93,7 +93,7 @@ export default function App(): JSX.Element {
   }, [])
 
   const {
-    versions, loaded, createVersion, importImageVersion, importTemplateVersion, updateVersion,
+    versions, loaded, createVersion, importImageVersion, importTemplateVersion, upgradeVersionsToCurrentSchema, updateVersion,
     deleteVersions, duplicateVersion, reorderVersions,
     undo, redo, canUndo, canRedo, undoLabel, redoLabel,
     history, historyIndex, jumpTo
@@ -468,6 +468,7 @@ export default function App(): JSX.Element {
             onDelete={handleDelete}
             onDuplicate={handleDuplicate}
             onReorder={reorderVersions}
+            onUpgradeVersions={upgradeVersionsToCurrentSchema}
             templateDropActive={templateDropActive}
           />
           <input

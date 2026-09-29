@@ -600,7 +600,10 @@ export function shouldSkipLiveLettersForPaintSession(
 ): boolean {
   if (shouldSkipLiveInnerForPaintSession(session)) return true
   if (!session || !sessionHasLinkedOutsideText(session)) return false
-  if (session.linkedTextInDecorations) return true
+  if (session.linkedTextInDecorations) {
+    // Only skip live glyphs when decorations can actually draw them.
+    return !!(session.decorationsPng || session.contentDecorationsPng)
+  }
   return (session.vectors ?? []).some(linkedTextHasPaintTransform)
 }
 
@@ -620,8 +623,9 @@ function isRasterEditedInner(v: PaintVector): boolean {
 
 /**
  * Trust save-time contentBakedInDecorations / raster-edited fills.
- * Do not re-derive or clear that flag at render — clearing it re-enables live
- * destination-out punch on the main canvas and erases Outer + Inner together.
+ * Do not clear that flag (clears re-enable live destination-out punch and erase
+ * Outer+Inner). If the bake flag is set but no content bake plane exists, still
+ * skip live Inner so punch stays off — Outer draws; paint overlays may be empty.
  */
 export function shouldSkipLiveInnerForPaintSession(
   session: PaintSession | null | undefined
@@ -875,12 +879,15 @@ function drawBaseImageBrushStrokes(
 /** Brush layers stay above every object, including punch, so they stay visible outside Paint. */
 export function drawUniversalBrushLayers(
   ctx: CanvasRenderingContext2D,
-  session: PaintSession,
+  session: PaintSession | null | undefined,
   x: number,
   y: number,
   size: number,
   shapeFallback?: number
 ): void {
+  // No-paint templates / linked favicons with null session must no-op — callers
+  // historically invoked this unconditionally after live Outer/Inner.
+  if (!session) return
   const items = (session.vectors ?? []).filter(
     (v) => v.brushLayer && v.paintStrokes?.some((s) => s.tool !== 'eraser' && s.pts.length > 0) && v.pts && v.pts.length >= 2
   )

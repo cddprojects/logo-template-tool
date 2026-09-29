@@ -1,3 +1,5 @@
+import { migrateIgTemplatePayload } from './versionMigrate'
+
 export function isIgTemplateFile(file: File): boolean {
   return /\.igtemplate$/i.test(file.name)
 }
@@ -33,14 +35,17 @@ export function buildIgTemplatePayload(data: {
   description?: string
   logos?: unknown
   favicons?: unknown
+  logo?: unknown
+  favicon?: unknown
 }): Record<string, unknown> {
-  return {
-    schemaVersion: 1,
+  return migrateIgTemplatePayload({
     name: data.name,
     description: data.description,
     logos: data.logos,
-    favicons: data.favicons
-  }
+    favicons: data.favicons,
+    logo: data.logo,
+    favicon: data.favicon
+  })
 }
 
 export function igTemplateFileName(name?: string): string {

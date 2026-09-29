@@ -837,19 +837,23 @@ export async function drawIcon(
 
     // Outer paint under Inner content (layered / overlay-only sessions).
     if (sessionUsesLayeredPaint(icon.paintSession)) {
-      const outerShape = logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size
-      await applyPaintLayerDecorationsHiRes(
-        ctx,
-        icon.paintSession,
-        x,
-        y,
-        size,
-        'container',
-        undefined,
-        outerShape,
-        superSample
-      )
-      await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'container', outerShape)
+      try {
+        const outerShape = logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size
+        await applyPaintLayerDecorationsHiRes(
+          ctx,
+          icon.paintSession,
+          x,
+          y,
+          size,
+          'container',
+          undefined,
+          outerShape,
+          superSample
+        )
+        await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'container', outerShape)
+      } catch (err) {
+        console.error('[drawIcon] outer paint failed; keeping live Outer', err)
+      }
     }
   }
 
@@ -1214,36 +1218,40 @@ export async function drawIcon(
   }
 
   // Inner paint above live Inner; Outer paint already applied under content when layered.
-  if (sessionUsesLayeredPaint(icon.paintSession)) {
-    const innerShape = logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size
-    await applyPaintLayerDecorationsHiRes(
-      ctx,
-      icon.paintSession,
-      x,
-      y,
-      size,
-      'content',
-      innerContentDecorFromIcon(icon),
-      innerShape,
-      superSample
-    )
-    await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'content', innerShape)
-    drawUniversalBrushLayers(ctx, icon.paintSession, x, y, size, innerShape)
-  } else if (icon.paintSession) {
-    // Legacy single-plane decorations on top of Outer + Inner.
-    const legacyShape = logoPaintOuterLayout(icon, icon.paintSession.resolution || 512).size
-    await applyPaintDecorations(
-      ctx,
-      icon.paintSession,
-      x,
-      y,
-      size,
-      logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size,
-      innerContentDecorFromIcon(icon).contentSizeRatio
-    )
-    await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'container', legacyShape)
-    await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'content', legacyShape)
-    drawUniversalBrushLayers(ctx, icon.paintSession, x, y, size, legacyShape)
+  try {
+    if (sessionUsesLayeredPaint(icon.paintSession)) {
+      const innerShape = logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size
+      await applyPaintLayerDecorationsHiRes(
+        ctx,
+        icon.paintSession,
+        x,
+        y,
+        size,
+        'content',
+        innerContentDecorFromIcon(icon),
+        innerShape,
+        superSample
+      )
+      await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'content', innerShape)
+      drawUniversalBrushLayers(ctx, icon.paintSession, x, y, size, innerShape)
+    } else if (icon.paintSession) {
+      // Legacy single-plane decorations on top of Outer + Inner.
+      const legacyShape = logoPaintOuterLayout(icon, icon.paintSession.resolution || 512).size
+      await applyPaintDecorations(
+        ctx,
+        icon.paintSession,
+        x,
+        y,
+        size,
+        logoPaintOuterLayout(icon, icon.paintSession?.resolution || 512).size,
+        innerContentDecorFromIcon(icon).contentSizeRatio
+      )
+      await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'container', legacyShape)
+      await applyPaintPunchMask(ctx, icon.paintSession, x, y, size, 'content', legacyShape)
+      drawUniversalBrushLayers(ctx, icon.paintSession, x, y, size, legacyShape)
+    }
+  } catch (err) {
+    console.error('[drawIcon] content paint failed; keeping live Outer/Inner', err)
   }
 }
 
@@ -1576,13 +1584,23 @@ export async function renderLogo(
     drawCtx.fillRect(0, 0, totalW, totalH)
   }
 
-  // Inner geo shape "None" only blanks the Inner fill — Outer / letters / lucide
-  // must still draw. Visibility is controlled by icon.visible alone.
+  // Icon occupies a disjoint rect from title/subtitle. A legacy paint hang or
+  // throw must not reject renderLogo before text is drawn — otherwise the
+  // preview remount stays blank and text edits re-hit the same failure.
   if (icon.visible) {
-    if (faviconIconSource) {
-      await drawSyncedFaviconIcon(drawCtx, faviconIconSource, iconX, iconY, iconSize)
-    } else {
-      await drawIcon(drawCtx, icon, iconX, iconY, iconSize, highQuality ? 2 : 1)
+    const iconDraw =
+      faviconIconSource
+        ? drawSyncedFaviconIcon(drawCtx, faviconIconSource, iconX, iconY, iconSize)
+        : drawIcon(drawCtx, icon, iconX, iconY, iconSize, highQuality ? 2 : 1)
+    try {
+      await Promise.race([
+        iconDraw,
+        new Promise<never>((_, reject) => {
+          window.setTimeout(() => reject(new Error('logo icon draw timed out')), 8000)
+        })
+      ])
+    } catch (err) {
+      console.error('[renderLogo] icon draw failed; continuing with title/subtitle', err)
     }
   }
 
@@ -1799,51 +1817,61 @@ async function renderFaviconInnerAt(
     ? faviconInnerDrawSize(config, config.paintSession.resolution || 512)
     : undefined
   const paintOuterLayer = async () => {
-    if (layeredPaint) {
-      await applyPaintLayerDecorations(
+    if (!config.paintSession) return
+    try {
+      if (layeredPaint) {
+        await applyPaintLayerDecorations(
+          ctx,
+          config.paintSession,
+          0,
+          0,
+          size,
+          'container',
+          undefined,
+          paintShapeFallback
+        )
+      }
+      await applyPaintPunchMask(
         ctx,
         config.paintSession,
         0,
         0,
         size,
         'container',
-        undefined,
         paintShapeFallback
       )
+    } catch (err) {
+      console.error('[renderFavicon] outer paint failed; keeping live Outer', err)
     }
-    await applyPaintPunchMask(
-      ctx,
-      config.paintSession,
-      0,
-      0,
-      size,
-      'container',
-      paintShapeFallback
-    )
   }
   const paintInnerLayer = async () => {
-    if (layeredPaint) {
-      await applyPaintLayerDecorations(
+    if (!config.paintSession) return
+    try {
+      if (layeredPaint) {
+        await applyPaintLayerDecorations(
+          ctx,
+          config.paintSession,
+          0,
+          0,
+          size,
+          'content',
+          innerContentDecorFromFavicon(config.content),
+          paintShapeFallback
+        )
+      }
+      await applyPaintPunchMask(
         ctx,
         config.paintSession,
         0,
         0,
         size,
         'content',
-        innerContentDecorFromFavicon(config.content),
         paintShapeFallback
       )
+      drawUniversalBrushLayers(ctx, config.paintSession, 0, 0, size, paintShapeFallback)
+    } catch (err) {
+      console.error('[renderFavicon] inner paint failed; keeping live Inner', err)
     }
-    await applyPaintPunchMask(
-      ctx,
-      config.paintSession,
-      0,
-      0,
-      size,
-      'content',
-      paintShapeFallback
-    )
-    drawUniversalBrushLayers(ctx, config.paintSession, 0, 0, size, paintShapeFallback)
   }
 
   if (config.outerShape === 'none') {

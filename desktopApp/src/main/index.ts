@@ -6,6 +6,7 @@ import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { get as httpsGet, request as httpsRequest, type IncomingMessage } from 'https'
 import { createServer, type IncomingMessage as HttpMsg, type ServerResponse } from 'http'
+import { migrateIgTemplatePayload } from '../renderer/src/utils/versionMigrate'
 
 // ── Data directory ────────────────────────────────────────────────────────────
 // Dev  : <project>/data/
@@ -726,13 +727,15 @@ function igTemplateFileName(name: unknown): string {
 function writeIgTemplateFile(version: Record<string, unknown>): string {
   const filename = igTemplateFileName(version.name)
   const filePath = join(templatesDir, filename)
-  const tmpl = {
+  const tmpl = migrateIgTemplatePayload({
     schemaVersion: 1,
     name: version.name,
     description: version.description,
     logos: version.logos,
-    favicons: version.favicons
-  }
+    favicons: version.favicons,
+    logo: version.logo,
+    favicon: version.favicon
+  })
   writeFileSync(filePath, JSON.stringify(tmpl, null, 2), 'utf-8')
   const reg = getRegistry()
   reg.add(filename)
@@ -740,27 +743,9 @@ function writeIgTemplateFile(version: Record<string, unknown>): string {
   return filePath
 }
 
-/** Upgrade legacy single logo/favicon templates to the current array schema. */
+/** Upgrade legacy / incomplete templates to the current full schema. */
 function normalizeIgTemplateFile(raw: Record<string, unknown>): Record<string, unknown> {
-  const logos =
-    Array.isArray(raw.logos) && raw.logos.length > 0
-      ? raw.logos
-      : raw.logo
-        ? [{ id: 'logo_legacy', label: 'Dark', config: raw.logo }]
-        : []
-  const favicons =
-    Array.isArray(raw.favicons) && raw.favicons.length > 0
-      ? raw.favicons
-      : raw.favicon
-        ? [{ id: 'fav_legacy', label: 'Dark', config: raw.favicon }]
-        : []
-  return {
-    schemaVersion: 1,
-    name: raw.name,
-    description: raw.description ?? '',
-    logos,
-    favicons
-  }
+  return migrateIgTemplatePayload(raw)
 }
 
 // IPC: Export a version as a .igtemplate file into data/templates/
@@ -775,8 +760,8 @@ ipcMain.handle('export-template', (_, version: Record<string, unknown>) => {
 })
 
 /**
- * Rewrite .igtemplate files from the current versions list, then upgrade any
- * other templates still sitting in the folder on the old schema.
+ * Rewrite .igtemplate files from the current versions list (current schema),
+ * then deep-upgrade any other templates still sitting in the library folder.
  */
 ipcMain.handle('update-all-templates', (_, versions: unknown) => {
   try {

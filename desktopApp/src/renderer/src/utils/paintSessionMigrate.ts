@@ -84,6 +84,20 @@ export function migratePaintSession(raw: unknown): PaintSession | null {
     session = { ...session, hasContainer: true }
   }
 
+  // Infer overlay-only when raw overlays exist without decoration planes.
+  // Additive — does not clear bake flags (those must stay for punch gating).
+  if (
+    session.paintOverlaysOnly === undefined &&
+    !!(session.containerPng || session.contentPng) &&
+    !session.decorationsPng &&
+    !session.containerDecorationsPng &&
+    !session.contentDecorationsPng &&
+    !session.contentAboveDecorationsPng &&
+    !session.contentBelowDecorationsPng
+  ) {
+    session = { ...session, paintOverlaysOnly: true }
+  }
+
   // One-time repair for workspaces damaged by destructive migrate (8de6359–883b7d5):
   // those builds cleared contentBakedInDecorations, which re-enabled live
   // destination-out punch and erased Outer+Inner. Restore the flag only when
