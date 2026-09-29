@@ -39,7 +39,11 @@ import {
 } from '../utils/paintSettingsSync'
 import { faviconContentToIconConfig } from './LogoEditor'
 import { contentTypeFromIconForFavicon, FAVICON_CONTENT_TYPE_OPTIONS, unwrapSvgPath } from '../utils/contentTypeSync'
-import { sanitizePaintSessionProxies, syncOutsideLettersIntoPaintSession } from '../utils/paintDecorations'
+import {
+  paintSessionIsUsable,
+  sanitizePaintSessionProxies,
+  syncOutsideLettersIntoPaintSession
+} from '../utils/paintDecorations'
 import { CanvaPromptPanel } from './CanvaPromptPanel'
 import { resolveCanvaAppName } from '../utils/canvaPrompt'
 import { ApplyToAllBar, type ApplyToAllFlash } from './ApplyToAllBar'
@@ -346,17 +350,18 @@ export function FaviconEditor({
     ).catch(() => {})
     setPaintContainer(containerCanvas.toDataURL('image/png'))
     setPaintContent(contentCanvas.toDataURL('image/png'))
-    const hasSession = !!(session && session.version === 1)
-    setPaintContainerOverlay(hasSession ? session!.containerPng : null)
-    setPaintContentOverlay(hasSession ? session!.contentPng : null)
-    setPaintVectors(hasSession && Array.isArray(session!.vectors) ? session!.vectors : [])
-    setPaintHasContainer(hasSession ? !!session!.hasContainer : config.outerShape !== 'none')
+    // Migrated legacy sessions (missing version / stale bake flags) are usable.
+    const hasSession = paintSessionIsUsable(session)
+    setPaintContainerOverlay(hasSession ? session.containerPng || null : null)
+    setPaintContentOverlay(hasSession ? session.contentPng || null : null)
+    setPaintVectors(hasSession && Array.isArray(session.vectors) ? session.vectors : [])
+    setPaintHasContainer(hasSession ? !!session.hasContainer : config.outerShape !== 'none')
     setPaintLayerOrder(
-      hasSession && session!.layerOrder?.length === 2
-        ? session!.layerOrder
+      hasSession && session.layerOrder?.length === 2
+        ? session.layerOrder
         : ['content', 'container']
     )
-    setPaintPunchMasks(hasSession ? session!.punchMasks ?? [] : [])
+    setPaintPunchMasks(hasSession ? session.punchMasks ?? [] : [])
     setShowPaint(true)
   }, [config])
 

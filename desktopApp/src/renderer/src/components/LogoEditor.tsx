@@ -4,7 +4,11 @@ import type { LogoConfig, LogoLayout, AssetVariant, FaviconConfig, FaviconConten
 import { FONT_FAMILIES } from '../types'
 import { renderLogo, drawIcon } from '../utils/renderer'
 import { blitPreviewCanvas } from '../utils/canvasPool'
-import { sanitizePaintSessionProxies, syncOutsideLettersIntoPaintSession } from '../utils/paintDecorations'
+import {
+  paintSessionIsUsable,
+  sanitizePaintSessionProxies,
+  syncOutsideLettersIntoPaintSession
+} from '../utils/paintDecorations'
 import { exportLogoPng, exportLogoSvg, getStoredExportNameStyle, setStoredExportNameStyle } from '../utils/exporter'
 import type { ExportNameStyle } from '../utils/exporter'
 import { hasMultipleColors } from '../utils/iconUtils'
@@ -513,17 +517,18 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
 
     setPaintContainer(containerCanvas.toDataURL('image/png'))
     setPaintContent(contentCanvas.toDataURL('image/png'))
-    const hasSession = !!(session && session.version === 1)
-    setPaintContainerOverlay(hasSession ? session!.containerPng : null)
-    setPaintContentOverlay(hasSession ? session!.contentPng : null)
-    setPaintVectors(hasSession && Array.isArray(session!.vectors) ? session!.vectors : [])
-    setPaintHasContainer(hasSession ? !!session!.hasContainer : hasIconContainer)
+    // Migrated legacy sessions (missing version / stale bake flags) are usable.
+    const hasSession = paintSessionIsUsable(session)
+    setPaintContainerOverlay(hasSession ? session.containerPng || null : null)
+    setPaintContentOverlay(hasSession ? session.contentPng || null : null)
+    setPaintVectors(hasSession && Array.isArray(session.vectors) ? session.vectors : [])
+    setPaintHasContainer(hasSession ? !!session.hasContainer : hasIconContainer)
     setPaintLayerOrder(
-      hasSession && session!.layerOrder?.length === 2
-        ? session!.layerOrder
+      hasSession && session.layerOrder?.length === 2
+        ? session.layerOrder
         : ['content', 'container']
     )
-    setPaintPunchMasks(hasSession ? session!.punchMasks ?? [] : [])
+    setPaintPunchMasks(hasSession ? session.punchMasks ?? [] : [])
     setShowPaint(true)
   }, [safeConfig, effectiveIcon, matchingFaviconVariant, hasIconContainer, isSyncedWithFavicon])
 

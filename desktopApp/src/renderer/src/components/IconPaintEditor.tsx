@@ -1451,40 +1451,69 @@ export function IconPaintEditor({
   // Load live bases (read-only) + paint overlays (writable).
   useEffect(() => {
     if (paintBasesLoadedRef.current) return
-    const baseCc = ensureOffscreenCanvas(baseContainerCanvasRef).getContext('2d')
-    const baseCt = ensureOffscreenCanvas(baseContentCanvasRef).getContext('2d')
-    const cc = containerCtx()
-    const ct = contentCtx()
-    const ft = frontCtx()
-    if (!baseCc || !baseCt || !cc || !ct || !ft) return
-    baseCc.clearRect(0, 0, W, H)
-    baseCt.clearRect(0, 0, W, H)
-    cc.clearRect(0, 0, W, H)
-    ct.clearRect(0, 0, W, H)
-    ft.clearRect(0, 0, W, H)
+    let cancelled = false
+    let tries = 0
+    const MAX_CTX_TRIES = 60
 
     const loadInto = (ctx: CanvasRenderingContext2D, src: string | null): Promise<void> =>
       new Promise((resolve) => {
         if (!src) { resolve(); return }
         const img = new Image()
-        img.onload = () => {
-          const r = Math.min(W / img.width, H / img.height)
-          const dw = img.width * r
-          const dh = img.height * r
-          ctx.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh)
+        let settled = false
+        const done = () => {
+          if (settled) return
+          settled = true
           resolve()
         }
-        img.onerror = () => resolve()
+        // Corrupt / huge data URLs on older templates must not hang Paint open.
+        const timer = window.setTimeout(done, 8000)
+        img.onload = () => {
+          window.clearTimeout(timer)
+          try {
+            const r = Math.min(W / img.width, H / img.height)
+            const dw = img.width * r
+            const dh = img.height * r
+            ctx.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh)
+          } catch {
+            /* ignore decode/draw failures */
+          }
+          done()
+        }
+        img.onerror = () => {
+          window.clearTimeout(timer)
+          done()
+        }
         img.src = src
       })
 
-    Promise.all([
-      loadInto(baseCc, containerImage),
-      loadInto(baseCt, contentImage),
-      loadInto(cc, containerOverlayImage),
-      loadInto(ct, contentOverlayImage),
-      loadInto(ft, contentFrontImage)
-    ]).then(async () => {
+    const startLoad = () => {
+      if (cancelled || paintBasesLoadedRef.current) return
+      const baseCc = ensureOffscreenCanvas(baseContainerCanvasRef).getContext('2d')
+      const baseCt = ensureOffscreenCanvas(baseContentCanvasRef).getContext('2d')
+      const cc = containerCtx()
+      const ct = contentCtx()
+      const ft = frontCtx()
+      if (!baseCc || !baseCt || !cc || !ct || !ft) {
+        if (tries++ < MAX_CTX_TRIES) {
+          requestAnimationFrame(startLoad)
+        }
+        return
+      }
+      baseCc.clearRect(0, 0, W, H)
+      baseCt.clearRect(0, 0, W, H)
+      cc.clearRect(0, 0, W, H)
+      ct.clearRect(0, 0, W, H)
+      ft.clearRect(0, 0, W, H)
+
+      Promise.all([
+        loadInto(baseCc, containerImage),
+        loadInto(baseCt, contentImage),
+        loadInto(cc, containerOverlayImage),
+        loadInto(ct, contentOverlayImage),
+        loadInto(ft, contentFrontImage)
+      ]).then(async () => {
+        if (cancelled) return
+        try {
       const restoredOrder = normalizeLayerOrder(initialLayerOrder)
       layerOrderRef.current = restoredOrder
       setLayerOrder(restoredOrder)
@@ -1842,8 +1871,25 @@ export function IconPaintEditor({
       lastSnapshotRef.current = null
       redrawLinesRef.current()
       pushHistory()
-      paintBasesLoadedRef.current = true
-    })
+        } catch (err) {
+          console.warn('[IconPaintEditor] paint restore failed for legacy session', err)
+          try {
+            linesRef.current = []
+            setLines([])
+            redrawLinesRef.current()
+          } catch {
+            /* ignore */
+          }
+        } finally {
+          paintBasesLoadedRef.current = true
+        }
+      })
+    }
+
+    startLoad()
+    return () => {
+      cancelled = true
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containerImage, contentImage, containerOverlayImage, contentOverlayImage, contentFrontImage, hasContainer, initialVectors, initialPunchMasks, initialContentBakedInDecorations, initialLayerOrder, innerDrawSize, paintOuterSize, initialPaintShapeSize])
 

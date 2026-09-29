@@ -357,7 +357,7 @@ export function syncOutsideLettersIntoPaintSession(
   innerDrawSize?: number,
   opts?: { textOrFontChanged?: boolean }
 ): PaintSession | null | undefined {
-  if (!session || session.version !== 1) return session
+  if (!isRecoverablePaintSession(session)) return session
   const res = Math.max(1, session.resolution || 512)
   const drawArea = Math.max(1, innerDrawSize ?? res)
   const weight = parseInt(String(letters.fontWeight ?? '700'), 10)
@@ -527,6 +527,15 @@ export function sessionHasLayeredDecorations(
   )
 }
 
+/** True when a session object can be treated as the current v1 schema (incl. legacy omit). */
+function isRecoverablePaintSession(
+  session: PaintSession | null | undefined
+): session is PaintSession {
+  if (!session) return false
+  // Older templates omitted `version` entirely — still recoverable.
+  return session.version === 1 || (session as { version?: number }).version == null
+}
+
 /**
  * True when Outer/Inner paint must be interleaved (Outer under Inner).
  * Includes overlay-only sessions after a content-type switch, which clears the
@@ -535,7 +544,7 @@ export function sessionHasLayeredDecorations(
 export function sessionUsesLayeredPaint(
   session: PaintSession | null | undefined
 ): boolean {
-  if (!session || session.version !== 1) return false
+  if (!isRecoverablePaintSession(session)) return false
   if (sessionHasLayeredDecorations(session)) return true
   if (session.paintOverlaysOnly && (session.containerPng || session.contentPng)) return true
   return false
@@ -549,7 +558,7 @@ export function sessionUsesLayeredPaint(
 export function paintCompositeResolution(
   session: PaintSession | null | undefined
 ): number | null {
-  if (!session || session.version !== 1) return null
+  if (!isRecoverablePaintSession(session)) return null
   const res = Math.max(0, session.resolution || 0)
   if (res < 1) return null
   if (sessionUsesLayeredPaint(session)) return res
@@ -593,6 +602,9 @@ export function shouldSkipLiveInnerForPaintSession(
   // A filled Inner image is drawn from its saved bitmap. The live photo would cover that fill.
   if ((session?.vectors ?? []).some(isRasterEditedInner)) return true
   if (!session?.contentBakedInDecorations) return false
+  // No real bake plane → keep live Inner (older templates often set the flag
+  // with nothing to draw, which produced a blank canvas).
+  if (!session.contentDecorationsPng && !session.decorationsPng) return false
   // After an Inner type switch, contentDecorationsPng was wrongly set to the
   // overlay PNG while contentBakedInDecorations stayed true — live geo/lucide
   // Inner was skipped and disappeared (especially under an Outer shape).
@@ -1041,18 +1053,102 @@ export async function applyPaintDecorations(
   await drawOverlayLayers(ctx, session, x, y, size, shapeFallback)
 }
 
-/** Convert contentBound rasters to hierarchy slots (safe on load/save). */
-export function sanitizePaintSessionProxies(
-  session: PaintSession | null | undefined
-): PaintSession | null | undefined {
-  if (!session || session.version !== 1) return session
-  let next: PaintSession = session
-  // Stale bake flag after Inner type switch (decorations plane === overlay only).
+function looksLikePaintSession(raw: Record<string, unknown>): boolean {
+  return (
+    typeof raw.containerPng === 'string' ||
+    typeof raw.contentPng === 'string' ||
+    typeof raw.decorationsPng === 'string' ||
+    typeof raw.containerDecorationsPng === 'string' ||
+    typeof raw.contentDecorationsPng === 'string' ||
+    typeof raw.contentFrontPng === 'string' ||
+    (Array.isArray(raw.vectors) && raw.vectors.length > 0) ||
+    (Array.isArray(raw.punchMasks) && raw.punchMasks.length > 0) ||
+    typeof raw.resolution === 'number'
+  )
+}
+
+/**
+ * Normalize a paint session from older templates / imports.
+ * Stamps `version: 1`, fills missing PNG fields, clears stale bake flags, and
+ * infers `paintOverlaysOnly` so layered preview/Paint restore can run.
+ */
+export function migratePaintSession(raw: unknown): PaintSession | null {
+  if (raw == null || typeof raw !== 'object') return null
+  const s = raw as Record<string, unknown>
+  if (!looksLikePaintSession(s)) return null
+
+  const resolution = Math.max(1, Math.round(Number(s.resolution) || 512))
+  const layerOrder =
+    Array.isArray(s.layerOrder) && s.layerOrder.length === 2
+      ? (s.layerOrder as PaintSession['layerOrder'])
+      : (['content', 'container'] as PaintSession['layerOrder'])
+
+  let session: PaintSession = {
+    version: 1,
+    resolution,
+    containerPng: typeof s.containerPng === 'string' ? s.containerPng : '',
+    contentPng: typeof s.contentPng === 'string' ? s.contentPng : '',
+    vectors: Array.isArray(s.vectors) ? (s.vectors as PaintVector[]) : [],
+    hasContainer: !!s.hasContainer,
+    layerOrder,
+    paintOverlaysOnly: typeof s.paintOverlaysOnly === 'boolean' ? s.paintOverlaysOnly : undefined,
+    decorationsPng: typeof s.decorationsPng === 'string' ? s.decorationsPng : undefined,
+    containerDecorationsPng:
+      typeof s.containerDecorationsPng === 'string' ? s.containerDecorationsPng : undefined,
+    contentDecorationsPng:
+      typeof s.contentDecorationsPng === 'string' ? s.contentDecorationsPng : undefined,
+    contentAboveDecorationsPng:
+      typeof s.contentAboveDecorationsPng === 'string' ? s.contentAboveDecorationsPng : undefined,
+    contentBelowDecorationsPng:
+      typeof s.contentBelowDecorationsPng === 'string' ? s.contentBelowDecorationsPng : undefined,
+    contentFrontPng: typeof s.contentFrontPng === 'string' ? s.contentFrontPng : undefined,
+    linkedTextInDecorations:
+      typeof s.linkedTextInDecorations === 'boolean' ? s.linkedTextInDecorations : undefined,
+    contentBakedInDecorations:
+      typeof s.contentBakedInDecorations === 'boolean' ? s.contentBakedInDecorations : undefined,
+    paintShapeSize: typeof s.paintShapeSize === 'number' ? s.paintShapeSize : undefined,
+    paintContentDrawSize:
+      typeof s.paintContentDrawSize === 'number' ? s.paintContentDrawSize : undefined,
+    paintContentSizeRatio:
+      typeof s.paintContentSizeRatio === 'number' ? s.paintContentSizeRatio : undefined,
+    punchMasks: Array.isArray(s.punchMasks)
+      ? (s.punchMasks as PaintSession['punchMasks'])
+      : undefined,
+    contentSync:
+      s.contentSync && typeof s.contentSync === 'object'
+        ? (s.contentSync as PaintSession['contentSync'])
+        : undefined
+  }
+
+  // Overlay PNGs without a combined flatten → treat as overlay-only (layered path).
+  if (
+    session.paintOverlaysOnly === undefined &&
+    !!(session.containerPng || session.contentPng) &&
+    !session.decorationsPng &&
+    !sessionHasLayeredDecorations(session)
+  ) {
+    session = { ...session, paintOverlaysOnly: true }
+  }
+
+  // Infer hasContainer from Outer overlay / decorations when omitted.
+  if (
+    !session.hasContainer &&
+    !!(session.containerPng || session.containerDecorationsPng)
+  ) {
+    session = { ...session, hasContainer: true }
+  }
+
+  return finalizePaintSession(session)
+}
+
+function finalizePaintSession(session: PaintSession): PaintSession {
+  let next = session
+  // Stale bake flag after Inner type switch (decorations plane === overlay only),
+  // or bake flag with no plane at all (blank canvas on old templates).
   if (
     next.contentBakedInDecorations &&
-    next.contentDecorationsPng &&
-    next.contentPng &&
-    next.contentDecorationsPng === next.contentPng
+    (!next.contentDecorationsPng ||
+      (next.contentPng && next.contentDecorationsPng === next.contentPng))
   ) {
     next = {
       ...next,
@@ -1060,10 +1156,30 @@ export function sanitizePaintSessionProxies(
       linkedTextInDecorations: false
     }
   }
+  if (next.linkedTextInDecorations && !next.decorationsPng && !next.contentDecorationsPng) {
+    next = { ...next, linkedTextInDecorations: false }
+  }
   if (!sessionHasContentProxy(next)) return next
-  // Keep stack order: turn rasters into slots instead of dropping the stand-in.
   return {
     ...next,
     vectors: persistContentProxyVectors(next.vectors)
   }
+}
+
+/** Convert contentBound rasters to hierarchy slots (safe on load/save). */
+export function sanitizePaintSessionProxies(
+  session: PaintSession | null | undefined
+): PaintSession | null | undefined {
+  if (!session) return session
+  // Migrate legacy sessions (missing version / stale flags) before sanitizing.
+  const migrated = migratePaintSession(session)
+  if (!migrated) return session
+  return migrated
+}
+
+/** True when Paint open/restore should use overlays / vectors from this session. */
+export function paintSessionIsUsable(
+  session: PaintSession | null | undefined
+): session is PaintSession {
+  return !!migratePaintSession(session)
 }

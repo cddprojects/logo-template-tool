@@ -16,10 +16,12 @@ import {
   AssetVariant,
   LogoConfig,
   FaviconConfig,
+  IconConfig,
   DEFAULT_LOGO_CONFIG,
   DEFAULT_FAVICON_CONFIG
 } from '../types'
 import { versionFromIgTemplate } from '../utils/templateFile'
+import { migratePaintSession } from '../utils/paintDecorations'
 
 /** A single point on the undo/redo timeline. */
 interface Snap { state: Version[]; label: string; time: number }
@@ -275,22 +277,35 @@ function makeFaviconVariant(name: string): AssetVariant<FaviconConfig> {
   }
 }
 
+/** Stamp version:1 / clear stale bake flags on any nested paint session. */
+function migrateIconPaintSessions(icon: IconConfig | null | undefined): IconConfig | null | undefined {
+  if (!icon) return icon
+  if (!icon.paintSession) return icon
+  const paintSession = migratePaintSession(icon.paintSession)
+  return { ...icon, paintSession: paintSession ?? null }
+}
+
 /**
  * Deep-merge a logo variant's config with the current defaults.
  * Any field added to LogoConfig/IconConfig after the template was saved will
  * receive its default value, keeping old templates forward-compatible.
  */
 function migrateLogoVariant(v: AssetVariant<LogoConfig>): AssetVariant<LogoConfig> {
-  const cfg = v.config ?? {}
+  const cfg = (v.config ?? {}) as Partial<LogoConfig>
+  const icon = migrateIconPaintSessions({
+    ...DEFAULT_LOGO_CONFIG.icon,
+    ...cfg.icon
+  })!
+  const syncedIcon = migrateIconPaintSessions(cfg.syncedIcon ?? null) ?? null
+  const syncedIconSnapshot = migrateIconPaintSessions(cfg.syncedIconSnapshot ?? null) ?? null
   return {
     ...v,
     config: {
       ...DEFAULT_LOGO_CONFIG,
       ...cfg,
-      icon: {
-        ...DEFAULT_LOGO_CONFIG.icon,
-        ...(cfg as LogoConfig).icon
-      }
+      icon,
+      syncedIcon,
+      syncedIconSnapshot
     }
   }
 }
@@ -300,15 +315,18 @@ function migrateLogoVariant(v: AssetVariant<LogoConfig>): AssetVariant<LogoConfi
  */
 function migrateFaviconVariant(v: AssetVariant<FaviconConfig>): AssetVariant<FaviconConfig> {
   const cfg = (v.config ?? {}) as Partial<FaviconConfig>
+  const content = {
+    ...DEFAULT_FAVICON_CONFIG.content,
+    ...cfg.content
+  }
+  const paintSession = cfg.paintSession ? migratePaintSession(cfg.paintSession) : null
   return {
     ...v,
     config: {
       ...DEFAULT_FAVICON_CONFIG,
       ...cfg,
-      content: {
-        ...DEFAULT_FAVICON_CONFIG.content,
-        ...cfg.content
-      }
+      content,
+      paintSession: paintSession ?? null
     }
   }
 }
