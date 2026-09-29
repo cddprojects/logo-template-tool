@@ -596,9 +596,11 @@ export function paintCompositeResolution(
  * through compositeInnerContentDecor so shadow/border still apply.
  */
 export function shouldSkipLiveLettersForPaintSession(
-  session: PaintSession | null | undefined
+  session: PaintSession | null | undefined,
+  /** Pass resolveSkipLiveInner result so empty-bake fallbacks stay consistent. */
+  skipLiveInner: boolean = shouldSkipLiveInnerForPaintSession(session)
 ): boolean {
-  if (shouldSkipLiveInnerForPaintSession(session)) return true
+  if (skipLiveInner) return true
   if (!session || !sessionHasLinkedOutsideText(session)) return false
   if (session.linkedTextInDecorations) {
     // Only skip live glyphs when decorations can actually draw them.
@@ -623,8 +625,9 @@ function isRasterEditedInner(v: PaintVector): boolean {
 
 /**
  * True when paint can replace live Inner (bake planes / raster-edited stamps).
- * Brush overlay PNGs alone must NOT count — those draw on top of live content;
- * treating them as “drawable” skipped live Inner and left icons empty.
+ * Brush overlay PNGs and combined decorationsPng alone must NOT count — those
+ * draw on top of live content (or only hold letters); treating them as
+ * “drawable Inner” skipped live lucide/shape/image and left icons empty.
  */
 function paintSessionHasDrawableInner(
   session: PaintSession | null | undefined
@@ -632,10 +635,43 @@ function paintSessionHasDrawableInner(
   if (!session) return false
   if (session.contentDecorationsPng) return true
   if (session.contentAboveDecorationsPng) return true
-  if (session.decorationsPng) return true
   // Raster-edited Inner bitmaps live on the vector.
   if ((session.vectors ?? []).some(isRasterEditedInner)) return true
   return false
+}
+
+function sessionHasSeeThroughBakeIntent(session: PaintSession): boolean {
+  return (session.vectors ?? []).some((v) => {
+    if ((v.layer ?? 'content') !== 'content') return false
+    if ((v.visible ?? v.editable ?? true) === false) return false
+    if (v.punchThrough) return false
+    return (
+      !!v.punchEnclosedHole ||
+      !!v.punchMask ||
+      !!v.seeThroughHoleMaskPng ||
+      v.holeMaskMode === 'see-through' ||
+      isTransparentPaintColor(v.color ?? '')
+    )
+  })
+}
+
+async function countPaintPlaneInkSamples(dataUrl: string | undefined): Promise<number> {
+  if (!dataUrl) return 0
+  const img = await loadCachedImage(dataUrl)
+  if (!img || img.naturalWidth < 1 || img.naturalHeight < 1) return 0
+  const c = takeCanvas(img.naturalWidth, img.naturalHeight)
+  try {
+    const ctx = c.getContext('2d')!
+    ctx.drawImage(img, 0, 0)
+    const d = ctx.getImageData(0, 0, c.width, c.height).data
+    let n = 0
+    for (let i = 3; i < d.length; i += 16) {
+      if (d[i] > 8) n++
+    }
+    return n
+  } finally {
+    releaseCanvas(c)
+  }
 }
 
 /** True when Paint baked a warped Inner proxy into decorations — skip live Inner. */
@@ -649,9 +685,9 @@ export function shouldSkipLiveInnerForPaintSession(
   // sessions blank the canvas.
   if ((session.vectors ?? []).some(isRasterEditedInner)) return canDrawPaint
   if (!session.contentBakedInDecorations) return false
-  // No real bake plane → keep live Inner (older templates often set the flag
-  // with nothing to draw, which produced a blank canvas).
-  if (!session.contentDecorationsPng && !session.decorationsPng) return false
+  // Require a content-specific bake plane — combined decorationsPng alone often
+  // only has letters/brush and must not suppress live Inner.
+  if (!session.contentDecorationsPng && !session.contentAboveDecorationsPng) return false
   // After an Inner type switch, contentDecorationsPng was wrongly set to the
   // overlay PNG while contentBakedInDecorations stayed true — live geo/lucide
   // Inner was skipped and disappeared (especially under an Outer shape).
@@ -664,6 +700,29 @@ export function shouldSkipLiveInnerForPaintSession(
   }
   // Bake flag without drawable paint → show live Inner instead of a blank hole.
   return canDrawPaint
+}
+
+/**
+ * Async guard for skip-live: older templates sometimes kept contentBakedInDecorations
+ * with an empty/unloadable content bake plane (icon vanished, title still sized).
+ * See-through bakes may intentionally be empty so Outer shows through — keep skip.
+ */
+export async function resolveSkipLiveInnerForPaintSession(
+  session: PaintSession | null | undefined
+): Promise<boolean> {
+  if (!shouldSkipLiveInnerForPaintSession(session) || !session) return false
+  if ((session.vectors ?? []).some(isRasterEditedInner)) return true
+  if (sessionHasSeeThroughBakeIntent(session)) return true
+  const plane = session.contentDecorationsPng || session.contentAboveDecorationsPng
+  const bakeInk = await countPaintPlaneInkSamples(plane)
+  if (bakeInk < 1) return false
+  // Stale flag: contentDecorations is basically the brush overlay (no baked Inner).
+  // Live lucide/shape/image must still draw underneath.
+  if (session.contentPng && session.contentDecorationsPng) {
+    const overlayInk = await countPaintPlaneInkSamples(session.contentPng)
+    if (overlayInk > 0 && bakeInk <= overlayInk * 1.15) return false
+  }
+  return true
 }
 
 function shouldRenderContentVectorsLive(session: PaintSession): boolean {

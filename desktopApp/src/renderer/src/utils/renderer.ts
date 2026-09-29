@@ -9,7 +9,7 @@ import {
   drawUniversalBrushLayers,
   sessionHasPunchMask,
   sessionUsesLayeredPaint,
-  shouldSkipLiveInnerForPaintSession,
+  resolveSkipLiveInnerForPaintSession,
   shouldSkipLiveLettersForPaintSession
 } from './paintDecorations'
 import { migratePaintSession } from './paintSessionMigrate'
@@ -659,12 +659,14 @@ async function drawIconContentSilhouette(
 /** Normalize paint sessions from older templates before skip-live / layered draw. */
 function withMigratedIconPaint(icon: IconConfig): IconConfig {
   if (!icon.paintSession) return icon
-  return { ...icon, paintSession: migratePaintSession(icon.paintSession) }
+  const migrated = migratePaintSession(icon.paintSession)
+  return migrated ? { ...icon, paintSession: migrated } : icon
 }
 
 function withMigratedFaviconPaint(config: FaviconConfig): FaviconConfig {
   if (!config.paintSession) return config
-  return { ...config, paintSession: migratePaintSession(config.paintSession) }
+  const migrated = migratePaintSession(config.paintSession)
+  return migrated ? { ...config, paintSession: migrated } : config
 }
 
 export async function drawIcon(
@@ -890,8 +892,11 @@ export async function drawIcon(
   const localCx  = (cx - x) * SUPER   // content centre in supersampled space
   const localCy  = (cy - y) * SUPER
   const superArea = areaSize * SUPER   // effective draw area in supersampled space
-  const skipLiveInner = shouldSkipLiveInnerForPaintSession(icon.paintSession)
-  const skipLiveLetters = shouldSkipLiveLettersForPaintSession(icon.paintSession)
+  const skipLiveInner = await resolveSkipLiveInnerForPaintSession(icon.paintSession)
+  const skipLiveLetters = shouldSkipLiveLettersForPaintSession(
+    icon.paintSession,
+    skipLiveInner
+  )
 
   let iconShapeDrawSize = 0
   let iconOtherDrawSize = 0
@@ -1813,8 +1818,11 @@ async function renderFaviconInnerAt(
 ): Promise<void> {
   ctx.clearRect(0, 0, size, size)
   // Linked Paint text is composited via decorationsPng — skip live letters.
-  const skipLiveLetters = shouldSkipLiveLettersForPaintSession(config.paintSession)
-  const skipLiveInner = shouldSkipLiveInnerForPaintSession(config.paintSession)
+  const skipLiveInner = await resolveSkipLiveInnerForPaintSession(config.paintSession)
+  const skipLiveLetters = shouldSkipLiveLettersForPaintSession(
+    config.paintSession,
+    skipLiveInner
+  )
   const layeredPaint = sessionUsesLayeredPaint(config.paintSession)
   const innerPunchMode = sessionHasPunchMask(config.paintSession, 'content')
     ? undefined

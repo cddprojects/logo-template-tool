@@ -102,9 +102,17 @@ export function migratePaintSession(raw: unknown): PaintSession | null {
   }
 
   // Stale bake flags that blank the canvas on older templates.
+  // Overlay-only sessions must never skip live Inner (brush sits on top of live).
+  if (session.paintOverlaysOnly && session.contentBakedInDecorations) {
+    session = {
+      ...session,
+      contentBakedInDecorations: false,
+      linkedTextInDecorations: false
+    }
+  }
   if (
     session.contentBakedInDecorations &&
-    (!session.contentDecorationsPng ||
+    ((!session.contentDecorationsPng && !session.contentAboveDecorationsPng) ||
       (session.contentPng && session.contentDecorationsPng === session.contentPng))
   ) {
     session = {
