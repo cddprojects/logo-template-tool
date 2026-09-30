@@ -69,7 +69,7 @@ import {
   type ImagePreviewRecolor
 } from './Controls'
 import { IconPicker } from './IconPicker'
-import { PreviewStage } from './PreviewStage'
+import { PreviewStage, type PreviewStageHandle } from './PreviewStage'
 import { ApplyToAllBar, type ApplyToAllFlash } from './ApplyToAllBar'
 import { StylePanelResizeHandle } from './StylePanelResizeHandle'
 import { useStylePanelResize } from '../hooks/useStylePanelResize'
@@ -137,6 +137,7 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
   const previewShowingA = useRef(true)
   /** Currently visible preview canvas (for size seeding / export paths). */
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const previewStageRef = useRef<PreviewStageHandle>(null)
   const renderIdRef = useRef(0)
   /** renderId that currently holds the busy lock (0 = free). */
   const logoPreviewBusyId = useRef(0)
@@ -759,6 +760,9 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
               previewShowingA,
               off
             )
+            // Logo bitmaps are full pixel size; sync-fit before the browser paints
+            // so the new canvas never flashes unscaled past the stage edge.
+            previewStageRef.current?.fitNow()
           } catch {
             /* ignore */
           }
@@ -1243,6 +1247,7 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
         {/* Canvas area */}
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
           <PreviewStage
+            ref={previewStageRef}
             className="flex-1"
             surfaceKey={`${versionId}:${activeId}`}
             leadingControls={

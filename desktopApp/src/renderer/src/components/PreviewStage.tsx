@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react'
+import React, { forwardRef, useRef, useState, useEffect, useCallback, useImperativeHandle } from 'react'
 import { Maximize, ZoomIn, ZoomOut } from 'lucide-react'
 
 interface View { scale: number; tx: number; ty: number }
@@ -19,6 +19,16 @@ interface PreviewStageProps {
   surfaceKey?: string | number
 }
 
+/** Imperative API for callers that swap canvas size in the same frame. */
+export interface PreviewStageHandle {
+  /**
+   * Recompute fit and write the CSS transform immediately (before paint).
+   * Logo previews render at full bitmap size; without a sync fit, one frame
+   * shows the unscaled canvas overflowing the stage after a buffer swap.
+   */
+  fitNow: () => void
+}
+
 const ZOOM_MIN = 0.1
 const ZOOM_MAX = 12
 const DEFAULT_STAGE_BG = '#000000'
@@ -29,6 +39,10 @@ function toColorInputValue(hex: string): string {
   return m ? `#${m[1]}` : '#000000'
 }
 
+function viewTransform(v: View): string {
+  return `translate(${v.tx}px, ${v.ty}px) scale(${v.scale})`
+}
+
 /**
  * A pan + zoom viewport for preview content.
  *  • Middle-click drag pans the view.
@@ -37,17 +51,21 @@ function toColorInputValue(hex: string): string {
  * Auto-fits until the user pans/zooms; Default restores fit.
  * Stage colour is preview-only and does not affect the exported image.
  */
-export function PreviewStage({
-  children,
-  background = DEFAULT_STAGE_BG,
-  className,
-  onStageMouseDown,
-  leadingControls,
-  surfaceKey
-}: PreviewStageProps): JSX.Element {
+export const PreviewStage = forwardRef<PreviewStageHandle, PreviewStageProps>(function PreviewStage(
+  {
+    children,
+    background = DEFAULT_STAGE_BG,
+    className,
+    onStageMouseDown,
+    leadingControls,
+    surfaceKey
+  },
+  ref
+): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const [view, setView] = useState<View>({ scale: 1, tx: 0, ty: 0 })
+  const viewRef = useRef<View>(view)
   const [stageBg, setStageBg] = useState(() => toColorInputValue(background))
   /** Only promote the transform layer while interacting — permanent will-change
    *  caches child <canvas> bitmaps in Chromium so cleared frames stay visible. */
@@ -56,6 +74,13 @@ export function PreviewStage({
   const panning = useRef(false)
   const last = useRef({ x: 0, y: 0 })
   const hotTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  const applyView = useCallback((next: View) => {
+    viewRef.current = next
+    const el = contentRef.current
+    if (el) el.style.transform = viewTransform(next)
+    setView(next)
+  }, [])
 
   const markTransformHot = useCallback(() => {
     setTransformHot(true)
@@ -67,6 +92,8 @@ export function PreviewStage({
   }, [])
 
   // Fit content to container (capped at 1× so small icons aren't upscaled).
+  // Writes transform to the DOM immediately so logo buffer swaps never paint
+  // one oversized frame before React state catches up.
   const fit = useCallback(() => {
     const c = containerRef.current
     const el = contentRef.current
@@ -76,8 +103,18 @@ export function PreviewStage({
     const eh = el.offsetHeight
     if (!ew || !eh) return
     const s = clamp(Math.min((c.clientWidth * 0.9) / ew, (c.clientHeight * 0.9) / eh, 1), ZOOM_MIN, ZOOM_MAX)
-    setView({ scale: s, tx: 0, ty: 0 })
-  }, [])
+    applyView({ scale: s, tx: 0, ty: 0 })
+  }, [applyView])
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      fitNow: () => {
+        if (autoFitRef.current) fit()
+      }
+    }),
+    [fit]
+  )
 
   const resetView = useCallback(() => {
     autoFitRef.current = true
@@ -88,12 +125,15 @@ export function PreviewStage({
   const zoomAt = useCallback((factor: number, mx: number, my: number) => {
     autoFitRef.current = false
     markTransformHot()
-    setView((prev) => {
-      const s1 = clamp(prev.scale * factor, ZOOM_MIN, ZOOM_MAX)
-      const r = s1 / prev.scale
-      return { scale: s1, tx: mx - r * (mx - prev.tx), ty: my - r * (my - prev.ty) }
+    const prev = viewRef.current
+    const s1 = clamp(prev.scale * factor, ZOOM_MIN, ZOOM_MAX)
+    const r = s1 / prev.scale
+    applyView({
+      scale: s1,
+      tx: mx - r * (mx - prev.tx),
+      ty: my - r * (my - prev.ty)
     })
-  }, [markTransformHot])
+  }, [applyView, markTransformHot])
 
   const zoomButton = useCallback((factor: number) => zoomAt(factor, 0, 0), [zoomAt])
 
@@ -110,9 +150,8 @@ export function PreviewStage({
   }, [fit])
 
   // Version/variant changes replace child canvas pixels under a CSS transform.
-  // Drop layer promotion so Chromium picks up the new bitmap; ResizeObserver
-  // already re-fits when the visible canvas intrinsic size changes — do not
-  // fit() here (that scaled the still-old frame and looked like a flash).
+  // Drop layer promotion so Chromium picks up the new bitmap; callers that
+  // swap logo canvases should also call fitNow() in the same turn.
   useEffect(() => {
     if (surfaceKey === undefined) return
     setTransformHot(false)
@@ -162,7 +201,8 @@ export function PreviewStage({
       const dy = e.clientY - last.current.y
       last.current = { x: e.clientX, y: e.clientY }
       markTransformHot()
-      setView((prev) => ({ ...prev, tx: prev.tx + dx, ty: prev.ty + dy }))
+      const prev = viewRef.current
+      applyView({ ...prev, tx: prev.tx + dx, ty: prev.ty + dy })
     }
     const onUp = () => { panning.current = false }
     window.addEventListener('mousemove', onMove)
@@ -172,7 +212,7 @@ export function PreviewStage({
       window.removeEventListener('mouseup', onUp)
       if (hotTimerRef.current) clearTimeout(hotTimerRef.current)
     }
-  }, [markTransformHot])
+  }, [applyView, markTransformHot])
 
   return (
     <div
@@ -189,7 +229,7 @@ export function PreviewStage({
           <div
             ref={contentRef}
             style={{
-              transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`,
+              transform: viewTransform(view),
               transformOrigin: 'center center',
               ...(transformHot ? { willChange: 'transform' as const } : null)
             }}
@@ -255,4 +295,4 @@ export function PreviewStage({
       </div>
     </div>
   )
-}
+})
