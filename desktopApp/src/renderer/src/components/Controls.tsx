@@ -828,6 +828,8 @@ interface ColorRowProps {
   hideInlinePunch?: boolean
   /** Swatch + hex only, no label column. Use when the row already has its own label. */
   bare?: boolean
+  /** Hide the hex / gradient text field. The swatch still opens the colour window. */
+  swatchOnly?: boolean
 }
 
 export function ColorRow({
@@ -840,7 +842,8 @@ export function ColorRow({
   onLabelClick,
   labelActive,
   hideInlinePunch = false,
-  bare = false
+  bare = false,
+  swatchOnly = false
 }: ColorRowProps): JSX.Element {
   const [open, setOpen] = React.useState(false)
   const [anchorRect, setAnchorRect] = React.useState<DOMRect | null>(null)
@@ -906,7 +909,7 @@ export function ColorRow({
   ) : undefined
 
   const controls = (
-      <div className="flex flex-col gap-1.5 min-w-0 w-full">
+      <div className={`flex flex-col gap-1.5 min-w-0 ${swatchOnly ? 'w-auto shrink-0' : 'w-full'}`}>
         <div className="flex items-center gap-2 min-w-0 w-full">
           {/* Swatch — shows gradient or solid color, opens popup */}
           <button
@@ -917,7 +920,7 @@ export function ColorRow({
             title={onLabelClick ? `Use ${label}` : 'Click to edit color'}
           />
 
-          {isGrad ? (
+          {!swatchOnly && (isGrad ? (
             /* Gradient: show a clickable label */
             <button
               onClick={onLabelClick ?? openPopup}
@@ -947,7 +950,7 @@ export function ColorRow({
               className="flex-1 min-w-0 w-0 px-2 py-1 rounded bg-surface3 border border-border text-xs text-text font-mono focus:outline-none focus:border-accent"
               maxLength={9}
             />
-          )}
+          ))}
         </div>
 
         {showPunchToggle && punchCtx && (

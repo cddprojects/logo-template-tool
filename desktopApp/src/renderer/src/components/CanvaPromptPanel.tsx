@@ -144,14 +144,13 @@ export function CanvaPromptPanel({
             None
           </button>
           {secondaryEnabled ? (
-            <div className="flex-1 min-w-0">
-              <ColorRow
-                bare
-                label="Secondary color"
-                value={content.canvaSecondaryColor || '#ffffff'}
-                onChange={(v) => onChange({ canvaSecondaryColor: v })}
-              />
-            </div>
+            <ColorRow
+              bare
+              swatchOnly
+              label="Secondary color"
+              value={content.canvaSecondaryColor || '#ffffff'}
+              onChange={(v) => onChange({ canvaSecondaryColor: v })}
+            />
           ) : (
             <button
               type="button"
