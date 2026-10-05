@@ -1,5 +1,23 @@
+/**
+ * App.tsx — top-level UI shell (shared by desktop Electron and web).
+ *
+ * Think of this file as the “frame” around the editors:
+ *   • Left: Sidebar (list of versions, import/export templates)
+ *   • Center: LogoEditor or FaviconEditor for the selected version
+ *   • Chrome: title bar, undo/redo, history, settings, group export
+ *
+ * It does NOT draw logos itself. Drawing lives in utils/renderer.ts.
+ * It does NOT own the version list forever — useVersions loads/saves that.
+ *
+ * window.api is provided by:
+ *   • Electron preload (desktop), or
+ *   • webApp/src/platform/api.ts (browser polyfill)
+ *
+ * Start reading: READING_GUIDE.ts in this folder for the full map.
+ */
 import React, { useState, useEffect, useCallback, useRef, Component, Suspense } from 'react'
-import { ImageIcon, Smile, Pencil, LayoutGrid, Settings, AlertTriangle, RefreshCw, Undo2, Redo2, FolderDown, X, History, Download } from './components/Icons'
+import { ImageIcon, Smile, Pencil, LayoutGrid, Settings, AlertTriangle, RefreshCw, Undo2, Redo2, FolderDown, X, History, Download, Layers } from './components/Icons'
+import { useNarrowViewport } from './hooks/useNarrowViewport'
 import { TitleBar } from './components/TitleBar'
 import { Sidebar } from './components/Sidebar'
 import { HistoryPanel } from './components/HistoryPanel'
@@ -15,12 +33,14 @@ import { readImageFile } from './utils/imageFit'
 import { isBrowserWebBuild, isChunkLoadError, chunkReloadsExhausted, lazyWithRetry } from './utils/lazyWithRetry'
 import { installHorizontalWheelScroll } from './utils/horizontalWheelScroll'
 
-// Lazy-load the heavy editors so they don't block the initial paint.
+// Lazy-load the heavy editors so the first screen paints quickly.
+// Paint + canvas code is large; only download/parse it when needed.
 const LogoEditor = lazyWithRetry(() => import('./components/LogoEditor').then((m) => ({ default: m.LogoEditor })))
 const FaviconEditor = lazyWithRetry(() => import('./components/FaviconEditor').then((m) => ({ default: m.FaviconEditor })))
 
 type Tab = 'logo' | 'favicon'
 
+/** Types for the Electron/web bridge that lives on window.api. */
 declare global {
   interface Window {
     api: {
@@ -36,6 +56,8 @@ declare global {
 }
 
 // ── Error boundary ────────────────────────────────────────────────────────────
+// If LogoEditor / FaviconEditor throw while rendering, show a friendly panel
+// instead of a blank white screen. On web, also detect “stale chunk after deploy”.
 interface EBState { error: Error | null }
 class EditorErrorBoundary extends Component<{ children: React.ReactNode; onReset: () => void }, EBState> {
   state: EBState = { error: null }
@@ -82,6 +104,7 @@ class EditorErrorBoundary extends Component<{ children: React.ReactNode; onReset
 }
 
 export default function App(): JSX.Element {
+  // ── Toasts (small status messages top/bottom) ─────────────────────────────
   type ToastType = 'error' | 'success' | 'info'
   const [toast, setToast] = useState<{ msg: string; type: ToastType; id: number } | null>(null)
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -92,6 +115,8 @@ export default function App(): JSX.Element {
     toastTimerRef.current = setTimeout(() => setToast(null), durationMs)
   }, [])
 
+  // ── Version list + undo (all persisted project data) ──────────────────────
+  // versions = every project in the sidebar. updateVersion writes one of them.
   const {
     versions, loaded, createVersion, importImageVersion, importTemplateVersion, upgradeVersionsToCurrentSchema, updateVersion,
     deleteVersions, duplicateVersion, reorderVersions,
@@ -101,6 +126,7 @@ export default function App(): JSX.Element {
     onPersistError: (message) => showToast(message, 'error')
   })
 
+  // Which version is open in the center editors right now.
   const [selectedId, setSelectedId] = useState<string | null>(() => versions[0]?.id ?? null)
 
   // Auto-select the first version once data finishes loading.
@@ -139,8 +165,8 @@ export default function App(): JSX.Element {
   // Mouse wheel → horizontal scroll on overflow-x strips (paint toolbars, etc.).
   useEffect(() => installHorizontalWheelScroll(), [])
 
-  // Bridge: the REST API server (main process) asks the renderer to draw to a
-  // Canvas (DOM only), then sends the result back over IPC.
+  // Bridge: desktop can expose a small local HTTP API. The main process cannot
+  // draw on a <canvas>, so it asks THIS renderer to render, then ships PNG/SVG back.
   useEffect(() => {
     window.api.onApiRenderRequest(async (raw) => {
       const { requestId, type, config, options } = raw as {
@@ -204,6 +230,7 @@ export default function App(): JSX.Element {
   // Register once on mount — the handler calls window.api which is stable
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+  // ── UI chrome state (modals, which tab, web vs desktop) ───────────────────
   const [activeTab, setActiveTab] = useState<Tab>('logo')
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [editingVersion, setEditingVersion] = useState<Version | null>(null)
@@ -215,7 +242,11 @@ export default function App(): JSX.Element {
   const [groupExporting, setGroupExporting] = useState(false)
   const [showGroupExport, setShowGroupExport] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
+  const narrow = useNarrowViewport()
+  const [versionsOpen, setVersionsOpen] = useState(false)
 
+  // Export every logo/favicon variant of the selected version in one go
+  // (zip on web, folder on desktop). Heavy imports load only when used.
   const handleGroupExport = useCallback(async (opts: GroupExportOptions) => {
     // Use the ref so we never read `selected` before it is declared below.
     const sel = selectedRef.current
@@ -349,6 +380,7 @@ export default function App(): JSX.Element {
   const selectedRef = useRef(selected)
   selectedRef.current = selected
 
+  // ── Version CRUD helpers (sidebar buttons / modals) ───────────────────────
   const handleCreate = (name: string, description: string) => {
     const v = createVersion(name, description)
     setSelectedId(v.id)
@@ -384,6 +416,7 @@ export default function App(): JSX.Element {
     if (copy) setSelectedId(copy.id)
   }
 
+  // ── Drag-and-drop .igtemplate onto the app window ─────────────────────────
   const [templateDropActive, setTemplateDropActive] = useState(false)
 
   const handleAppDragOver = (e: React.DragEvent) => {
@@ -427,9 +460,9 @@ export default function App(): JSX.Element {
     }).catch(() => {})
   }
 
-  // useCallback + selectedRef: stable identity that never changes after mount.
-  // Combined with the versionsRef fix in useVersions, updateVersion is also
-  // stable, so these handlers never change → editors never get new onChange props.
+  // Editors call these when any slider/text field changes. We write back into
+  // the selected version. selectedRef avoids recreating these callbacks every
+  // render (which would force both editors to re-render on every tick).
   const handleLogosChange = useCallback((logos: AssetVariant<LogoConfig>[]) => {
     const sel = selectedRef.current
     if (sel) updateVersion(sel.id, { logos })
@@ -440,6 +473,10 @@ export default function App(): JSX.Element {
     if (sel) updateVersion(sel.id, { favicons })
   }, [updateVersion])
 
+  // ── Layout ────────────────────────────────────────────────────────────────
+  // TitleBar → Sidebar | (tabs + Logo/Favicon editors).
+  // Both editors stay mounted; CSS hides the inactive tab so switching
+  // Logo ↔ Favicon does not tear down preview/paint state.
   return (
     <div className="flex flex-col h-screen bg-bg text-text overflow-hidden">
       <TitleBar />
@@ -458,19 +495,34 @@ export default function App(): JSX.Element {
           onDragLeave={handleAppDragLeave}
           onDrop={(e) => { void handleAppDrop(e) }}
         >
-          {/* Sidebar */}
-          <Sidebar
-            versions={versions}
-            selectedId={selectedId}
-            onSelect={setSelectedId}
-            onCreate={() => setShowCreateModal(true)}
-            onImport={handleImport}
-            onDelete={handleDelete}
-            onDuplicate={handleDuplicate}
-            onReorder={reorderVersions}
-            onUpgradeVersions={upgradeVersionsToCurrentSchema}
-            templateDropActive={templateDropActive}
-          />
+          {/* Versions list. On a narrow screen it is a drawer you can close. */}
+          {narrow && versionsOpen && (
+            <button
+              type="button"
+              aria-label="Close versions"
+              className="fixed inset-0 z-40 bg-black/50"
+              onClick={() => setVersionsOpen(false)}
+            />
+          )}
+          {(!narrow || versionsOpen) && (
+            <div className={narrow ? 'fixed inset-y-0 left-0 z-50 flex h-full shadow-2xl' : 'flex h-full shrink-0'}>
+              <Sidebar
+                versions={versions}
+                selectedId={selectedId}
+                onSelect={(id) => {
+                  setSelectedId(id)
+                  if (narrow) setVersionsOpen(false)
+                }}
+                onCreate={() => setShowCreateModal(true)}
+                onImport={handleImport}
+                onDelete={handleDelete}
+                onDuplicate={handleDuplicate}
+                onReorder={reorderVersions}
+                onUpgradeVersions={upgradeVersionsToCurrentSchema}
+                templateDropActive={templateDropActive}
+              />
+            </div>
+          )}
           <input
             ref={importInputRef}
             type="file"
@@ -484,12 +536,24 @@ export default function App(): JSX.Element {
             {selected ? (
               <>
                 {/* Top bar with tabs */}
-                <div className="flex items-center gap-0 px-4 border-b border-border bg-surface shrink-0">
+                <div className="flex items-center gap-0 px-2 sm:px-4 border-b border-border bg-surface shrink-0 min-w-0 overflow-x-auto">
+                  {narrow && (
+                    <button
+                      type="button"
+                      onClick={() => setVersionsOpen((open) => !open)}
+                      title={versionsOpen ? 'Hide versions' : 'Show versions'}
+                      aria-expanded={versionsOpen}
+                      className="mr-1 shrink-0 h-8 px-2 rounded-lg flex items-center gap-1.5 text-xs font-medium text-muted hover:text-text hover:bg-surface3 transition-colors"
+                    >
+                      <Layers size={14} />
+                      Versions
+                    </button>
+                  )}
                   {/* Version info */}
-                  <div className="flex items-center gap-2 mr-6 py-3">
-                    <span className="text-sm font-semibold text-text">{selected.name}</span>
+                  <div className="flex items-center gap-2 mr-3 sm:mr-6 py-3 min-w-0">
+                    <span className="text-sm font-semibold text-text truncate">{selected.name}</span>
                     {selected.description && (
-                      <span className="text-xs text-muted">{selected.description}</span>
+                      <span className="text-xs text-muted truncate hidden sm:inline">{selected.description}</span>
                     )}
                     <button
                       onClick={() => setEditingVersion(selected)}
@@ -515,7 +579,7 @@ export default function App(): JSX.Element {
                   />
 
                   {/* Undo / Redo + Group Export + Settings */}
-                  <div className="ml-auto flex items-center gap-1 relative">
+                  <div className="ml-auto flex items-center gap-1 relative shrink-0">
                     <button
                       onClick={() => setShowGroupExport(true)}
                       disabled={!selected || groupExporting}
@@ -613,7 +677,10 @@ export default function App(): JSX.Element {
                 </EditorErrorBoundary>
               </>
             ) : (
-              <EmptyState onNew={() => setShowCreateModal(true)} />
+              <EmptyState
+                onNew={() => setShowCreateModal(true)}
+                onShowVersions={narrow ? () => setVersionsOpen(true) : undefined}
+              />
             )}
           </div>
         </div>
@@ -680,7 +747,7 @@ function Tab({ active, icon, label, onClick }: TabProps): JSX.Element {
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
+      className={`flex items-center gap-1.5 px-3 sm:px-4 py-3 text-sm font-medium border-b-2 transition-colors shrink-0 ${
         active
           ? 'border-accent text-accent'
           : 'border-transparent text-muted hover:text-text-dim hover:border-border'
@@ -692,7 +759,7 @@ function Tab({ active, icon, label, onClick }: TabProps): JSX.Element {
   )
 }
 
-function EmptyState({ onNew }: { onNew: () => void }): JSX.Element {
+function EmptyState({ onNew, onShowVersions }: { onNew: () => void; onShowVersions?: () => void }): JSX.Element {
   return (
     <div className="flex flex-col items-center justify-center flex-1 gap-5 text-center p-8">
       <div className="w-16 h-16 rounded-2xl bg-surface2 border border-border flex items-center justify-center">
@@ -704,12 +771,23 @@ function EmptyState({ onNew }: { onNew: () => void }): JSX.Element {
           Create a version to start designing your logo and favicon with consistent styles.
         </p>
       </div>
-      <button
-        onClick={onNew}
-        className="px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-accent hover:bg-accent-hover transition-colors"
-      >
-        Create First Version
-      </button>
+      <div className="flex items-center gap-2">
+        {onShowVersions && (
+          <button
+            type="button"
+            onClick={onShowVersions}
+            className="px-5 py-2.5 rounded-xl text-sm font-semibold text-text bg-surface2 border border-border hover:bg-surface3 transition-colors"
+          >
+            Versions
+          </button>
+        )}
+        <button
+          onClick={onNew}
+          className="px-5 py-2.5 rounded-xl text-sm font-semibold text-white bg-accent hover:bg-accent-hover transition-colors"
+        >
+          Create First Version
+        </button>
+      </div>
     </div>
   )
 }

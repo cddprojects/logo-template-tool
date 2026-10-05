@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { Sparkles, Loader, Info, ArrowLeftRight } from 'lucide-react'
 import { generateAIImage, removeImageBackground } from '../utils/iconUtils'
 import { fitRasterDataUrl } from '../utils/imageFit'
@@ -825,6 +826,8 @@ interface ColorRowProps {
   labelActive?: boolean
   /** Opacity and See-through / Punch stay inside the colour window. */
   hideInlinePunch?: boolean
+  /** Swatch + hex only, no label column. Use when the row already has its own label. */
+  bare?: boolean
 }
 
 export function ColorRow({
@@ -836,7 +839,8 @@ export function ColorRow({
   onSwapClick,
   onLabelClick,
   labelActive,
-  hideInlinePunch = false
+  hideInlinePunch = false,
+  bare = false
 }: ColorRowProps): JSX.Element {
   const [open, setOpen] = React.useState(false)
   const [anchorRect, setAnchorRect] = React.useState<DOMRect | null>(null)
@@ -901,8 +905,7 @@ export function ColorRow({
     </RowInfo>
   ) : undefined
 
-  return (
-    <Row label={label} leading={swapLeading} info={punchInfo} onLabelClick={onLabelClick} labelActive={labelActive}>
+  const controls = (
       <div className="flex flex-col gap-1.5 min-w-0 w-full">
         <div className="flex items-center gap-2 min-w-0 w-full">
           {/* Swatch — shows gradient or solid color, opens popup */}
@@ -958,16 +961,24 @@ export function ColorRow({
           />
         )}
 
-        {open && anchorRect && (
+        {open && anchorRect && createPortal(
           <ColorPickerPopup
             value={effectiveValue}
             onChange={emit}
             onClose={() => setOpen(false)}
             rect={anchorRect}
             solidOnly={solidOnly}
-          />
+          />,
+          document.body
         )}
       </div>
+  )
+
+  if (bare) return controls
+
+  return (
+    <Row label={label} leading={swapLeading} info={punchInfo} onLabelClick={onLabelClick} labelActive={labelActive}>
+      {controls}
     </Row>
   )
 }

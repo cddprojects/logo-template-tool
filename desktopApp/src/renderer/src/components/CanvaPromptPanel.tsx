@@ -130,7 +130,7 @@ export function CanvaPromptPanel({
         onChange={(v) => onChange({ canvaPrimaryColor: v })}
       />
       <div className="flex items-center gap-2 py-1.5 min-w-0">
-        <label className="text-xs text-muted w-20 min-w-[5rem] shrink-0">Secondary</label>
+        <label className="text-xs text-muted shrink-0 basis-[9rem] min-w-[9rem] max-w-[58%] truncate">Secondary</label>
         <div className="flex flex-1 min-w-0 items-center gap-1.5">
           <button
             type="button"
@@ -144,11 +144,14 @@ export function CanvaPromptPanel({
             None
           </button>
           {secondaryEnabled ? (
-            <ColorRow
-              label=""
-              value={content.canvaSecondaryColor}
-              onChange={(v) => onChange({ canvaSecondaryColor: v })}
-            />
+            <div className="flex-1 min-w-0">
+              <ColorRow
+                bare
+                label="Secondary color"
+                value={content.canvaSecondaryColor || '#ffffff'}
+                onChange={(v) => onChange({ canvaSecondaryColor: v })}
+              />
+            </div>
           ) : (
             <button
               type="button"

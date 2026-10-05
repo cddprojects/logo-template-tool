@@ -1,6 +1,18 @@
 /**
- * Forward-compat migration for versions / .igtemplate payloads.
- * Safe for renderer + Electron main (no DOM / React / paintDecorations).
+ * versionMigrate — make OLD saved JSON work with today’s field list.
+ *
+ * When we add a new setting (e.g. letterSpacing), old .igtemplate / versions.json
+ * files don’t have it. On load we deep-merge each logo/favicon with
+ * DEFAULT_LOGO_CONFIG / DEFAULT_FAVICON_CONFIG so missing keys get safe defaults.
+ *
+ * Paint sessions are migrated additively (paintSessionMigrate) — we fill gaps
+ * and stamp version:1, but we never clear bake flags. Clearing those flags once
+ * caused Outer+Inner to be punched away on old templates.
+ *
+ * Used by: useVersions (load), template “Update all”, Electron main when rewriting
+ * .igtemplate files, web updateAllTemplates.
+ *
+ * Safe to import from Electron main — no React, no canvas, no DOM.
  */
 import type {
   AssetVariant,

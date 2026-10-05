@@ -1,3 +1,17 @@
+/**
+ * PreviewStage — pan/zoom “stage” around the preview artwork.
+ *
+ * Children (usually a canvas) sit inside a div that we CSS-transform:
+ *   translate(tx, ty) scale(s)
+ *
+ * Auto-fit: until the user pans/zooms, we shrink content to ~90% of the view
+ * (never scale above 1×). fitNow() writes the transform to the DOM immediately
+ * — LogoEditor calls this right after swapping preview buffers so the huge
+ * bitmap never flashes at 100% for a frame.
+ *
+ * Middle-drag = pan. Ctrl+wheel (or right-button+wheel) = zoom toward cursor.
+ * Stage background color is preview-only (not exported).
+ */
 import React, { forwardRef, useRef, useState, useEffect, useCallback, useImperativeHandle } from 'react'
 import { Maximize, ZoomIn, ZoomOut } from 'lucide-react'
 

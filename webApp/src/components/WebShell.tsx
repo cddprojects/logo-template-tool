@@ -1,3 +1,15 @@
+/**
+ * WebShell — wrapper around the shared App for the browser build.
+ *
+ * Flow:
+ *   1. Wait for auth (fetchMe). Show LoginScreen if logged out.
+ *   2. Wait for workspace to hydrate (waitForWorkspace) so we don’t overwrite
+ *      server data with an empty local save.
+ *   3. Render <App /> from @renderer — same UI as desktop.
+ *   4. Host web-only modals: template library, admin users, save-to-library.
+ *
+ * Desktop skips this file entirely (Electron loads App via renderer main.tsx).
+ */
 import React, { useEffect, useState } from 'react'
 import App from '@renderer/App'
 import type { Version } from '@renderer/types'

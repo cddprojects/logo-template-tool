@@ -1,3 +1,22 @@
+/**
+ * useVersions — the “database” for the UI.
+ *
+ * Responsibilities (in plain terms):
+ *   1. LOAD  all versions when the app starts (from disk or web server).
+ *   2. SAVE  whenever something changes (debounced so sliders don’t spam disk).
+ *   3. UNDO / REDO  by keeping snapshots of the whole versions array.
+ *   4. CREATE / IMPORT / DELETE / DUPLICATE helpers for the sidebar.
+ *   5. MIGRATE old saved JSON so new fields get defaults (via versionMigrate).
+ *
+ * Important design choice: callbacks use versionsRef.current instead of closing
+ * over `versions` state. That keeps function identities stable so LogoEditor
+ * does not re-render on every unrelated parent update.
+ *
+ * Desktop save → window.api.saveVersions → writes versions.json
+ * Web save     → same API shape → PUT workspace to the server
+ *
+ * See READING_GUIDE.ts for where this fits in the whole app.
+ */
 import { useState, useCallback, useEffect, useRef } from 'react'
 
 const MAX_HISTORY = 50
@@ -343,7 +362,8 @@ function parsePersistedHistory(raw: unknown): PersistedUndoHistory | null {
 }
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
-
+// Public API used by App.tsx. Internally: load → migrate → setState,
+// then commit()/save() for every edit, with undo snapshots on the side.
 export function useVersions(options?: {
   onPersistError?: (message: string) => void
 }) {

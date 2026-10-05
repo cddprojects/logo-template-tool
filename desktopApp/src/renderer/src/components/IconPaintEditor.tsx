@@ -1,3 +1,15 @@
+/**
+ * IconPaintEditor — full-screen Paint mode for logo icons / favicons.
+ *
+ * You open this from Logo or Favicon “Edit”. It receives baked PNG bases for
+ * Outer and Inner, plus any existing paintSession. While open you can:
+ *   brush, erase, fill, shapes, text objects, marquee, punch / see-through, …
+ * On Save it returns a PaintSaveResult (PNGs + vectors + flags) which the
+ * parent merges back into icon.paintSession or favicon.paintSession.
+ *
+ * This file is very large. Search for tool names or “Save” when navigating.
+ * Live preview outside Paint is utils/renderer + paintDecorations — not here.
+ */
 import React, {
   useRef,
   useEffect,

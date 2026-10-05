@@ -1,3 +1,14 @@
+/**
+ * Web entry — runs in the browser instead of Electron.
+ *
+ * Order matters:
+ *   1. installWebApi() — invent window.api so shared App.tsx can call the same
+ *      methods as desktop (saveVersions, export, templates, …) but against HTTP.
+ *   2. Mount WebShell — login gate + template library modals + shared <App />.
+ *   3. Hide splash; handle Vite “chunk missing after deploy” with one reload.
+ *
+ * Shared UI code lives under desktopApp/src/renderer (imported as @renderer).
+ */
 import { installWebApi } from './platform/api'
 
 // Must run before the shared App touches window.api.

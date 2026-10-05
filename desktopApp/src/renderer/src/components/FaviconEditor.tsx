@@ -1,3 +1,16 @@
+/**
+ * FaviconEditor — edit one version’s favicon variants (square icons).
+ *
+ * Similar job to LogoEditor, but the “canvas” is always a square with:
+ *   Outer = background shape (square / circle / shield / …)
+ *   Inner = letters / shape / lucide / SVG / image
+ *
+ * When a logo is linked to this favicon by label, logo changes here update
+ * that logo’s synced preview (and vice versa from LogoEditor).
+ *
+ * Preview uses fixed CSS width/height (previewSize), so it does not get the
+ * “oversized flash” logos can get from full-pixel bitmaps.
+ */
 import React, { useRef, useEffect, useCallback, useState, useMemo, Suspense } from 'react'
 import { Download, FileImage, FileCode2, RefreshCw, CheckCircle2, Plus, X, Pencil, Upload, ClipboardCopy, ClipboardPaste, GripVertical, Paintbrush, ArrowDownToLine } from 'lucide-react'
 import type { FaviconConfig, AssetVariant, PaintSaveResult, PaintVector, PaintLayerId, PaintSession, FaviconOuterShape, OuterShapeCategory, PaintSaveTargets, LogoConfig, IconConfig, OutsideContentSettings } from '../types'
@@ -11,6 +24,7 @@ import { IconPicker } from './IconPicker'
 import { PreviewStage } from './PreviewStage'
 import { StylePanelResizeHandle } from './StylePanelResizeHandle'
 import { useStylePanelResize } from '../hooks/useStylePanelResize'
+import { useNarrowViewport } from '../hooks/useNarrowViewport'
 import { lazyWithRetry } from '../utils/lazyWithRetry'
 
 /** Paint editor is large — load only when Edit opens. */
@@ -178,6 +192,7 @@ export function FaviconEditor({
   const [exportNameStyle, setExportNameStyle] = useState<ExportNameStyle>(() => getStoredExportNameStyle())
   const [previewSize, setPreviewSize] = useState(512)
   const { panelWidth, panelRef, onResizeStart } = useStylePanelResize()
+  const narrow = useNarrowViewport()
 
   // Keep name-style in sync with logo editor (shared localStorage preference).
   useEffect(() => {
@@ -1060,10 +1075,10 @@ export function FaviconEditor({
         )}
       </div>
 
-      {/* Editor body */}
-      <div className="flex flex-1 min-h-0 overflow-hidden">
+      {/* Editor body — side by side on desktop; canvas on top and settings below on a phone. */}
+      <div className={`flex flex-1 min-h-0 overflow-hidden ${narrow ? 'flex-col' : ''}`}>
         {/* Canvas */}
-        <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+        <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
           <PreviewStage
             className="flex-1"
             surfaceKey={`${versionId}:${activeId}:${previewSize}`}
@@ -1135,13 +1150,17 @@ export function FaviconEditor({
           </div>
         </div>
 
-        <StylePanelResizeHandle panelWidth={panelWidth} onMouseDown={onResizeStart} />
+        {!narrow && <StylePanelResizeHandle panelWidth={panelWidth} onMouseDown={onResizeStart} />}
 
         {/* Style panel */}
         <div
           ref={panelRef}
-          className="shrink-0 min-h-0 bg-surface border-l border-border overflow-y-auto overflow-x-hidden"
-          style={{ width: panelWidth }}
+          className={
+            narrow
+              ? 'shrink-0 w-full bg-surface border-t border-border overflow-y-auto overflow-x-hidden'
+              : 'shrink-0 min-h-0 bg-surface border-l border-border overflow-y-auto overflow-x-hidden'
+          }
+          style={narrow ? { height: '30dvh' } : { width: panelWidth }}
         >
           <Section title="Container Shape">
             <div className="py-1.5">

@@ -1,3 +1,10 @@
+/**
+ * templateFile — read/write .igtemplate JSON (portable project snippets).
+ *
+ * File shape: { schemaVersion: 1, name, description, logos, favicons }
+ * buildIgTemplatePayload always runs migrateIgTemplatePayload so exports are
+ * on the current schema (all default fields filled in).
+ */
 import { migrateIgTemplatePayload } from './versionMigrate'
 
 export function isIgTemplateFile(file: File): boolean {

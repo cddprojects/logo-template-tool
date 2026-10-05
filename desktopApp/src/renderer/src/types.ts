@@ -1,3 +1,16 @@
+/**
+ * types.ts — shared TypeScript shapes + default configs.
+ *
+ * If you wonder “what fields does a logo have?”, start here:
+ *   LogoConfig, FaviconConfig, IconConfig, PaintSession, Version, …
+ *
+ * DEFAULT_LOGO_CONFIG / DEFAULT_FAVICON_CONFIG / DEFAULT_ICON_CONFIG are the
+ * templates used when creating new variants and when migrating old files
+ * (versionMigrate deep-merges saved JSON on top of these defaults).
+ *
+ * This file is types + constants only — no React, no drawing.
+ */
+
 export type ShapeType =
   | 'circle'
   | 'square'

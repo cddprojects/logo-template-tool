@@ -1,3 +1,17 @@
+/**
+ * canvasPool — small helpers for HTMLCanvasElement reuse and preview present.
+ *
+ * presentPreviewCanvas (dual buffer):
+ *   Always paint onto the HIDDEN canvas, then swap which one is visible.
+ *   That way we never clear the pixels the user is looking at (no blank flash).
+ *
+ * blitPreviewCanvas:
+ *   Older single-canvas path. Same-size uses composite 'copy'; size change still
+ *   reallocates (can flash) — prefer presentPreviewCanvas for previews.
+ *
+ * takeCanvas / releaseCanvas / ensureCanvas / reuseCanvas:
+ *   Pool canvases for hot paint/render paths so we allocate less garbage.
+ */
 /** Reusable 2D canvases so hot paths do not allocate a new bitmap every frame. */
 const pool: HTMLCanvasElement[] = []
 const MAX_POOL = 24

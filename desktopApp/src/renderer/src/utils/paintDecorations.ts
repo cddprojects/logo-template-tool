@@ -1,3 +1,17 @@
+/**
+ * paintDecorations — draw saved Paint layers onto a preview/export canvas.
+ *
+ * After renderer draws live Outer + Inner, this module may:
+ *   • Stamp decoration PNGs (brush strokes flattened, objects, etc.)
+ *   • Apply punch masks (destination-out holes)
+ *   • Draw “universal brush” vectors that stay above everything
+ *
+ * shouldSkipLiveInnerForPaintSession decides when NOT to draw live Inner
+ * because Paint already baked a replacement (see-through / reshape / …).
+ * Getting that wrong either blanks Outer+Inner or double-draws content.
+ *
+ * migratePaintSession here wraps the leaf migrate + optional proxy rewrite.
+ */
 import type { OutsideTextSettings, PaintLayerId, PaintSession, PaintVector } from '../types'
 import { loadCachedImage } from './iconUtils'
 import {

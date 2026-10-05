@@ -1,3 +1,20 @@
+/**
+ * Electron MAIN process — runs in Node, not in the browser page.
+ *
+ * Jobs:
+ *   • Create the BrowserWindow and load the React renderer
+ *   • Own the data folder (versions.json, templates/, undo history)
+ *   • IPC handlers: save/load, export files, fonts, Iconify, AI image, etc.
+ *   • Watch the templates folder and auto-import new .igtemplate files
+ *   • Optional local HTTP API that asks the renderer to draw (canvas is DOM-only)
+ *
+ * The UI you click is the renderer. This file is the “operating system glue”.
+ * Preload (src/preload/index.ts) exposes a safe slice of IPC as window.api.
+ *
+ * Data paths:
+ *   Dev  → <project>/data/
+ *   Prod → %APPDATA%/Image Generator/data/  (survives reinstalls)
+ */
 import { app, shell, BrowserWindow, ipcMain, dialog, session, clipboard, nativeImage } from 'electron'
 import { join, dirname, basename } from 'path'
 import { writeFileSync, readFileSync, mkdirSync, existsSync, readdirSync, watch, copyFileSync, mkdtempSync, rmSync } from 'fs'

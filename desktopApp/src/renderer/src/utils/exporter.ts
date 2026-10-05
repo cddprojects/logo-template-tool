@@ -1,3 +1,10 @@
+/**
+ * exporter — turn the current logo/favicon config into downloadable files.
+ *
+ * Calls renderer (renderLogo / renderFavicon / SVG generators), then
+ * window.api.exportFile / exportIco (desktop save dialog or web download).
+ * Also helpers for group-export filenames and ICO packing.
+ */
 import type { LogoConfig, FaviconConfig } from '../types'
 import { renderLogo, renderFavicon, generateLogoSvg, generateFaviconSvg } from './renderer'
 

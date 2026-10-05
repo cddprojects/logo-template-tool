@@ -1,3 +1,24 @@
+/**
+ * renderer.ts — turn LogoConfig / FaviconConfig / IconConfig into pixels (or SVG).
+ *
+ * This is the drawing engine. Editors never stroke paths themselves for the
+ * main preview; they call:
+ *   renderLogo(canvas, config, scale, highQuality?, faviconIconSource?)
+ *   renderFavicon(canvas, config)
+ *   drawIcon(ctx, icon, x, y, size)   — used inside logos and paint bake
+ *
+ * Rough pipeline for a logo:
+ *   1. Measure title + subtitle text (with letter-spacing)
+ *   2. Decide canvas size from icon + text + gaps + shadow padding
+ *   3. Clear / fill background
+ *   4. Draw icon (or synced favicon) — failures must not block text
+ *   5. Draw title / subtitle (+ optional text shadow)
+ *
+ * Paint: after live Outer/Inner, optional decoration PNGs and punch masks
+ * from paintSession are composited (see paintDecorations.ts).
+ *
+ * Keep heavy logic here so LogoEditor stays “UI + when to redraw”.
+ */
 import type { ShapeType, LogoConfig, FaviconConfig, FaviconOuterShape, IconConfig } from '../types'
 import { renderLucideToSvg, applySvgColor, drawSvgOnCanvas, loadCachedImage, svgPaintFromCssColor } from './iconUtils'
 import { imageZeroAlphaPunchMask, resolveImageDataUrl } from './imageRecolor'

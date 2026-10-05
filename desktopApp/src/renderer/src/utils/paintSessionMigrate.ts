@@ -1,12 +1,14 @@
 /**
- * Lightweight paint-session normalization for workspace load / import.
+ * paintSessionMigrate — normalize Paint “session” objects from disk.
  *
- * Kept free of paintSettingsSync / renderer / paintHelpers so App boot
- * (useVersions) cannot hit a circular-import black screen.
+ * A paint session is the saved state from IconPaintEditor: PNG layers for
+ * Outer/Inner overlays, vector objects, punch masks, bake flags, etc.
  *
- * ADDITIVE ONLY. Never clear save-time flags such as contentBakedInDecorations
- * or linkedTextInDecorations — clearing them re-enables live destination-out
- * punch on the main canvas and erases Outer + Inner together.
+ * Why a separate tiny file? useVersions imports this at boot. If we imported
+ * paintDecorations / renderer here, circular imports once black-screened the web app.
+ *
+ * Rule: ADDITIVE only. Fill missing fields. Never wipe contentBakedInDecorations
+ * or similar — that re-enabled punch and erased Outer+Inner on old templates.
  */
 import type { PaintSession, PaintVector } from '../types'
 

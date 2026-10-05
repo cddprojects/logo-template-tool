@@ -1,3 +1,22 @@
+/**
+ * LogoEditor — edit one version’s logo variants (Dark / Light / …).
+ *
+ * Layout of this file (search for these banners):
+ *   • State + safeConfig     — which variant is active; fill missing icon fields
+ *   • Sync with favicon      — when iconLinked + matching label, mirror favicon
+ *   • Preview canvas effect  — renderLogo offscreen → presentPreviewCanvas
+ *   • Paint open/save        — bake Outer/Inner into IconPaintEditor
+ *   • Variant list UI        — add/remove/reorder Dark/Light chips
+ *   • Style panel            — text, icon type, colors, layout controls
+ *   • resolveLogoEffectiveIcon / faviconContentToIconConfig (bottom exports)
+ *
+ * Data in:  variants (logos), faviconVariants (for sync), versionId
+ * Data out: onChange(newLogoVariants) → App → useVersions
+ *
+ * Preview tip: logos are drawn at full pixel size (scale 4). PreviewStage
+ * CSS-scales them to fit. After each buffer swap we call fitNow() so one
+ * frame never shows the huge unscaled bitmap.
+ */
 import React, { useRef, useEffect, useCallback, useState, useMemo, Suspense } from 'react'
 import { Download, FileImage, FileCode2, RefreshCw, CheckCircle2, Plus, X, Pencil, Upload, Link, Unlink, Eye, ClipboardCopy, ClipboardPaste, GripVertical, Paintbrush, ArrowDownToLine } from 'lucide-react'
 import type { LogoConfig, LogoLayout, AssetVariant, FaviconConfig, FaviconContent, IconConfig, ShapeType, PaintSaveResult, PaintSession, PaintVector, PaintLayerId, OuterShapeCategory, PaintSaveTargets, OutsideContentSettings, ContentType } from '../types'
@@ -73,6 +92,7 @@ import { PreviewStage, type PreviewStageHandle } from './PreviewStage'
 import { ApplyToAllBar, type ApplyToAllFlash } from './ApplyToAllBar'
 import { StylePanelResizeHandle } from './StylePanelResizeHandle'
 import { useStylePanelResize } from '../hooks/useStylePanelResize'
+import { useNarrowViewport } from '../hooks/useNarrowViewport'
 import { lazyWithRetry } from '../utils/lazyWithRetry'
 
 /** Paint editor is large — load only when Edit opens. */
@@ -150,6 +170,7 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
   const [previewDataUrl, setPreviewDataUrl] = useState<string | null>(null)
   const [previewDims, setPreviewDims] = useState<{ w: number; h: number } | null>(null)
   const { panelWidth, panelRef, onResizeStart } = useStylePanelResize()
+  const narrow = useNarrowViewport()
 
   // Keep name-style in sync with favicon editor (shared localStorage preference).
   useEffect(() => {
@@ -1242,10 +1263,10 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
         )}
       </div>
 
-      {/* Editor body */}
-      <div className="flex flex-1 min-h-0 overflow-hidden">
+      {/* Editor body — side by side on desktop; canvas on top and settings below on a phone. */}
+      <div className={`flex flex-1 min-h-0 overflow-hidden ${narrow ? 'flex-col' : ''}`}>
         {/* Canvas area */}
-        <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+        <div className="flex flex-col flex-1 min-w-0 min-h-0 overflow-hidden">
           <PreviewStage
             ref={previewStageRef}
             className="flex-1"
@@ -1344,13 +1365,17 @@ export function LogoEditor({ versionId, versionName, variants, faviconVariants, 
           )}
         </div>
 
-        <StylePanelResizeHandle panelWidth={panelWidth} onMouseDown={onResizeStart} />
+        {!narrow && <StylePanelResizeHandle panelWidth={panelWidth} onMouseDown={onResizeStart} />}
 
         {/* Style panel */}
         <div
           ref={panelRef}
-          className="shrink-0 min-h-0 bg-surface border-l border-border overflow-y-auto overflow-x-hidden"
-          style={{ width: panelWidth }}
+          className={
+            narrow
+              ? 'shrink-0 w-full bg-surface border-t border-border overflow-y-auto overflow-x-hidden'
+              : 'shrink-0 min-h-0 bg-surface border-l border-border overflow-y-auto overflow-x-hidden'
+          }
+          style={narrow ? { height: '30dvh' } : { width: panelWidth }}
         >
           <Section title="Text">
             <TextRow label="Site title" value={safeConfig.text} placeholder="MyApp" onChange={(v) => setTitleText(v)} />

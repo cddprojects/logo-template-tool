@@ -1,6 +1,16 @@
 /**
  * Browser stand-in for Electron's preload `window.api`.
- * Installed before the shared renderer App mounts.
+ *
+ * Desktop: preload wires each method to ipcRenderer.invoke(...).
+ * Web:     this file implements the SAME method names with fetch/download.
+ *
+ * installWebApi() assigns window.api and window.__WEB__ = true before App mounts.
+ *
+ * Notable mappings:
+ *   loadVersions / saveVersions  → server workspace GET/PUT
+ *   exportFile / exportGroup     → browser download / zip
+ *   updateAllTemplates           → create/update own library + migrate orphans
+ *   openTemplatesFolder          → open TemplatesPanel (custom event)
  */
 import {
   dataUrlToUint8Array,

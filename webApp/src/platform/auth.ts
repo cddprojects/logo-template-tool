@@ -1,3 +1,10 @@
+/**
+ * auth.ts (web) — login session + template library HTTP helpers.
+ *
+ * Talks to /api/auth/* and /api/templates/* on the Node server.
+ * WebShell uses fetchMe / subscribeAuth; TemplatesPanel uses list/get/create/…
+ * Cookie/session details stay inside `api()` helper below.
+ */
 export type UserRole = 'member' | 'admin'
 
 export interface AuthUser {

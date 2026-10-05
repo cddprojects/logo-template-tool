@@ -1,5 +1,18 @@
+/**
+ * Preload script — the narrow bridge from Electron main → renderer.
+ *
+ * Runs in a privileged sandbox before the React page loads. It uses
+ * contextBridge to put a plain object on window.api. The renderer can call
+ * those methods; it cannot reach Node/fs directly (security).
+ *
+ * Each function is basically: ipcRenderer.invoke('channel-name', ...args)
+ * and the matching handler lives in src/main/index.ts.
+ *
+ * Web does not use this file — webApp/src/platform/api.ts fakes the same API.
+ */
 import { contextBridge, ipcRenderer } from 'electron'
 
+/** Methods the React UI is allowed to call. Keep in sync with web platform/api.ts. */
 const api = {
   exportFile: (
     data: string,

@@ -1,3 +1,13 @@
+/**
+ * Sidebar — left column: list of versions + template tools.
+ *
+ * Each row is one Version (name, logos, favicons). Clicking selects it in App.
+ * Also: search/sort, bulk actions, save/update .igtemplate, open templates folder,
+ * drag-reorder (manual sort only).
+ *
+ * “Update all templates” (refresh icon) calls onUpgradeVersions then
+ * window.api.updateAllTemplates — remigrates open versions AND library files.
+ */
 import React, { useMemo, useRef, useState } from 'react'
 import {
   Plus,
