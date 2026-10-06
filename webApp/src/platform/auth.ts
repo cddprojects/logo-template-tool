@@ -103,10 +103,14 @@ async function api<T>(
       }
     }
     if (!res.ok) {
-      const err =
+      const raw =
         body && typeof body === 'object' && body !== null && 'error' in body
           ? String((body as { error: unknown }).error)
           : `HTTP ${res.status}`
+      const err =
+        res.status === 413 || /payload too large/i.test(raw)
+          ? 'Save is too large for the server. Try again — undo snapshots are no longer uploaded.'
+          : raw.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 300)
       return { ok: false, error: err, status: res.status }
     }
     return { ok: true, data: body as T }
@@ -279,8 +283,20 @@ export async function saveWorkspace(
     history?: unknown
     allowEmpty?: boolean
   } = { versions: slimVersions }
-  // Omit history when undefined so the server keeps the previously stored undo stack.
-  if (history !== undefined) body.history = history
+  // The server already drops undo snaps. Never upload them: each snap is a full
+  // copy of every logo/favicon, and Cloudflare rejects that body (413).
+  if (history !== undefined && history !== null && typeof history === 'object') {
+    const h = history as { currentLabel?: unknown; currentTime?: unknown }
+    body.history = {
+      v: 1,
+      past: [],
+      future: [],
+      currentLabel: typeof h.currentLabel === 'string' ? h.currentLabel : 'Opened project',
+      currentTime: Number(h.currentTime) || Date.now()
+    }
+  } else if (history !== undefined) {
+    body.history = history
+  }
   // Explicit empty workspace (e.g. delete last version) — server rejects [] otherwise.
   if (slimVersions.length === 0 || opts?.allowEmpty) body.allowEmpty = true
   const result = await api<{ ok: boolean }>(

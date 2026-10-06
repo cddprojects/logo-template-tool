@@ -410,10 +410,12 @@ export function useVersions(options?: {
 
   const serializeHistory = useCallback((): PersistedUndoHistory => {
     const maxPersist = isWebRuntime() ? MAX_PERSISTED_HISTORY_WEB : MAX_HISTORY
+    // slice(-0) is slice(0) — it returns the whole array. A limit of 0 must
+    // send nothing, or every paint PNG in the undo stack is uploaded at once.
     return {
       v: 1,
-      past: pastRef.current.slice(-maxPersist),
-      future: futureRef.current.slice(0, maxPersist),
+      past: maxPersist > 0 ? pastRef.current.slice(-maxPersist) : [],
+      future: maxPersist > 0 ? futureRef.current.slice(0, maxPersist) : [],
       currentLabel: curLabelRef.current,
       currentTime: curTimeRef.current
     }
