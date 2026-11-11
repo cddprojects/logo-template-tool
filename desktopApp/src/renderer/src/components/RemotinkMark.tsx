@@ -1,0 +1,37 @@
+import React from 'react'
+
+/** Black drawing pen on the indigo→violet tile (same mark as the favicon). */
+export function RemotinkMark({
+  size = 24,
+  className,
+  title = 'Remotink'
+}: {
+  size?: number
+  className?: string
+  title?: string
+}): JSX.Element {
+  const gid = React.useId().replace(/:/g, '')
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 32 32"
+      width={size}
+      height={size}
+      className={className}
+      role="img"
+      aria-label={title}
+    >
+      <defs>
+        <linearGradient id={gid} x1="0" y1="0" x2="32" y2="32" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#6366f1" />
+          <stop offset="1" stopColor="#8b5cf6" />
+        </linearGradient>
+      </defs>
+      <rect width="32" height="32" rx="8" fill={`url(#${gid})`} />
+      <path
+        fill="#000000"
+        d="M7 22.25V25h2.75L20.81 13.94l-2.75-2.75L7 22.25zm12.71-10.21a.73.73 0 0 0 0-1.03l-1.72-1.72a.73.73 0 0 0-1.03 0l-1.34 1.34 2.75 2.75 1.34-1.34z"
+      />
+    </svg>
+  )
+}

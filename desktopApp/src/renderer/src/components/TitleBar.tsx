@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { Minus, X, ImageIcon, HelpCircle } from './Icons'
+import { Minus, X, HelpCircle } from './Icons'
 import { HelpGuideModal } from './HelpGuideModal'
+import { RemotinkMark } from './RemotinkMark'
 
 type WebAuthUser = { email: string; role: 'member' | 'admin' }
 
@@ -78,9 +79,7 @@ export function TitleBar(): JSX.Element {
       >
         {/* Logo — no-drag so clicks still register */}
         <div style={isWeb ? undefined : NO_DRAG} className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-md bg-accent flex items-center justify-center">
-            <ImageIcon size={13} className="text-white" />
-          </div>
+          <RemotinkMark size={24} className="rounded-md shrink-0" />
           <span className="text-sm font-semibold text-text">Remotink</span>
           <button
             type="button"

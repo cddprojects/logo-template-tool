@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { RemotinkMark } from '@renderer/components/RemotinkMark'
 import { login } from '../platform/auth'
 
 interface LoginScreenProps {
@@ -53,12 +54,8 @@ export function LoginScreen({ onLoggedIn }: LoginScreenProps): JSX.Element {
         className="relative z-10 w-full max-w-sm px-6"
       >
         <div className="mb-8 text-center">
-          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-accent shadow-lg shadow-accent/30">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
-              <rect x="3" y="3" width="18" height="18" rx="2" />
-              <circle cx="8.5" cy="8.5" r="1.5" fill="white" stroke="none" />
-              <path d="M21 15l-5-5L5 21" />
-            </svg>
+          <div className="mx-auto mb-4 w-12 h-12 rounded-xl shadow-lg shadow-accent/30 overflow-hidden">
+            <RemotinkMark size={48} />
           </div>
           <h1 className="text-2xl font-semibold tracking-tight text-text">Remotink</h1>
           <p className="mt-1.5 text-sm text-muted">Sign in to your template library</p>
