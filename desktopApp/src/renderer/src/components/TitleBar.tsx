@@ -81,7 +81,7 @@ export function TitleBar(): JSX.Element {
           <div className="w-6 h-6 rounded-md bg-accent flex items-center justify-center">
             <ImageIcon size={13} className="text-white" />
           </div>
-          <span className="text-sm font-semibold text-text">Image Generator</span>
+          <span className="text-sm font-semibold text-text">Remotink</span>
           <button
             type="button"
             onClick={() => setShowHelp(true)}

@@ -3,7 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Image Generator</title>
+    <title>Remotink</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="shortcut icon" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
     <meta
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com https://generativelanguage.googleapis.com https://image.pollinations.ai https://api.iconify.design https://*.iconify.design"
@@ -20,10 +23,10 @@
       #splash.fade-out { opacity: 0; pointer-events: none; }
       .splash-logo {
         width: 56px; height: 56px; border-radius: 16px;
-        background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
-        display: flex; align-items: center; justify-content: center;
-        font-size: 24px; font-weight: 800; color: white; letter-spacing: -1px;
+        overflow: hidden;
+        box-shadow: 0 8px 24px rgba(99, 102, 241, 0.35);
       }
+      .splash-logo img { width: 100%; height: 100%; display: block; }
       .splash-title { font-size: 15px; font-weight: 600; color: #e2e2e8; }
       .splash-sub { font-size: 12px; color: #6b6b80; }
       .splash-bar {
@@ -38,8 +41,8 @@
   </head>
   <body>
     <div id="splash">
-      <div class="splash-logo">IG</div>
-      <div class="splash-title">Image Generator</div>
+      <div class="splash-logo"><img src="/favicon.svg" alt="" width="56" height="56" /></div>
+      <div class="splash-title">Remotink</div>
       <div class="splash-bar"><div class="splash-fill"></div></div>
       <div class="splash-sub">Starting up…</div>
     </div>
