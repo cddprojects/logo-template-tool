@@ -2,7 +2,7 @@
 # Without this volume, users and templates are lost on every container replace.
 #
 # Coolify UI: Application → Persistent Storage → Add
-#   Name:     kitteasy-data   (any name)
+#   Name:     remotink-data   (any name)
 #   Mount:    /data
 #
 # IMPORTANT: Do not rely on Dockerfile VOLUME for /data — anonymous volumes are
@@ -35,7 +35,7 @@ services:
     environment:
       DATA_DIR: /data
       JWT_SECRET: ${JWT_SECRET:-change-me-to-a-long-random-secret}
-      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@kitteasy.com}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@remotink.com}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-incorrect}
       ADMIN_PASSWORD_RESET: ${ADMIN_PASSWORD_RESET:-false}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
@@ -45,7 +45,7 @@ services:
       BACKUP_RETAIN_WEEKS: ${BACKUP_RETAIN_WEEKS:-12}
       NODE_ENV: production
     volumes:
-      - kitteasy-data:/data
+      - remotink-data:/data
 
 volumes:
-  kitteasy-data:
+  remotink-data:

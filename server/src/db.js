@@ -167,7 +167,7 @@ export function openDb(dataDir) {
 }
 
 function seedAdmin(db, dataDir) {
-  const email = (process.env.ADMIN_EMAIL || 'admin@kitteasy.com').trim().toLowerCase()
+  const email = (process.env.ADMIN_EMAIL || 'admin@remotink.com').trim().toLowerCase()
   const forceReset = process.env.ADMIN_PASSWORD_RESET === 'true'
   const resetMarkerPath = path.join(dataDir, RESET_MARKER)
 

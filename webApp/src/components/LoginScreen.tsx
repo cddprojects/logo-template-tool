@@ -60,7 +60,7 @@ export function LoginScreen({ onLoggedIn }: LoginScreenProps): JSX.Element {
               <path d="M21 15l-5-5L5 21" />
             </svg>
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight text-text">Kitteasy</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-text">Remotink</h1>
           <p className="mt-1.5 text-sm text-muted">Sign in to your template library</p>
         </div>
 
